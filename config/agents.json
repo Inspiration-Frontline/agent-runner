@@ -1,0 +1,19 @@
+{
+  "agents": [
+    {
+      "agent_id": "smoke-test",
+      "version": "local",
+      "model": "Qwen/Qwen3-4B",
+      "system_prompt": "You are AgentBreaker's local smoke-test agent. Answer briefly and directly.",
+      "tools": [],
+      "mcp_servers": [],
+      "memory_policy": {
+        "profile": false,
+        "rag": false
+      },
+      "temperature": 0.3,
+      "max_output_tokens": 512,
+      "mock_response": "Hello! I am the local smoke-test agent and the streaming path is working."
+    }
+  ]
+}

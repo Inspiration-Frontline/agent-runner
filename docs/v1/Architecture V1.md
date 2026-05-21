@@ -541,12 +541,12 @@ agent_runner/
 │   ├── business/
 │   └── mcp/
 
-├── mcp/
-│   ├── manager.py
-│   ├── pool.py
+├── mcps/
+│   ├── mcp_manager.py
+│   ├── mcp_connection_pool.py
 │   └── lifecycle.py
 
-├── llm/
+├── gateway/
 │   └── litellm_client.py
 
 ├── sdk/

@@ -1,0 +1,14 @@
+model_list:
+  - model_name: Qwen/Qwen3-4B
+    litellm_params:
+      model: openai/Qwen/Qwen3-4B
+      api_base: os.environ/MODEL_SCOPE_BASE_URL
+      api_key: os.environ/MODEL_SCOPE_API_KEY
+      timeout: 120
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  request_timeout: 120
+  set_verbose: false

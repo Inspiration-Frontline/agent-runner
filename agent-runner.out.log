@@ -1,0 +1,6 @@
+INFO:     127.0.0.1:5560 - "GET /health HTTP/1.1" 200 OK
+Created agent: smoke-test vlocal
+Calling LiteLLM stream with model: Qwen/Qwen3-4B
+INFO:     127.0.0.1:5562 - "POST /v1/agent/chat/stream HTTP/1.1" 200 OK
+HTTP Request: POST http://localhost:4000/chat/completions "HTTP/1.1 401 Unauthorized"
+Error during streaming for agent smoke-test, falling back to mock response: Error code: 401 - {'error': {'message': 'litellm.AuthenticationError: AuthenticationError: OpenAIException - Authentication failed, please make sure that a valid ModelScope token is supplied.. Received Model Group=Qwen/Qwen3-4B\nAvailable Model Group Fallbacks=None', 'type': None, 'param': None, 'code': '401'}}
