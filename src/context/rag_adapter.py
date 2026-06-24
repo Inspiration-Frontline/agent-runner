@@ -9,7 +9,21 @@ logger = logging.getLogger(__name__)
 
 
 class RAGAdapter:
+    """
+    Adapter for RAG (Retrieval-Augmented Generation) service interactions.
+
+    Provides methods to retrieve relevant knowledge chunks from the
+    external knowledge service based on query context.
+
+    Attributes:
+        base_url: Base URL for the knowledge service.
+        client: Async HTTP client for service communication.
+    """
+
     def __init__(self):
+        """
+        Initialize the RAG adapter with service URL and HTTP client.
+        """
         self.base_url = settings.knowledge_service_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
@@ -20,6 +34,18 @@ class RAGAdapter:
         user_id: str | None = None,
         top_k: int = 5,
     ) -> list[dict[str, Any]]:
+        """
+        Retrieve relevant RAG chunks from the knowledge service.
+
+        Args:
+            query: The query text to find relevant chunks for.
+            agent_id: The agent ID to scope the retrieval.
+            user_id: Optional user ID for personalized retrieval.
+            top_k: Number of top chunks to retrieve.
+
+        Returns:
+            list[dict[str, Any]]: List of relevant RAG chunks, or empty list if retrieval fails.
+        """
         try:
             response = await self.client.post(
                 f"{self.base_url}/api/v1/rag/retrieve",
@@ -40,4 +66,7 @@ class RAGAdapter:
             return []
 
     async def close(self):
+        """
+        Close the HTTP client connection.
+        """
         await self.client.aclose()

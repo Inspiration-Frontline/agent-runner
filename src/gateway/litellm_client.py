@@ -9,11 +9,30 @@ logger = logging.getLogger(__name__)
 
 
 class LiteLLMClient:
+    """
+    Client for LiteLLM model gateway interactions.
+
+    Provides methods to interact with the LiteLLM proxy server for
+    chat completions and streaming responses, supporting tool calls.
+
+    Attributes:
+        base_url: Base URL for the LiteLLM proxy server.
+        api_key: API key for LiteLLM authentication.
+        client: Async OpenAI client configured for LiteLLM.
+    """
+
     def __init__(
         self,
         base_url: str | None = None,
         api_key: str | None = None,
     ):
+        """
+        Initialize the LiteLLM client.
+
+        Args:
+            base_url: Optional override for LiteLLM base URL.
+            api_key: Optional override for LiteLLM API key.
+        """
         self.base_url = base_url or settings.lite_llm_base_url
         self.api_key = api_key or settings.lite_llm_api_key or "sk-agent-breaker-local"
         self.client = AsyncOpenAI(
@@ -31,6 +50,21 @@ class LiteLLMClient:
         max_tokens: int = 4096,
         **kwargs,
     ) -> Any:
+        """
+        Execute a non-streaming chat completion request.
+
+        Args:
+            model: Model identifier to use for completion.
+            messages: List of conversation messages.
+            tools: Optional list of tool specifications.
+            tool_choice: Optional tool choice strategy.
+            temperature: Sampling temperature parameter.
+            max_tokens: Maximum tokens in the response.
+            **kwargs: Additional completion parameters.
+
+        Returns:
+            Any: The completion response from LiteLLM.
+        """
         logger.info(f"Calling LiteLLM with model: {model}")
 
         completion_kwargs: dict[str, Any] = {
@@ -59,6 +93,21 @@ class LiteLLMClient:
         max_tokens: int = 4096,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        """
+        Execute a streaming chat completion request.
+
+        Args:
+            model: Model identifier to use for completion.
+            messages: List of conversation messages.
+            tools: Optional list of tool specifications.
+            tool_choice: Optional tool choice strategy.
+            temperature: Sampling temperature parameter.
+            max_tokens: Maximum tokens in the response.
+            **kwargs: Additional completion parameters.
+
+        Yields:
+            dict[str, Any]: Stream chunks parsed into event dictionaries.
+        """
         logger.info(f"Calling LiteLLM stream with model: {model}")
 
         completion_kwargs: dict[str, Any] = {
@@ -81,6 +130,15 @@ class LiteLLMClient:
             yield self._parse_chunk(chunk)
 
     def _parse_chunk(self, chunk: Any) -> dict[str, Any]:
+        """
+        Parse a stream chunk into an event dictionary.
+
+        Args:
+            chunk: Raw chunk from the streaming response.
+
+        Returns:
+            dict[str, Any]: Parsed event with type and content/tool data.
+        """
         if not chunk.choices:
             return {"type": "unknown", "content": ""}
 
@@ -103,4 +161,7 @@ class LiteLLMClient:
         return {"type": "unknown", "content": ""}
 
     async def close(self):
+        """
+        Close the OpenAI client connection.
+        """
         await self.client.close()

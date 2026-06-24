@@ -6,6 +6,13 @@ import structlog
 
 
 def setup_logging(level: int = logging.INFO, json_format: bool = False):
+    """
+    Configure structured logging for the application.
+
+    Args:
+        level: Logging level (default: INFO).
+        json_format: Whether to use JSON format (default: False, uses console format).
+    """
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
@@ -35,9 +42,31 @@ def setup_logging(level: int = logging.INFO, json_format: bool = False):
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
+    """
+    Get a structured logger instance.
+
+    Args:
+        name: Optional name for the logger.
+
+    Returns:
+        structlog.stdlib.BoundLogger: A bound logger instance.
+    """
     return structlog.get_logger(name)
 
 
 class RequestContextFilter(logging.Filter):
+    """
+    Logging filter for adding request context to log records.
+    """
+
     def filter(self, record: logging.LogRecord) -> bool:
+        """
+        Filter and enhance log records with request context.
+
+        Args:
+            record: The log record to filter.
+
+        Returns:
+            bool: True to allow the record to be logged.
+        """
         return True

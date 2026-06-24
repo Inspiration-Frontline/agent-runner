@@ -10,7 +10,23 @@ logger = logging.getLogger(__name__)
 
 
 class ToolExecutor:
+    """
+    Executor for running tool implementations.
+
+    Handles tool execution with support for both async and sync handlers,
+    cancellation tokens, and batch execution of multiple tool calls.
+
+    Attributes:
+        registry: Tool registry containing available tools.
+    """
+
     def __init__(self, registry: ToolRegistry | None = None):
+        """
+        Initialize the tool executor.
+
+        Args:
+            registry: Optional tool registry (default: creates new registry).
+        """
         self.registry = registry or ToolRegistry()
 
     async def execute(
@@ -19,6 +35,21 @@ class ToolExecutor:
         arguments: dict[str, Any],
         cancellation_token: CancellationToken | None = None,
     ) -> Any:
+        """
+        Execute a single tool with given arguments.
+
+        Args:
+            tool_id: ID of the tool to execute.
+            arguments: Arguments to pass to the tool.
+            cancellation_token: Optional token for execution cancellation.
+
+        Returns:
+            Any: The result of tool execution.
+
+        Raises:
+            ValueError: If tool is not found.
+            asyncio.CancelledError: If execution is cancelled.
+        """
         tool = self.registry.get(tool_id)
         if not tool:
             raise ValueError(f"Tool not found: {tool_id}")
@@ -51,6 +82,16 @@ class ToolExecutor:
             raise
 
     async def _execute_tool(self, tool: ToolDefinition, arguments: dict[str, Any]) -> Any:
+        """
+        Execute a tool without a handler (placeholder implementation).
+
+        Args:
+            tool: The tool definition to execute.
+            arguments: Arguments to pass to the tool.
+
+        Returns:
+            Any: Placeholder result indicating tool is not implemented.
+        """
         return {"status": "not_implemented", "tool": tool.tool_id}
 
     async def execute_batch(
@@ -58,6 +99,16 @@ class ToolExecutor:
         tool_calls: list[dict[str, Any]],
         cancellation_token: CancellationToken | None = None,
     ) -> list[dict[str, Any]]:
+        """
+        Execute multiple tool calls in batch.
+
+        Args:
+            tool_calls: List of tool call specifications.
+            cancellation_token: Optional token for batch cancellation.
+
+        Returns:
+            list[dict[str, Any]]: List of execution results with status.
+        """
         results = []
         for call in tool_calls:
             if cancellation_token and cancellation_token.is_cancelled():
