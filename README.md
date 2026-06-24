@@ -25,8 +25,14 @@ The local smoke-test agent uses `Qwen/Qwen3-4B` through LiteLLM. It also has a `
 Run from `agent-runner/`:
 
 ```powershell
+# Install dependencies using uv (recommended)
+uv sync --no-install-project
+
+# Alternative: Install using pip
 python -m pip install -U .
 ```
+
+**Note:** The `uv sync --no-install-project` command is the recommended way to install dependencies. It ensures all dependencies are installed without installing the project itself, which is useful for development environments where you want to manage the project installation separately.
 
 ## Start LiteLLM
 

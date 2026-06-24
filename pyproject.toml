@@ -17,6 +17,7 @@ dependencies = [
     "opentelemetry-api>=1.42.0",
     "opentelemetry-sdk>=1.42.0",
     "prometheus-client>=0.21.1",
+    "redis>=5.2.1",
 ]
 
 [project.optional-dependencies]
@@ -26,28 +27,6 @@ dev = [
     "pytest-cov==7.1.0",
     "ruff==0.15.13",
     "mypy==2.1.0",
-]
-
-[build-system]
-requires = ["setuptools>=80.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-py-modules = ["config", "main"]
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = [
-    "agents*",
-    "api*",
-    "context*",
-    "gateway*",
-    "mcps*",
-    "observability*",
-    "runtime*",
-    "sdk*",
-    "tools*",
 ]
 
 [tool.ruff]
