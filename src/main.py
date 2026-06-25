@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.debug_routes import router as debug_router
 from api.routes import router as agent_router
 from config import initialize_settings, settings
 from nacos_config import close_nacos_loader
@@ -54,6 +55,11 @@ app.add_middleware(
 app.middleware("http")(metrics_middleware)
 
 app.include_router(agent_router, prefix="/v1/agent")
+
+# Conditionally register debug endpoints based on environment
+if settings.debug_endpoints_enabled or settings.environment in ["local", "dev"]:
+    app.include_router(debug_router, prefix="/v1/agent")
+    # Note: debug_router endpoints already have /debug prefix, so full path is /v1/agent/debug/*
 
 
 @app.get("/health")

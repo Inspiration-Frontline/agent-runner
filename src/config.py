@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     nacos_username: str = Field(default="nacos", validation_alias="NACOS_USERNAME")
     nacos_password: str = Field(default="nacos", validation_alias="NACOS_PASSWORD")
 
+    # Environment and debug settings
+    environment: str = Field(default="local", validation_alias="ENVIRONMENT")
+    debug_endpoints_enabled: bool = Field(default=True, validation_alias="DEBUG_ENDPOINTS_ENABLED")
+
 
 # Base settings loaded from local environment files (before Nacos merge)
 _base_settings = Settings()
@@ -157,6 +161,7 @@ class ConfigurationManager:
             "context": {"max_context_tokens": "max_context_tokens", "max_output_tokens": "max_output_tokens"},
             "redis": {"host": "redis_host", "port": "redis_port", "password": "redis_password", "db": "redis_db"},
             "cache": {"agent_config_ttl_seconds": "agent_config_cache_ttl_seconds"},
+            "debug": {"endpoints_enabled": "debug_endpoints_enabled"},
         }
 
         updates: dict[str, any] = {}
@@ -167,7 +172,7 @@ class ConfigurationManager:
                     if nacos_key in section_config:
                         updates[field_name] = section_config[nacos_key]
 
-        for key in ["app_name", "debug"]:
+        for key in ["app_name", "debug", "environment"]:
             if key in nacos_config:
                 updates[key] = nacos_config[key]
 
