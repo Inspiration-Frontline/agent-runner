@@ -4,7 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router as agent_router
-from config import settings
+from config import initialize_settings, settings
+from nacos_config import close_nacos_loader
 from observability.logging import setup_logging
 from observability.metrics import metrics_middleware
 
@@ -14,8 +15,9 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan context manager.
 
-    Handles startup and shutdown events for the FastAPI application.
-    Currently only sets up logging on startup.
+    Handles startup and shutdown events for the FastAPI application:
+    - On startup: Initialize logging and merge Nacos configuration with local config
+    - On shutdown: Close Nacos client and cleanup resources
 
     Args:
         app: The FastAPI application instance.
@@ -24,7 +26,14 @@ async def lifespan(app: FastAPI):
         Control back to the application for normal operation.
     """
     setup_logging()
+
+    # Initialize configuration from Nacos (merges with local config)
+    await initialize_settings()
+
     yield
+
+    # Cleanup Nacos resources on shutdown
+    await close_nacos_loader()
 
 
 app = FastAPI(

@@ -18,6 +18,8 @@ dependencies = [
     "opentelemetry-sdk>=1.42.0",
     "prometheus-client>=0.21.1",
     "redis>=5.2.1",
+    "nacos-sdk-python>=3.2.0",
+    "pyyaml>=6.0.2",
 ]
 
 [project.optional-dependencies]
