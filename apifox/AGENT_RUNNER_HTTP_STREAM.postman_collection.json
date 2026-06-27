@@ -1,0 +1,175 @@
+{
+  "info": {
+    "name": "AgentBreaker Agent Runner HTTP Stream Verification",
+    "_postman_id": "7e81c026-49f1-4a4d-a6b8-agent-runner-v1",
+    "description": "Import into API Fox directly. Requests use localhost absolute URLs and exercise the real Agent Runner -> OpenAI Agents SDK -> LiteLLM Python integration -> external LiteLLM proxy path. This collection does not use mock responses.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "pm.test('Agent Runner is healthy', function () { pm.expect(data.status).to.eql('healthy'); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/health"
+      }
+    },
+    {
+      "name": "Debug Config",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "pm.test('LiteLLM proxy URL is configured', function () { pm.expect(data.lite_llm_base_url).to.eql('http://localhost:4000'); });",
+              "pm.test('Local startup does not require Nacos', function () { pm.expect(data.nacos_enabled).to.eql(false); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/v1/agent/debug/config",
+        "description": "Local/dev debug endpoint. Confirms PyCharm direct startup loaded config/agent-runner.env."
+      }
+    },
+    {
+      "name": "Chat Stream - smoke-test agent",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const text = pm.response.text();",
+              "const sseEvents = text.split(/\\r?\\n/).map(function (line) { return line.trim(); }).filter(function (line) { return line.indexOf('data:') === 0; }).map(function (line) { return line.replace(/^data:\\s*/, ''); }).filter(Boolean).map(function (payload) { try { return JSON.parse(payload); } catch (error) { return { type: 'parse_error', error_message: error.message, raw: payload }; } });",
+              "const mergedContent = sseEvents.filter(function (event) { return event.type === 'token_delta'; }).map(function (event) { return event.content || ''; }).join('');",
+              "const runtimeError = sseEvents.find(function (event) { return event.type === 'error'; });",
+              "const usageEvent = sseEvents.find(function (event) { return event.type === 'usage'; });",
+              "const usage = usageEvent ? { prompt_tokens: usageEvent.prompt_tokens, completion_tokens: usageEvent.completion_tokens, total_tokens: usageEvent.total_tokens } : { prompt_tokens: null, completion_tokens: null, total_tokens: null };",
+              "let requestBody = {};",
+              "try { requestBody = JSON.parse(pm.request.body.raw || '{}'); } catch (error) { requestBody = {}; }",
+              "const openAIResponse = {",
+              "  id: 'chatcmpl-agent-runner-visualized',",
+              "  object: 'chat.completion',",
+              "  created: Math.floor(Date.now() / 1000),",
+              "  model: 'agent-runner/' + (requestBody.agent_id || 'unknown'),",
+              "  choices: [{",
+              "    index: 0,",
+              "    message: { role: 'assistant', content: mergedContent },",
+              "    finish_reason: runtimeError ? 'error' : 'stop'",
+              "  }],",
+              "  usage: usage,",
+              "  agent_runner: {",
+              "    agent_id: requestBody.agent_id || null,",
+              "    version: requestBody.version || null,",
+              "    conversation_id: requestBody.conversation_id || null,",
+              "    user_id: requestBody.user_id || null,",
+              "    stream_event_count: sseEvents.length,",
+              "    stream_types: sseEvents.map(function (event) { return event.type; })",
+              "  }",
+              "};",
+              "if (runtimeError) { openAIResponse.error = { message: runtimeError.error_message || runtimeError.content || 'Unknown stream error', type: 'agent_runner_stream_error' }; }",
+              "const visualizerTemplate = [",
+              "  '<style>',",
+              "  'body { font-family: Inter, Segoe UI, Arial, sans-serif; margin: 0; color: #172033; background: #f6f8fb; }',",
+              "  '.wrap { padding: 16px; }',",
+              "  '.summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }',",
+              "  '.pill { border: 1px solid #d8dee9; border-radius: 6px; background: #ffffff; padding: 8px 10px; font-size: 12px; }',",
+              "  '.content { margin-bottom: 12px; padding: 12px; background: #ffffff; border: 1px solid #d8dee9; border-radius: 6px; white-space: pre-wrap; }',",
+              "  'pre { margin: 0; padding: 14px; background: #101828; color: #e6edf7; border-radius: 6px; overflow: auto; line-height: 1.45; font-size: 12px; }',",
+              "  '</style>',",
+              "  '<div class=\"wrap\">',",
+              "  '  <div class=\"summary\">',",
+              "  '    <div class=\"pill\">Status: {{status}}</div>',",
+              "  '    <div class=\"pill\">Events: {{eventCount}}</div>',",
+              "  '    <div class=\"pill\">Model: {{model}}</div>',",
+              "  '  </div>',",
+              "  '  <div class=\"content\">{{content}}</div>',",
+              "  '  <pre>{{json}}</pre>',",
+              "  '</div>'",
+              "].join('');",
+              "pm.visualizer.set(visualizerTemplate, { json: JSON.stringify(openAIResponse, null, 2), content: mergedContent || '(empty)', status: runtimeError ? 'stream error' : 'merged response', eventCount: sseEvents.length, model: openAIResponse.model });",
+              "pm.test('SSE response is returned', function () { pm.expect(text).to.include('data:'); });",
+              "pm.test('Done event is present', function () { pm.expect(text).to.include('\"type\":\"done\"'); });",
+              "const hasRuntimeError = text.includes('\"type\":\"error\"');",
+              "const hasTokenDelta = text.includes('\"type\":\"token_delta\"');",
+              "pm.test('Stream contains either real model tokens or a real upstream error', function () { pm.expect(hasTokenDelta || hasRuntimeError).to.eql(true); });",
+              "if (hasRuntimeError) { console.warn('The SSE path is working, but the upstream model returned an error. Check ModelScope token/model permission in config/litellm.env.'); }"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "text/event-stream"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"agent_id\": \"smoke-test\",\n  \"version\": \"local\",\n  \"user_id\": \"local-user\",\n  \"message\": \"Say hello in one short sentence.\"\n}"
+        },
+        "url": "http://127.0.0.1:8000/v1/agent/chat/stream",
+        "description": "Requires Agent Runner on port 8000 and the external LiteLLM proxy on port 4000. This request exercises the real streaming path and does not use mock responses. If the current ModelScope token cannot call chat completions, the expected transport result is still HTTP 200 SSE with an error event followed by done; after replacing the token with one that has inference permission, expect token_delta events followed by done."
+      },
+      "response": [
+        {
+          "name": "SSE stream",
+          "originalRequest": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"agent_id\": \"smoke-test\",\n  \"version\": \"local\",\n  \"user_id\": \"local-user\",\n  \"message\": \"Say hello in one short sentence.\"\n}"
+            },
+            "url": "http://127.0.0.1:8000/v1/agent/chat/stream",
+            "description": "Requires Agent Runner on port 8000 and the external LiteLLM proxy on port 4000. This request exercises the real streaming path and does not use mock responses. If the current ModelScope token cannot call chat completions, the expected transport result is still HTTP 200 SSE with an error event followed by done; after replacing the token with one that has inference permission, expect token_delta events followed by done."
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "text",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "text/event-stream; charset=utf-8"
+            },
+            {
+              "key": "Cache-Control",
+              "value": "no-cache"
+            }
+          ],
+          "body": "data: {\"type\":\"token_delta\",\"content\":\"Hello\",\"tool\":null,\"tool_args\":null,\"tool_result\":null,\"prompt_tokens\":null,\"completion_tokens\":null,\"total_tokens\":null,\"error_message\":null}\n\ndata: {\"type\":\"usage\",\"content\":null,\"tool\":null,\"tool_args\":null,\"tool_result\":null,\"prompt_tokens\":15,\"completion_tokens\":2,\"total_tokens\":17,\"error_message\":null}\n\ndata: {\"type\":\"done\",\"content\":null,\"tool\":null,\"tool_args\":null,\"tool_result\":null,\"prompt_tokens\":null,\"completion_tokens\":null,\"total_tokens\":null,\"error_message\":null}\n\n"
+        }
+      ]
+    }
+  ]
+}

@@ -6,6 +6,7 @@ with support for YAML format, configuration caching, and dynamic refresh through
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 from typing import Any
@@ -156,7 +157,7 @@ class NacosConfigLoader:
                 try:
                     parsed_config = yaml.safe_load(content) or {}
                     self._cached_config = parsed_config
-                    logger.info(f"Configuration cache updated from Nacos")
+                    logger.info("Configuration cache updated from Nacos")
                 except Exception as e:
                     logger.warning(f"Failed to parse updated configuration: {e}")
 
@@ -194,10 +195,8 @@ class NacosConfigLoader:
         """
         if self._listener_task:
             self._listener_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._listener_task
-            except asyncio.CancelledError:
-                pass
 
         if self.config_client:
             try:
@@ -215,7 +214,7 @@ class NacosConfigLoader:
         for local development.
 
         Environment variables:
-            - NACOS_ENABLED: Enable Nacos configuration (default: true)
+            - NACOS_ENABLED: Enable Nacos configuration (default: false)
             - NACOS_SERVER_ADDRESS: Nacos server address (default: 127.0.0.1:8848)
             - NACOS_NAMESPACE: Nacos namespace (default: agent-breaker-local)
             - NACOS_DATA_ID: Configuration Data ID (default: agent-runner.yaml)
@@ -227,7 +226,7 @@ class NacosConfigLoader:
             NacosConfigLoader: A new NacosConfigLoader instance configured from environment.
         """
         return NacosConfigLoader(
-            enabled=os.getenv("NACOS_ENABLED", "true").lower() == "true",
+            enabled=os.getenv("NACOS_ENABLED", "false").lower() == "true",
             server_address=os.getenv("NACOS_SERVER_ADDRESS", "127.0.0.1:8848"),
             namespace=os.getenv("NACOS_NAMESPACE", "agent-breaker-local"),
             data_id=os.getenv("NACOS_DATA_ID", "agent-runner.yaml"),

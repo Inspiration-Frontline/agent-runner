@@ -1,3 +1,3 @@
-from gateway.litellm_client import LiteLLMClient
+from gateway.litellm_client import LiteLLMModelFactory
 
-__all__ = ["LiteLLMClient"]
+__all__ = ["LiteLLMModelFactory"]

@@ -8,7 +8,7 @@ providing streaming response endpoints for real-time agent communication.
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from config import ChatRequest, get_settings
+from config import ChatRequest
 from runtime.orchestrator import RuntimeOrchestrator
 
 router = APIRouter()
@@ -50,8 +50,11 @@ async def chat_stream(request: Request, chat_request: ChatRequest):
     orchestrator = RuntimeOrchestrator()
 
     async def event_generator():
-        async for event in orchestrator.run(chat_request, request):
-            yield f"data: {event.model_dump_json()}\n\n"
+        try:
+            async for event in orchestrator.run(chat_request, request):
+                yield f"data: {event.model_dump_json()}\n\n"
+        finally:
+            await orchestrator.close()
 
     return StreamingResponse(
         event_generator(),

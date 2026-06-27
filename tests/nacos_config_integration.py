@@ -9,8 +9,9 @@ This script tests:
 """
 
 import asyncio
+
 import httpx
-import yaml
+
 from nacos_config import NacosConfigLoader
 
 # Test configuration values (different from local defaults)
@@ -147,7 +148,7 @@ async def cleanup(loader: NacosConfigLoader):
             group=loader.group,
             namespace_id=loader.namespace,
         )
-        print(f"Removed test config from Nacos")
+        print("Removed test config from Nacos")
     await loader.close()
 
 

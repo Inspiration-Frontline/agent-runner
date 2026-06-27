@@ -77,7 +77,7 @@ class ToolExecutor:
         except asyncio.CancelledError:
             logger.info(f"Tool {tool_id} execution cancelled")
             raise
-        except Exception as e:
+        except Exception:
             logger.exception(f"Error executing tool {tool_id}")
             raise
 

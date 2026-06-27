@@ -1,7 +1,7 @@
-import logging
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Generator
+from typing import Any
 from uuid import uuid4
 
 
@@ -112,7 +112,7 @@ class Tracer:
         self,
         name: str,
         attributes: dict[str, Any] | None = None,
-    ) -> Generator[Span, None, None]:
+    ) -> Generator[Span]:
         """
         Context manager for scoped span usage.
 

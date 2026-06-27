@@ -43,6 +43,8 @@ server:
 lite_llm:
   base_url: http://localhost:4000
   api_key: sk-agent-breaker-local
+  request_timeout_seconds: 120
+  max_retries: 0
 
 services:
   agent_config_center_url: http://localhost:8081
@@ -63,9 +65,12 @@ redis:
   port: 6379
   password: ""
   db: 0
+  socket_connect_timeout_seconds: 1
+  socket_timeout_seconds: 1
 
-cache:
-  agent_config_ttl_seconds: 300
+agent_config_cache:
+  enabled: false
+  ttl_seconds: 300
 ```
 
 ## Environment Variables
@@ -74,7 +79,7 @@ Nacos connection can be configured via environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `NACOS_ENABLED` | Enable/disable Nacos configuration | `true` |
+| `NACOS_ENABLED` | Enable/disable Nacos configuration | `false` |
 | `NACOS_SERVER_ADDRESS` | Nacos server address | `127.0.0.1:8848` |
 | `NACOS_NAMESPACE` | Nacos namespace | `agent-breaker-local` |
 | `NACOS_DATA_ID` | Configuration Data ID | `agent-runner.yaml` |
@@ -94,18 +99,18 @@ is updated in Nacos, the service will:
 
 No service restart is required for configuration changes to take effect.
 
-## Disabling Nacos
+## Enabling Nacos
 
-To disable Nacos and use only local configuration files, set:
+Local development uses `config/agent-runner.env` with Nacos disabled by default so Agent Runner can start directly from PyCharm. To enable Nacos, set:
 
 ```bash
-NACOS_ENABLED=false
+NACOS_ENABLED=true
 ```
 
-or in your environment file:
+or in `config/agent-runner.env`:
 
 ```
-NACOS_ENABLED=false
+NACOS_ENABLED=true
 ```
 
 ## Service URL Configuration
@@ -128,8 +133,9 @@ by changing the Nacos configuration without modifying local files.
 The TTL for agent configuration caching in Redis can be configured via Nacos:
 
 ```yaml
-cache:
-  agent_config_ttl_seconds: 300
+agent_config_cache:
+  enabled: true
+  ttl_seconds: 300
 ```
 
 This controls how long agent configurations are cached in Redis before being refreshed

@@ -61,7 +61,7 @@ class RAGAdapter:
                 return data.get("chunks", [])
             logger.warning(f"Failed to retrieve RAG chunks: {response.status_code}")
             return []
-        except Exception as e:
+        except Exception:
             logger.exception("Error retrieving RAG chunks")
             return []
 

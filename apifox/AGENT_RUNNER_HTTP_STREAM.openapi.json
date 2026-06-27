@@ -1,0 +1,197 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AgentBreaker Agent Runner HTTP Stream Verification",
+    "version": "1.0.0",
+    "description": "HTTP/SSE verification endpoints for Agent Runner. Prefer importing the Postman collection in this folder if API Fox has OpenAPI import issues."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8000"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Agent Runner"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Agent Runner"
+        ],
+        "summary": "Health check",
+        "operationId": "getAgentRunnerHealth",
+        "responses": {
+          "200": {
+            "description": "Agent Runner is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "healthy"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agent/debug/config": {
+      "get": {
+        "tags": [
+          "Agent Runner"
+        ],
+        "summary": "Debug current local configuration",
+        "operationId": "getAgentRunnerDebugConfig",
+        "responses": {
+          "200": {
+            "description": "Current Agent Runner configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugConfigResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agent/chat/stream": {
+      "post": {
+        "tags": [
+          "Agent Runner"
+        ],
+        "summary": "Stream an agent chat response",
+        "description": "Returns Server-Sent Events. Requires the external LiteLLM proxy on port 4000. This endpoint uses the real upstream chain and does not use mock responses.",
+        "operationId": "streamAgentChat",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              },
+              "example": {
+                "agent_id": "smoke-test",
+                "version": "local",
+                "user_id": "local-user",
+                "message": "Say hello in one short sentence."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream containing token_delta, tool_start, tool_result, usage, error, and done events. The response body is text/event-stream, not JSON. If the upstream ModelScope token lacks chat/inference permission, the stream returns an error event followed by done.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "event-stream"
+                },
+                "example": "data: {\"type\":\"token_delta\",\"content\":\"Hello\",\"tool\":null,\"tool_args\":null,\"tool_result\":null,\"prompt_tokens\":null,\"completion_tokens\":null,\"total_tokens\":null,\"error_message\":null}\n\ndata: {\"type\":\"usage\",\"content\":null,\"tool\":null,\"tool_args\":null,\"tool_result\":null,\"prompt_tokens\":15,\"completion_tokens\":2,\"total_tokens\":17,\"error_message\":null}\n\ndata: {\"type\":\"done\",\"content\":null,\"tool\":null,\"tool_args\":null,\"tool_result\":null,\"prompt_tokens\":null,\"completion_tokens\":null,\"total_tokens\":null,\"error_message\":null}\n\n"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "healthy"
+          }
+        }
+      },
+      "DebugConfigResponse": {
+        "type": "object",
+        "properties": {
+          "lite_llm_base_url": {
+            "type": "string",
+            "example": "http://localhost:4000"
+          },
+          "agent_config_center_url": {
+            "type": "string",
+            "example": "http://localhost:8081"
+          },
+          "conversation_service_url": {
+            "type": "string",
+            "example": "http://localhost:8082"
+          },
+          "redis_host": {
+            "type": "string",
+            "example": "localhost"
+          },
+          "redis_port": {
+            "type": "integer",
+            "example": 6379
+          },
+          "agent_config_cache_ttl_seconds": {
+            "type": "integer",
+            "example": 300
+          },
+          "nacos_enabled": {
+            "type": "boolean",
+            "example": false
+          },
+          "nacos_namespace": {
+            "type": "string",
+            "example": "agent-breaker-local"
+          },
+          "environment": {
+            "type": "string",
+            "example": "local"
+          },
+          "debug_endpoints_enabled": {
+            "type": "boolean",
+            "example": true
+          }
+        }
+      },
+      "ChatRequest": {
+        "type": "object",
+        "required": [
+          "agent_id",
+          "user_id",
+          "message"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "example": "smoke-test"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "example": "local"
+          },
+          "conversation_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "user_id": {
+            "type": "string",
+            "example": "local-user"
+          },
+          "message": {
+            "type": "string",
+            "example": "Say hello in one short sentence."
+          }
+        }
+      }
+    }
+  }
+}

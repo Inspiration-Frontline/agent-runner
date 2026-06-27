@@ -1,167 +1,87 @@
 import logging
-from typing import Any, AsyncGenerator
 
-from openai import AsyncOpenAI
+from agents.extensions.models.litellm_model import LitellmModel
 
-from config import settings
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
 
-class LiteLLMClient:
+class LiteLLMModelFactory:
     """
-    Client for LiteLLM model gateway interactions.
+    Factory for OpenAI Agents SDK models backed by the LiteLLM proxy.
 
-    Provides methods to interact with the LiteLLM proxy server for
-    chat completions and streaming responses, supporting tool calls.
-
-    Attributes:
-        base_url: Base URL for the LiteLLM proxy server.
-        api_key: API key for LiteLLM authentication.
-        client: Async OpenAI client configured for LiteLLM.
+    The Agents SDK owns the agent loop and stream parsing. LiteLLM is used only as
+    the model integration layer, and the configured external LiteLLM proxy remains
+    the gateway that forwards provider requests.
     """
+
+    DEFAULT_PROVIDER_PREFIX = "openai/"
+    KNOWN_PROVIDER_PREFIXES = {
+        "ai21",
+        "aleph_alpha",
+        "anthropic",
+        "azure",
+        "bedrock",
+        "cohere",
+        "deepseek",
+        "gemini",
+        "groq",
+        "huggingface",
+        "mistral",
+        "ollama",
+        "openai",
+        "openrouter",
+        "perplexity",
+        "replicate",
+        "vertex_ai",
+        "vllm",
+        "watsonx",
+    }
 
     def __init__(
         self,
         base_url: str | None = None,
         api_key: str | None = None,
+        request_timeout_seconds: float | None = None,
     ):
+        current_settings = get_settings()
+        self.base_url = base_url or current_settings.lite_llm_base_url
+        self.api_key = api_key or current_settings.lite_llm_api_key or "sk-agent-breaker-local"
+        self.request_timeout_seconds = request_timeout_seconds or current_settings.lite_llm_request_timeout_seconds
+
+    def create_model(self, model: str) -> LitellmModel:
         """
-        Initialize the LiteLLM client.
+        Create an Agents SDK LiteLLM model for the configured proxy.
 
         Args:
-            base_url: Optional override for LiteLLM base URL.
-            api_key: Optional override for LiteLLM API key.
+            model: Agent model identifier. Bare model names are treated as
+                OpenAI-compatible model names served by the external LiteLLM proxy.
+
+        Returns:
+            LitellmModel: A model implementation consumable by Agents SDK Agent.
         """
-        self.base_url = base_url or settings.lite_llm_base_url
-        self.api_key = api_key or settings.lite_llm_api_key or "sk-agent-breaker-local"
-        self.client = AsyncOpenAI(
+        normalized_model = self._normalize_model(model)
+        logger.info("Using LiteLLM proxy model: %s", normalized_model)
+        return LitellmModel(
+            model=normalized_model,
             base_url=self.base_url,
             api_key=self.api_key,
         )
 
-    async def chat_completion(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict | None = None,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        **kwargs,
-    ) -> Any:
+    def _normalize_model(self, model: str) -> str:
         """
-        Execute a non-streaming chat completion request.
-
-        Args:
-            model: Model identifier to use for completion.
-            messages: List of conversation messages.
-            tools: Optional list of tool specifications.
-            tool_choice: Optional tool choice strategy.
-            temperature: Sampling temperature parameter.
-            max_tokens: Maximum tokens in the response.
-            **kwargs: Additional completion parameters.
-
-        Returns:
-            Any: The completion response from LiteLLM.
+        Ensure LiteLLM can resolve a provider for proxy-routed model names.
         """
-        logger.info(f"Calling LiteLLM with model: {model}")
+        provider_prefix = model.split("/", 1)[0].lower()
+        if provider_prefix in self.KNOWN_PROVIDER_PREFIXES:
+            return model
 
-        completion_kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            **kwargs,
-        }
-
-        if tools:
-            completion_kwargs["tools"] = tools
-        if tool_choice:
-            completion_kwargs["tool_choice"] = tool_choice
-
-        response = await self.client.chat.completions.create(**completion_kwargs)
-        return response
-
-    async def chat_completion_stream(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict | None = None,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        **kwargs,
-    ) -> AsyncGenerator[dict[str, Any], None]:
-        """
-        Execute a streaming chat completion request.
-
-        Args:
-            model: Model identifier to use for completion.
-            messages: List of conversation messages.
-            tools: Optional list of tool specifications.
-            tool_choice: Optional tool choice strategy.
-            temperature: Sampling temperature parameter.
-            max_tokens: Maximum tokens in the response.
-            **kwargs: Additional completion parameters.
-
-        Yields:
-            dict[str, Any]: Stream chunks parsed into event dictionaries.
-        """
-        logger.info(f"Calling LiteLLM stream with model: {model}")
-
-        completion_kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-            **kwargs,
-        }
-
-        if tools:
-            completion_kwargs["tools"] = tools
-        if tool_choice:
-            completion_kwargs["tool_choice"] = tool_choice
-
-        response = await self.client.chat.completions.create(**completion_kwargs)
-
-        async for chunk in response:
-            yield self._parse_chunk(chunk)
-
-    def _parse_chunk(self, chunk: Any) -> dict[str, Any]:
-        """
-        Parse a stream chunk into an event dictionary.
-
-        Args:
-            chunk: Raw chunk from the streaming response.
-
-        Returns:
-            dict[str, Any]: Parsed event with type and content/tool data.
-        """
-        if not chunk.choices:
-            return {"type": "unknown", "content": ""}
-
-        delta = chunk.choices[0].delta
-        content = getattr(delta, "content", None)
-        tool_calls = getattr(delta, "tool_calls", None)
-
-        if content:
-            return {
-                "type": "token_delta",
-                "content": content,
-            }
-        elif tool_calls:
-            return {
-                "type": "tool_start",
-                "tool": tool_calls[0].function.name,
-                "args": tool_calls[0].function.arguments,
-            }
-
-        return {"type": "unknown", "content": ""}
+        logger.debug("Treating bare model %s as OpenAI-compatible LiteLLM proxy model.", model)
+        return f"{self.DEFAULT_PROVIDER_PREFIX}{model}"
 
     async def close(self):
         """
-        Close the OpenAI client connection.
+        Kept for lifecycle symmetry with other gateway clients.
         """
-        await self.client.close()
+        pass

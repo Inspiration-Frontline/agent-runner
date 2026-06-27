@@ -1,6 +1,7 @@
-from pathlib import Path
-import os
 import logging
+import os
+from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,24 +17,30 @@ def get_env_file() -> Path:
     """
     Determine which environment file to load based on ENVIRONMENT variable.
 
+    Local development defaults to config/agent-runner.env so PyCharm can run
+    src/main.py directly without requiring manual environment variables.
+
     Returns:
         Path to the appropriate .env file for the current environment.
 
     Supported environments:
-    - local (default): .env.local
-    - dev: .env.dev
-    - stg: .env.stg
-    - prod: .env.prod
+    - local (default): config/agent-runner.env
+    - dev: config/agent-runner.dev.env
+    - stg: config/agent-runner.stg.env
+    - prod: config/agent-runner.prod.env
     """
+    env_file_override = os.getenv("AGENT_RUNNER_ENV_FILE")
+    if env_file_override:
+        return Path(env_file_override).expanduser().resolve()
+
     environment = os.getenv("ENVIRONMENT", "local").lower()
     env_file_map = {
-        "local": ".env.local",
-        "dev": ".env.dev",
-        "stg": ".env.stg",
-        "prod": ".env.prod",
+        "local": CONFIG_DIR / "agent-runner.env",
+        "dev": CONFIG_DIR / "agent-runner.dev.env",
+        "stg": CONFIG_DIR / "agent-runner.stg.env",
+        "prod": CONFIG_DIR / "agent-runner.prod.env",
     }
-    env_filename = env_file_map.get(environment, ".env.local")
-    return PROJECT_ROOT / env_filename
+    return env_file_map.get(environment, CONFIG_DIR / "agent-runner.env")
 
 
 class Settings(BaseSettings):
@@ -45,10 +52,10 @@ class Settings(BaseSettings):
     agent-specific parameters.
 
     Environment files are loaded based on the ENVIRONMENT variable:
-    - .env.local (default for local development)
-    - .env.dev (development environment)
-    - .env.stg (staging environment)
-    - .env.prod (production environment)
+    - config/agent-runner.env (default for local development)
+    - config/agent-runner.dev.env (development environment)
+    - config/agent-runner.stg.env (staging environment)
+    - config/agent-runner.prod.env (production environment)
     """
 
     model_config = SettingsConfigDict(
@@ -68,6 +75,10 @@ class Settings(BaseSettings):
     # LiteLLM gateway configuration
     lite_llm_base_url: str = "http://localhost:4000"
     lite_llm_api_key: str = "sk-agent-breaker-local"
+    lite_llm_request_timeout_seconds: float = Field(
+        default=120.0, validation_alias="LITE_LLM_REQUEST_TIMEOUT_SECONDS"
+    )
+    lite_llm_max_retries: int = Field(default=0, validation_alias="LITE_LLM_MAX_RETRIES")
 
     # Service URLs for downstream dependencies
     agent_config_center_url: str = "http://localhost:8081"
@@ -88,12 +99,17 @@ class Settings(BaseSettings):
     redis_port: int = Field(default=6379, validation_alias="REDIS_PORT")
     redis_password: str = Field(default="", validation_alias="REDIS_PASSWORD")
     redis_db: int = Field(default=0, validation_alias="REDIS_DB")
+    redis_socket_connect_timeout_seconds: float = Field(
+        default=1.0, validation_alias="REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS"
+    )
+    redis_socket_timeout_seconds: float = Field(default=1.0, validation_alias="REDIS_SOCKET_TIMEOUT_SECONDS")
+    agent_config_cache_enabled: bool = Field(default=False, validation_alias="AGENT_CONFIG_CACHE_ENABLED")
     agent_config_cache_ttl_seconds: int = Field(
         default=300, validation_alias="AGENT_CONFIG_CACHE_TTL_SECONDS"
     )
 
     # Nacos configuration center settings
-    nacos_enabled: bool = Field(default=True, validation_alias="NACOS_ENABLED")
+    nacos_enabled: bool = Field(default=False, validation_alias="NACOS_ENABLED")
     nacos_server_address: str = Field(default="127.0.0.1:8848", validation_alias="NACOS_SERVER_ADDRESS")
     nacos_namespace: str = Field(default="agent-breaker-local", validation_alias="NACOS_NAMESPACE")
     nacos_data_id: str = Field(default="agent-runner.yaml", validation_alias="NACOS_DATA_ID")
@@ -150,7 +166,12 @@ class ConfigurationManager:
         """Merge local settings with Nacos configuration (Nacos values override)."""
         field_mapping = {
             "server": {"host": "server_host", "port": "server_port"},
-            "lite_llm": {"base_url": "lite_llm_base_url", "api_key": "lite_llm_api_key"},
+            "lite_llm": {
+                "base_url": "lite_llm_base_url",
+                "api_key": "lite_llm_api_key",
+                "request_timeout_seconds": "lite_llm_request_timeout_seconds",
+                "max_retries": "lite_llm_max_retries",
+            },
             "services": {
                 "agent_config_center_url": "agent_config_center_url",
                 "conversation_service_url": "conversation_service_url",
@@ -159,12 +180,23 @@ class ConfigurationManager:
             },
             "local_agent_config": {"enabled": "local_agent_config_enabled", "path": "local_agent_config_path"},
             "context": {"max_context_tokens": "max_context_tokens", "max_output_tokens": "max_output_tokens"},
-            "redis": {"host": "redis_host", "port": "redis_port", "password": "redis_password", "db": "redis_db"},
+            "redis": {
+                "host": "redis_host",
+                "port": "redis_port",
+                "password": "redis_password",
+                "db": "redis_db",
+                "socket_connect_timeout_seconds": "redis_socket_connect_timeout_seconds",
+                "socket_timeout_seconds": "redis_socket_timeout_seconds",
+            },
             "cache": {"agent_config_ttl_seconds": "agent_config_cache_ttl_seconds"},
+            "agent_config_cache": {
+                "enabled": "agent_config_cache_enabled",
+                "ttl_seconds": "agent_config_cache_ttl_seconds",
+            },
             "debug": {"endpoints_enabled": "debug_endpoints_enabled"},
         }
 
-        updates: dict[str, any] = {}
+        updates: dict[str, Any] = {}
         for nacos_section, field_map in field_mapping.items():
             section_config = nacos_config.get(nacos_section, {})
             if isinstance(section_config, dict):
@@ -293,14 +325,13 @@ class AgentConfig(BaseModel):
     Attributes:
         agent_id: Unique identifier of the agent.
         version: Version string of this configuration.
-        model: The LLM model identifier to use (e.g., "Qwen/Qwen3-4B").
+        model: The LLM model identifier to use (e.g., "Qwen/Qwen3-235B-A22B-Instruct-2507").
         system_prompt: The system prompt that defines the agent's behavior and personality.
         tools: List of tool identifiers available to this agent.
         mcp_servers: List of MCP server identifiers this agent can connect to.
         memory_policy: Policy determining which context sources to include.
         max_output_tokens: Maximum number of tokens in the agent's response.
         temperature: Sampling temperature for response generation (0.0 to 2.0).
-        mock_response: Optional mock response for testing purposes.
     """
 
     agent_id: str
@@ -312,4 +343,3 @@ class AgentConfig(BaseModel):
     memory_policy: MemoryPolicy = Field(default_factory=MemoryPolicy)
     max_output_tokens: int = 4096
     temperature: float = 0.7
-    mock_response: str | None = None

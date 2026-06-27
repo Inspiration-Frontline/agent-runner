@@ -8,17 +8,25 @@ and model invocation through the OpenAI Agents SDK runtime.
 
 import asyncio
 import logging
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from fastapi import Request
 
-from agents.factory import AgentFactory
-from agents.loader import AgentConfigLoader
-from api.streaming import DoneEvent, ErrorEvent, StreamEvent, TokenDeltaEvent, ToolResultEvent, ToolStartEvent
+from agent_definitions.factory import AgentFactory
+from agent_definitions.loader import AgentConfigLoader
+from api.streaming import (
+    DoneEvent,
+    ErrorEvent,
+    StreamEvent,
+    TokenDeltaEvent,
+    ToolResultEvent,
+    ToolStartEvent,
+    UsageEvent,
+)
 from config import ChatRequest
 from context.builder import ContextBuilder
 from runtime.cancellation import CancellationManager
-from sdk.openai_runtime import OpenAIAgentsRuntime
+from runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -64,7 +72,7 @@ class RuntimeOrchestrator:
         self.cancellation_manager = CancellationManager()
         self.openai_runtime = OpenAIAgentsRuntime()
 
-    async def run(self, chat_request: ChatRequest, http_request: Request) -> AsyncGenerator[StreamEvent, None]:
+    async def run(self, chat_request: ChatRequest, http_request: Request) -> AsyncGenerator[StreamEvent]:
         """
         Execute an agent chat request and stream responses.
 
@@ -85,6 +93,7 @@ class RuntimeOrchestrator:
                 - TokenDeltaEvent: Text tokens from model response
                 - ToolStartEvent: Tool invocation start
                 - ToolResultEvent: Tool execution result
+                - UsageEvent: Token usage reported by the upstream model response
                 - ErrorEvent: Error messages
                 - DoneEvent: Completion marker
 
@@ -142,6 +151,7 @@ class RuntimeOrchestrator:
                 - TokenDeltaEvent for "token_delta" events
                 - ToolStartEvent for "tool_start" events
                 - ToolResultEvent for "tool_result" events
+                - UsageEvent for "usage" events
                 - ErrorEvent for "error" events
                 - TokenDeltaEvent (fallback) for unknown event types
         """
@@ -152,7 +162,13 @@ class RuntimeOrchestrator:
         elif event_type == "tool_start":
             return ToolStartEvent(tool=event.get("tool", ""), tool_args=event.get("args"))
         elif event_type == "tool_result":
-            return ToolResultEvent(tool=event.get("tool", ""), tool_result=event.get("result"))
+            return ToolResultEvent(tool=event.get("tool", ""), tool_result=event.get("tool_result") or event.get("result"))
+        elif event_type == "usage":
+            return UsageEvent(
+                prompt_tokens=event["prompt_tokens"],
+                completion_tokens=event["completion_tokens"],
+                total_tokens=event["total_tokens"],
+            )
         elif event_type == "error":
             return ErrorEvent(error_message=event.get("error_message") or event.get("content", ""))
         else:
@@ -166,3 +182,7 @@ class RuntimeOrchestrator:
             cancellation_token: The cancellation token to clean up.
         """
         await self.cancellation_manager.cleanup(cancellation_token)
+
+    async def close(self):
+        await self.config_loader.close()
+        await self.openai_runtime.close()

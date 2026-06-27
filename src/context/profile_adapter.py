@@ -43,7 +43,7 @@ class ProfileAdapter:
                 return response.json()
             logger.warning(f"Failed to retrieve profile for user {user_id}: {response.status_code}")
             return {}
-        except Exception as e:
+        except Exception:
             logger.exception(f"Error retrieving profile for user {user_id}")
             return {}
 
@@ -64,7 +64,7 @@ class ProfileAdapter:
                 json=profile_data,
             )
             return response.status_code == 200
-        except Exception as e:
+        except Exception:
             logger.exception(f"Error updating profile for user {user_id}")
             return False
 

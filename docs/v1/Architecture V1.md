@@ -99,7 +99,7 @@ flowchart TD
 
     SDK[OpenAI Agents SDK]
 
-    MODEL[LiteLLM Client]
+    MODEL[LiteLLM Model Integration]
 
     API --> STREAM
 
@@ -529,7 +529,7 @@ agent_runner/
 │   ├── profile_adapter.py
 │   └── rag_adapter.py
 
-├── agents/
+├── agent_definitions/
 │   ├── loader.py
 │   ├── config_models.py
 │   └── factory.py
@@ -549,8 +549,8 @@ agent_runner/
 ├── gateway/
 │   └── litellm_client.py
 
-├── sdk/
-│   └── openai_runtime.py
+├── runtime/
+│   └── openai_agents_runtime.py
 
 └── observability/
     ├── tracing.py

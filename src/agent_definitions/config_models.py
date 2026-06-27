@@ -40,7 +40,6 @@ class AgentDefinition:
         max_output_tokens: Maximum number of tokens in agent's output.
         temperature: Temperature parameter for model sampling (0.0-2.0).
         metadata: Additional metadata for this agent definition.
-        mock_response: Optional mock response for testing purposes.
     """
 
     agent_id: str
@@ -55,7 +54,6 @@ class AgentDefinition:
     max_output_tokens: int = 4096
     temperature: float = 0.7
     metadata: dict[str, Any] = field(default_factory=dict)
-    mock_response: str | None = None
 
 
 @dataclass

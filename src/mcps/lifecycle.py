@@ -1,7 +1,7 @@
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class MCPLifecycle:
         return self._sessions.get(session_id)
 
     @asynccontextmanager
-    async def session_scope(self, session_id: str, server_id: str) -> AsyncGenerator[MCPSession, None]:
+    async def session_scope(self, session_id: str, server_id: str) -> AsyncGenerator[MCPSession]:
         """
         Context manager for scoped MCP session usage.
 

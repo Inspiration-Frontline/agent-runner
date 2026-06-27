@@ -20,6 +20,7 @@ dependencies = [
     "redis>=5.2.1",
     "nacos-sdk-python>=3.2.0",
     "pyyaml>=6.0.2",
+    "openai-agents>=0.17.7",
 ]
 
 [project.optional-dependencies]
@@ -47,3 +48,5 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["src"]
+python_files = ["test_*.py"]

@@ -1,11 +1,12 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
 
-class RuntimeEventType(str, Enum):
+class RuntimeEventType(StrEnum):
     """
     Enumeration of runtime event types.
 
@@ -134,6 +135,3 @@ class RuntimeEventBus:
                     handler(event)
             except Exception:
                 pass
-
-
-import asyncio

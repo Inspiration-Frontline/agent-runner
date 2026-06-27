@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import redis.asyncio as aioredis
 
-from config import AgentConfig, MemoryPolicy, PROJECT_ROOT, settings
+from config import PROJECT_ROOT, AgentConfig, MemoryPolicy, settings
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +50,18 @@ class AgentConfigLoader:
         self.base_url = settings.agent_config_center_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
-        # Initialize Redis client for caching
-        self.redis_client = aioredis.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            password=settings.redis_password if settings.redis_password else None,
-            db=settings.redis_db,
-            decode_responses=True,
-        )
+        # Initialize Redis client for caching when explicitly enabled.
+        self.redis_client = None
+        if settings.agent_config_cache_enabled:
+            self.redis_client = aioredis.Redis(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                password=settings.redis_password if settings.redis_password else None,
+                db=settings.redis_db,
+                decode_responses=True,
+                socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+                socket_timeout=settings.redis_socket_timeout_seconds,
+            )
         self.cache_ttl_seconds = settings.agent_config_cache_ttl_seconds
 
         # Resolve local configuration path
@@ -118,7 +122,7 @@ class AgentConfigLoader:
 
             raise ValueError(f"Failed to load agent config: {response.status_code}")
 
-        except Exception as e:
+        except Exception:
             logger.exception(f"Error loading agent config for {agent_id}")
             raise
 
@@ -133,6 +137,9 @@ class AgentConfigLoader:
             AgentConfig | None: The cached configuration if found, None otherwise.
         """
         try:
+            if self.redis_client is None:
+                return None
+
             cached_data = await self.redis_client.get(cache_key)
             if cached_data:
                 data = json.loads(cached_data)
@@ -150,6 +157,9 @@ class AgentConfigLoader:
             config: The agent configuration to cache.
         """
         try:
+            if self.redis_client is None:
+                return
+
             config_data = {
                 "agent_id": config.agent_id,
                 "version": config.version,
@@ -163,7 +173,6 @@ class AgentConfigLoader:
                 },
                 "max_output_tokens": config.max_output_tokens,
                 "temperature": config.temperature,
-                "mock_response": config.mock_response,
             }
             await self.redis_client.setex(
                 cache_key, self.cache_ttl_seconds, json.dumps(config_data)
@@ -185,7 +194,7 @@ class AgentConfigLoader:
         if not self.local_config_path.exists():
             return None
 
-        with self.local_config_path.open("r", encoding="utf-8") as config_file:
+        with self.local_config_path.open("r", encoding="utf-8-sig") as config_file:
             data = json.load(config_file)
 
         agents = data.get("agents", [])
@@ -221,14 +230,13 @@ class AgentConfigLoader:
         return AgentConfig(
             agent_id=data["agent_id"],
             version=data.get("version", "latest"),
-            model=data.get("model", "Qwen/Qwen3-4B"),
+            model=data.get("model", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
             system_prompt=data.get("system_prompt", ""),
             tools=data.get("tools", []),
             mcp_servers=data.get("mcp_servers", []),
             memory_policy=memory_policy,
             max_output_tokens=data.get("max_output_tokens", settings.max_output_tokens),
             temperature=data.get("temperature", 0.7),
-            mock_response=data.get("mock_response"),
         )
 
     async def invalidate_cache(self, agent_id: str | None = None):
@@ -243,6 +251,9 @@ class AgentConfigLoader:
                      If None, clears all agent configuration caches.
         """
         try:
+            if self.redis_client is None:
+                return
+
             if agent_id:
                 # Find and delete all cache keys for this agent
                 pattern = f"agent_config:{agent_id}:*"
@@ -268,4 +279,5 @@ class AgentConfigLoader:
         release resources and connections.
         """
         await self.client.aclose()
-        await self.redis_client.close()
+        if self.redis_client is not None:
+            await self.redis_client.close()

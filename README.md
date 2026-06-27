@@ -1,6 +1,6 @@
 # Agent Runner
 
-Agent Runner is the request-scoped runtime host for AgentBreaker. It exposes a FastAPI web server and calls models through a local LiteLLM proxy.
+Agent Runner is the request-scoped runtime host for AgentBreaker. It exposes a FastAPI web server, runs agents through `openai-agents-python`, uses the SDK LiteLLM model integration in-process, and forwards model traffic to the external LiteLLM proxy.
 
 ## Runtime Configuration
 
@@ -11,28 +11,27 @@ Configuration lives under `config/`:
 - `config/agent-runner.env` contains Agent Runner settings.
 - `config/agents.json` contains a local smoke-test agent used before `agent-configuration-center` is implemented.
 
-ModelScope connection values:
+Provider connection values are kept in `config/litellm.env`. Use placeholder names in docs and keep real API keys local:
 
 ```text
 MODEL_SCOPE_BASE_URL=https://api-inference.modelscope.cn/v1
-MODEL_SCOPE_API_KEY=ms-367ff0af-6172-4bfe-a0f4-82dcf0140409
+MODEL_SCOPE_API_KEY=<your-modelscope-key>
+OWIWO_BASE_URL=https://api.owiwo.cn/v1
+OWIWO_API_KEY=<your-owiwo-key>
+LITELLM_MASTER_KEY=sk-agent-breaker-local
 ```
 
-The local smoke-test agent uses `Qwen/Qwen3-4B` through LiteLLM. It also has a `mock_response` in `config/agents.json`; Agent Runner tries the real model first and only uses that response if the upstream chat call fails. With the token currently in `config/litellm.env`, ModelScope allows model listing but returns `401` for chat completions, so the fallback keeps the local server smoke-testable until the token is authorized for inference.
+The local smoke-test agent uses `Qwen/Qwen3-235B-A22B-Instruct-2507` through the SDK LiteLLM integration and the external LiteLLM proxy. Local startup reads `config/agent-runner.env` by default, so PyCharm can run `src/main.py` directly without manual environment variables.
 
 ## Install
 
 Run from `agent-runner/`:
 
 ```powershell
-# Install dependencies using uv (recommended)
 uv sync --no-install-project
 
-# Alternative: Install using pip
-python -m pip install -U .
+# Do not install the project package itself unless that is explicitly needed.
 ```
-
-**Note:** The `uv sync --no-install-project` command is the recommended way to install dependencies. It ensures all dependencies are installed without installing the project itself, which is useful for development environments where you want to manage the project installation separately.
 
 ## Start LiteLLM
 
@@ -47,15 +46,47 @@ docker run -d --name agentbreaker-litellm `
   litellm/litellm:latest --config /app/config.yaml --port 4000
 ```
 
+## Add LiteLLM Models
+
+To add a model to the local LiteLLM proxy:
+
+1. Add provider secrets or base URLs to `config/litellm.env`.
+2. Add one entry under `model_list` in `config/litellm.yaml`.
+3. Recreate the LiteLLM container with the command from `Start LiteLLM`.
+
+Example:
+
+```yaml
+model_list:
+  - model_name: gpt-5.5
+    litellm_params:
+      model: openai/gpt-5.5
+      api_base: os.environ/OWIWO_BASE_URL
+      api_key: os.environ/OWIWO_API_KEY
+      headers:
+        User-Agent: Mozilla/5.0
+      timeout: 120
+```
+
+Notes:
+
+- The Owiwo endpoint needs `https://api.owiwo.cn/v1`; the root `https://api.owiwo.cn/` returns the web console HTML, not the OpenAI-compatible API.
+- Owiwo currently blocks the default OpenAI/LiteLLM client user agent, so keep `headers.User-Agent: Mozilla/5.0` for that provider.
+- Non-streaming and streaming Owiwo responses both report real `usage` through LiteLLM when `stream_options.include_usage` is requested. Agent Runner only forwards usage when the upstream streaming response provides it; it does not estimate token counts.
+
 ## Start Agent Runner
 
-Run from `agent-runner/`:
+In PyCharm, open `src/main.py` and click Run. The default local configuration disables Nacos and uses the local LiteLLM proxy at `http://localhost:4000`.
+
+The equivalent terminal command is:
 
 ```powershell
-python -m uvicorn main:app --app-dir src --host 127.0.0.1 --port 8000
+python .\src\main.py
 ```
 
 ## Smoke Test
+
+After Agent Runner is started:
 
 ```powershell
 Invoke-WebRequest http://127.0.0.1:8000/health
@@ -72,3 +103,9 @@ Invoke-WebRequest `
   -Body $body `
   -ContentType "application/json"
 ```
+
+The stream endpoint always exercises the real chain: Agent Runner -> OpenAI Agents SDK -> in-process LiteLLM model integration -> external LiteLLM proxy -> ModelScope. No mock response is used in the local run path.
+
+If `config/litellm.env` contains a ModelScope token that can list models but cannot call chat completions, the stream still returns HTTP 200 SSE with a real `error` event followed by `done`. After replacing `MODEL_SCOPE_API_KEY` with a token that has inference/chat permission and restarting the LiteLLM container, the same request should return `token_delta` events followed by `done`.
+
+For API Fox, import `apifox/AGENT_RUNNER_HTTP_STREAM.postman_collection.json`.

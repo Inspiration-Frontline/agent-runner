@@ -1,10 +1,10 @@
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel
 
 
-class StreamEventType(str, Enum):
+class StreamEventType(StrEnum):
     """
     Enumeration of stream event types for SSE responses.
 
@@ -15,6 +15,7 @@ class StreamEventType(str, Enum):
         TOKEN_DELTA: Event containing a text token delta from the model.
         TOOL_START: Event indicating a tool execution has started.
         TOOL_RESULT: Event containing the result of a tool execution.
+        USAGE: Event containing token usage from the upstream model response.
         ERROR: Event indicating an error occurred during execution.
         DONE: Event indicating the stream has completed.
     """
@@ -22,6 +23,7 @@ class StreamEventType(str, Enum):
     TOKEN_DELTA = "token_delta"
     TOOL_START = "tool_start"
     TOOL_RESULT = "tool_result"
+    USAGE = "usage"
     ERROR = "error"
     DONE = "done"
 
@@ -39,6 +41,9 @@ class StreamEvent(BaseModel):
         tool: Tool identifier for TOOL_START and TOOL_RESULT events.
         tool_args: Tool arguments for TOOL_START events.
         tool_result: Tool execution result for TOOL_RESULT events.
+        prompt_tokens: Input token count from the upstream response usage.
+        completion_tokens: Output token count from the upstream response usage.
+        total_tokens: Total token count from the upstream response usage.
         error_message: Error description for ERROR events.
     """
 
@@ -47,6 +52,9 @@ class StreamEvent(BaseModel):
     tool: str | None = None
     tool_args: dict[str, Any] | None = None
     tool_result: Any = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
     error_message: str | None = None
 
 
@@ -121,6 +129,28 @@ class ErrorEvent(StreamEvent):
             error_message: Description of the error that occurred.
         """
         super().__init__(type=StreamEventType.ERROR, error_message=error_message)
+
+
+class UsageEvent(StreamEvent):
+    """
+    Event containing token usage reported by the upstream model response.
+    """
+
+    def __init__(self, prompt_tokens: int, completion_tokens: int, total_tokens: int):
+        """
+        Initialize a usage event.
+
+        Args:
+            prompt_tokens: Input token count reported by the model provider.
+            completion_tokens: Output token count reported by the model provider.
+            total_tokens: Total token count reported by the model provider.
+        """
+        super().__init__(
+            type=StreamEventType.USAGE,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
 
 
 class DoneEvent(StreamEvent):

@@ -1,9 +1,7 @@
 import time
 from dataclasses import dataclass
-from typing import Any
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
-
 
 REQUEST_COUNT = Counter(
     "agent_runner_requests_total",

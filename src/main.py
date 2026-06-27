@@ -74,11 +74,14 @@ async def health_check():
 
 
 if __name__ == "__main__":
+    import asyncio
+
     import uvicorn
 
-    uvicorn.run(
-        "main:app",
+    server_config = uvicorn.Config(
+        app,
         host=settings.server_host,
         port=settings.server_port,
-        reload=True,
     )
+    server = uvicorn.Server(server_config)
+    asyncio.run(server.serve())

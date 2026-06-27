@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from agents.config_models import AgentDefinition, MemoryPolicy
+from agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from config import AgentConfig
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,6 @@ class AgentFactory:
             ),
             max_output_tokens=config.max_output_tokens,
             temperature=config.temperature,
-            mock_response=config.mock_response,
         )
 
         self._agent_registry[config.agent_id] = agent

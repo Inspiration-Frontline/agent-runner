@@ -1,8 +1,8 @@
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class LifecycleManager:
         return self._active_requests.get(request_id)
 
     @asynccontextmanager
-    async def request_scope(self, lifecycle: RequestLifecycle) -> AsyncGenerator[RequestLifecycle, None]:
+    async def request_scope(self, lifecycle: RequestLifecycle) -> AsyncGenerator[RequestLifecycle]:
         """
         Context manager for scoped request lifecycle management.
 
