@@ -1,4 +1,4 @@
-from gateway.litellm_client import LiteLLMModelFactory
+from agent_runner.gateway.litellm_client import LiteLLMModelFactory
 
 
 def test_bare_proxy_model_uses_openai_provider_prefix():

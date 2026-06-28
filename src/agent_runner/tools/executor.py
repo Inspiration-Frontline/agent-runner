@@ -3,8 +3,8 @@ import logging
 from functools import partial
 from typing import Any
 
-from runtime.cancellation import CancellationToken
-from tools.registry import ToolDefinition, ToolRegistry
+from agent_runner.runtime.cancellation import CancellationToken
+from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
 logger = logging.getLogger(__name__)
 

@@ -12,9 +12,9 @@ from collections.abc import AsyncGenerator
 
 from fastapi import Request
 
-from agent_definitions.factory import AgentFactory
-from agent_definitions.loader import AgentConfigLoader
-from api.streaming import (
+from agent_runner.agent_definitions.factory import AgentFactory
+from agent_runner.agent_definitions.loader import AgentConfigLoader
+from agent_runner.api.streaming import (
     DoneEvent,
     ErrorEvent,
     StreamEvent,
@@ -23,11 +23,11 @@ from api.streaming import (
     ToolStartEvent,
     UsageEvent,
 )
-from config import ChatRequest
-from context.builder import ContextBuilder
-from runtime.cancellation import CancellationManager
-from runtime.openai_agents_runtime import OpenAIAgentsRuntime
-from tools.executor import ToolExecutor
+from agent_runner.config import ChatRequest
+from agent_runner.context.builder import ContextBuilder
+from agent_runner.runtime.cancellation import CancellationManager
+from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
+from agent_runner.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
 

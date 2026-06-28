@@ -2,7 +2,7 @@ import logging
 
 from agents.extensions.models.litellm_model import LitellmModel
 
-from config import get_settings
+from agent_runner.config import get_settings
 
 logger = logging.getLogger(__name__)
 

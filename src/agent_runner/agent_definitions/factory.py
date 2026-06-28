@@ -1,8 +1,8 @@
 import logging
 from typing import Any
 
-from agent_definitions.config_models import AgentDefinition, MemoryPolicy
-from config import AgentConfig
+from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
+from agent_runner.config import AgentConfig
 
 logger = logging.getLogger(__name__)
 

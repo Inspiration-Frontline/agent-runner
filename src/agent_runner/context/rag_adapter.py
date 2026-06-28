@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 
-from config import settings
+from agent_runner.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,8 @@ class RAGAdapter:
         """
         Initialize the RAG adapter with service URL and HTTP client.
         """
-        self.base_url = settings.knowledge_service_url
+        current_settings = get_settings()
+        self.base_url = current_settings.knowledge_service_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
     async def retrieve(

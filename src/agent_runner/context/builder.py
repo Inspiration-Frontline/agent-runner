@@ -2,7 +2,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from config import AgentConfig, settings
+from agent_runner.config import AgentConfig, get_settings
 
 from .profile_adapter import ProfileAdapter
 from .prompt_assembler import PromptAssembler
@@ -98,7 +98,7 @@ class ContextBuilder:
         self.profile_adapter = ProfileAdapter()
         self.rag_adapter = RAGAdapter()
         self.prompt_assembler = PromptAssembler()
-        self.token_budget_manager = TokenBudgetManager(max_tokens=settings.max_context_tokens)
+        self.token_budget_manager = TokenBudgetManager(max_tokens=get_settings().max_context_tokens)
 
     async def build(
         self,

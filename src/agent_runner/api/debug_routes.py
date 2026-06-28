@@ -11,7 +11,7 @@ Configuration:
 
 from fastapi import APIRouter
 
-from config import get_settings
+from agent_runner.config import get_settings
 
 router = APIRouter(tags=["debug"])
 

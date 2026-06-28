@@ -8,8 +8,8 @@ providing streaming response endpoints for real-time agent communication.
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from config import ChatRequest
-from runtime.orchestrator import RuntimeOrchestrator
+from agent_runner.config import ChatRequest
+from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 router = APIRouter()
 

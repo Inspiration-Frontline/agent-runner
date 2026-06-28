@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 
-from agent_definitions.config_models import AgentDefinition, MemoryPolicy
-from api.streaming import UsageEvent
-from context.builder import AgentContext, Message
-from runtime.openai_agents_runtime import OpenAIAgentsRuntime
-from runtime.orchestrator import RuntimeOrchestrator
+from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
+from agent_runner.api.streaming import UsageEvent
+from agent_runner.context.builder import AgentContext, Message
+from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
+from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
 class DummyModelFactory:

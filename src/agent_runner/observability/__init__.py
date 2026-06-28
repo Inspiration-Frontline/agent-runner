@@ -1,5 +1,5 @@
-from observability.logging import RequestContextFilter, get_logger, setup_logging
-from observability.metrics import (
+from agent_runner.observability.logging import RequestContextFilter, get_logger, setup_logging
+from agent_runner.observability.metrics import (
     ACTIVE_REQUESTS,
     MODEL_CALLS,
     REQUEST_COUNT,
@@ -10,7 +10,7 @@ from observability.metrics import (
     get_metrics_collector,
     metrics_middleware,
 )
-from observability.tracing import Span, Tracer, get_tracer, init_tracer
+from agent_runner.observability.tracing import Span, Tracer, get_tracer, init_tracer
 
 __all__ = [
     "setup_logging",

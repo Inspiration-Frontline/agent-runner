@@ -11,8 +11,9 @@ This script tests:
 import asyncio
 
 import httpx
+from v2.nacos import ConfigParam
 
-from nacos_config import NacosConfigLoader
+from agent_runner.nacos_config import NacosConfigLoader
 
 # Test configuration values (different from local defaults)
 TEST_CONFIG_V1 = """
@@ -63,34 +64,48 @@ async def publish_config(loader: NacosConfigLoader, content: str):
     if not loader.config_client:
         raise RuntimeError("Nacos client not initialized")
 
-    # Use the SDK's publish method
-    await loader.config_client.publish_config(
+    published = await loader.config_client.publish_config(ConfigParam(
         data_id=loader.data_id,
         group=loader.group,
         content=content,
-        namespace_id=loader.namespace,
-    )
+        type="yaml",
+    ))
+    if not published:
+        raise RuntimeError(f"Failed to publish config to Nacos: data_id={loader.data_id}, group={loader.group}")
     print(f"Published config to Nacos: data_id={loader.data_id}, group={loader.group}")
 
 
-async def test_config_priority():
+async def wait_for_debug_config(expected: dict[str, object], timeout_seconds: float = 30.0) -> dict:
+    """Poll the running service until the debug config endpoint returns expected values."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    last_config = None
+    async with httpx.AsyncClient() as client:
+        while asyncio.get_running_loop().time() < deadline:
+            resp = await client.get("http://localhost:8000/v1/agent/debug/config")
+            resp.raise_for_status()
+            last_config = resp.json()
+            if all(last_config.get(key) == value for key, value in expected.items()):
+                return last_config
+            await asyncio.sleep(1)
+
+    raise AssertionError(f"Expected config values {expected}, got {last_config}")
+
+
+async def test_config_priority(loader: NacosConfigLoader):
     """Test that Nacos config overrides local defaults."""
     print("\n=== TEST 1: Config Priority (Nacos > Local) ===")
-
-    # Initialize Nacos loader
-    loader = NacosConfigLoader.from_env()
-    await loader.initialize()
 
     # Publish V1 config (different from local defaults)
     await publish_config(loader, TEST_CONFIG_V1)
 
-    # Wait for config to be synced
-    await asyncio.sleep(2)
-
-    # Fetch from debug endpoint
-    async with httpx.AsyncClient() as client:
-        resp = await client.get("http://localhost:8000/v1/agent/debug/config")
-        config = resp.json()
+    config = await wait_for_debug_config(
+        {
+            "lite_llm_base_url": "http://nacos-test-v1:5000",
+            "agent_config_center_url": "http://nacos-test-v1:9081",
+            "redis_host": "nacos-redis-v1",
+            "agent_config_cache_ttl_seconds": 600,
+        }
+    )
 
     print(f"Config from API: {config}")
 
@@ -104,9 +119,7 @@ async def test_config_priority():
     assert config["agent_config_cache_ttl_seconds"] == 600, \
         f"Expected Nacos value, got {config['agent_config_cache_ttl_seconds']}"
 
-    print("✅ TEST 1 PASSED: Nacos config overrides local defaults")
-
-    return loader
+    print("OK TEST 1 PASSED: Nacos config overrides local defaults")
 
 
 async def test_dynamic_refresh(loader: NacosConfigLoader):
@@ -116,13 +129,14 @@ async def test_dynamic_refresh(loader: NacosConfigLoader):
     # Publish V2 config (updated values)
     await publish_config(loader, TEST_CONFIG_V2)
 
-    # Wait for listener to pick up changes
-    await asyncio.sleep(3)
-
-    # Fetch from debug endpoint
-    async with httpx.AsyncClient() as client:
-        resp = await client.get("http://localhost:8000/v1/agent/debug/config")
-        config = resp.json()
+    config = await wait_for_debug_config(
+        {
+            "lite_llm_base_url": "http://nacos-test-v2:6000",
+            "agent_config_center_url": "http://nacos-test-v2:10081",
+            "redis_host": "nacos-redis-v2",
+            "agent_config_cache_ttl_seconds": 900,
+        }
+    )
 
     print(f"Config from API: {config}")
 
@@ -136,18 +150,17 @@ async def test_dynamic_refresh(loader: NacosConfigLoader):
     assert config["agent_config_cache_ttl_seconds"] == 900, \
         f"Expected updated Nacos value, got {config['agent_config_cache_ttl_seconds']}"
 
-    print("✅ TEST 2 PASSED: Dynamic refresh works correctly")
+    print("OK TEST 2 PASSED: Dynamic refresh works correctly")
 
 
 async def cleanup(loader: NacosConfigLoader):
     """Remove test config from Nacos."""
     print("\n=== CLEANUP ===")
     if loader.config_client:
-        await loader.config_client.remove_config(
+        await loader.config_client.remove_config(ConfigParam(
             data_id=loader.data_id,
             group=loader.group,
-            namespace_id=loader.namespace,
-        )
+        ))
         print("Removed test config from Nacos")
     await loader.close()
 
@@ -160,14 +173,17 @@ async def main():
     print("  2. agent-runner service running at localhost:8000")
     print("  3. NACOS_ENABLED=true in environment")
 
+    loader = NacosConfigLoader.from_env()
     try:
-        loader = await test_config_priority()
+        await loader.initialize()
+        await test_config_priority(loader)
         await test_dynamic_refresh(loader)
-        await cleanup(loader)
-        print("\n✅ ALL TESTS PASSED")
+        print("\nOK ALL TESTS PASSED")
     except Exception as e:
-        print(f"\n❌ TEST FAILED: {e}")
+        print(f"\nERROR TEST FAILED: {e}")
         raise
+    finally:
+        await cleanup(loader)
 
 
 if __name__ == "__main__":

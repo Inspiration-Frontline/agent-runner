@@ -14,6 +14,8 @@ from typing import Any
 import yaml
 from v2.nacos import ClientConfigBuilder, ConfigParam, GRPCConfig, NacosConfigService
 
+from agent_runner.config import Settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -206,6 +208,31 @@ class NacosConfigLoader:
                 logger.warning(f"Error closing Nacos client: {e}")
 
     @staticmethod
+    def from_settings(settings: Settings) -> "NacosConfigLoader":
+        """
+        Create a NacosConfigLoader from application settings.
+
+        The Settings instance already merges OS environment values with the
+        repo-local env file, so this keeps PyCharm/direct-file startup and
+        verification runs on the same configuration path.
+
+        Args:
+            settings: Application settings loaded from env files and environment.
+
+        Returns:
+            NacosConfigLoader: A new loader configured from application settings.
+        """
+        return NacosConfigLoader(
+            enabled=settings.nacos_enabled,
+            server_address=settings.nacos_server_address,
+            namespace=settings.nacos_namespace,
+            data_id=settings.nacos_data_id,
+            group=settings.nacos_group,
+            username=settings.nacos_username,
+            password=settings.nacos_password,
+        )
+
+    @staticmethod
     def from_env() -> "NacosConfigLoader":
         """
         Create a NacosConfigLoader from environment variables.
@@ -240,7 +267,7 @@ class NacosConfigLoader:
 _nacos_loader: NacosConfigLoader | None = None
 
 
-async def get_nacos_loader() -> NacosConfigLoader:
+async def get_nacos_loader(settings: Settings | None = None) -> NacosConfigLoader:
     """
     Get or create the global Nacos configuration loader instance.
 
@@ -249,7 +276,7 @@ async def get_nacos_loader() -> NacosConfigLoader:
     """
     global _nacos_loader
     if _nacos_loader is None:
-        _nacos_loader = NacosConfigLoader.from_env()
+        _nacos_loader = NacosConfigLoader.from_settings(settings) if settings else NacosConfigLoader.from_env()
         await _nacos_loader.initialize()
     return _nacos_loader
 

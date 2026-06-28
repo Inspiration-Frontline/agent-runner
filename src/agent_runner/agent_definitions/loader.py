@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import redis.asyncio as aioredis
 
-from config import PROJECT_ROOT, AgentConfig, MemoryPolicy, settings
+from agent_runner.config import PROJECT_ROOT, AgentConfig, MemoryPolicy, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -47,25 +47,28 @@ class AgentConfigLoader:
         Sets up HTTP client for remote calls, Redis client for caching,
         and resolves the local configuration file path.
         """
-        self.base_url = settings.agent_config_center_url
+        current_settings = get_settings()
+        self.base_url = current_settings.agent_config_center_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
         # Initialize Redis client for caching when explicitly enabled.
         self.redis_client = None
-        if settings.agent_config_cache_enabled:
+        if current_settings.agent_config_cache_enabled:
             self.redis_client = aioredis.Redis(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                password=settings.redis_password if settings.redis_password else None,
-                db=settings.redis_db,
+                host=current_settings.redis_host,
+                port=current_settings.redis_port,
+                password=current_settings.redis_password if current_settings.redis_password else None,
+                db=current_settings.redis_db,
                 decode_responses=True,
-                socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
-                socket_timeout=settings.redis_socket_timeout_seconds,
+                socket_connect_timeout=current_settings.redis_socket_connect_timeout_seconds,
+                socket_timeout=current_settings.redis_socket_timeout_seconds,
             )
-        self.cache_ttl_seconds = settings.agent_config_cache_ttl_seconds
+        self.cache_ttl_seconds = current_settings.agent_config_cache_ttl_seconds
+        self.local_agent_config_enabled = current_settings.local_agent_config_enabled
+        self.max_output_tokens = current_settings.max_output_tokens
 
         # Resolve local configuration path
-        self.local_config_path = Path(settings.local_agent_config_path)
+        self.local_config_path = Path(current_settings.local_agent_config_path)
         if not self.local_config_path.is_absolute():
             self.local_config_path = PROJECT_ROOT / self.local_config_path
 
@@ -99,7 +102,7 @@ class AgentConfigLoader:
             return cached_config
 
         # Try local configuration if enabled
-        if settings.local_agent_config_enabled:
+        if self.local_agent_config_enabled:
             local_config = self._load_local_config(agent_id, version)
             if local_config:
                 await self._set_cache(cache_key, local_config)
@@ -235,7 +238,7 @@ class AgentConfigLoader:
             tools=data.get("tools", []),
             mcp_servers=data.get("mcp_servers", []),
             memory_policy=memory_policy,
-            max_output_tokens=data.get("max_output_tokens", settings.max_output_tokens),
+            max_output_tokens=data.get("max_output_tokens", self.max_output_tokens),
             temperature=data.get("temperature", 0.7),
         )
 

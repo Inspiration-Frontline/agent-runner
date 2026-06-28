@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 
@@ -153,9 +153,9 @@ class ConfigurationManager:
             return self._base_settings
 
         try:
-            from nacos_config import get_nacos_loader
+            from agent_runner.nacos_config import get_nacos_loader
 
-            loader = await get_nacos_loader()
+            loader = await get_nacos_loader(self._base_settings)
             logger.info(f"Nacos config client initialized: data_id={loader.data_id}, group={loader.group}")
         except Exception as e:
             logger.warning(f"Failed to initialize Nacos: {e}, using local configuration only")
@@ -225,7 +225,7 @@ class ConfigurationManager:
             return self._base_settings
 
         try:
-            from nacos_config import _nacos_loader
+            from agent_runner.nacos_config import _nacos_loader
 
             if _nacos_loader and _nacos_loader._cached_config:
                 return self._merge_settings(self._base_settings, _nacos_loader._cached_config)
@@ -270,8 +270,8 @@ async def initialize_settings() -> Settings:
     return await _config_manager.initialize()
 
 
-# For backward compatibility, expose settings as the base settings initially
-# It will be updated after initialize_settings() is called
+# For backward compatibility, expose settings as the base settings snapshot.
+# Call get_settings() after initialize_settings() when you need merged values.
 settings = _base_settings
 
 

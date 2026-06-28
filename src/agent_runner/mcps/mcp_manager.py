@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from mcps.mcp_connection_pool import MCPConnectionPool
+from agent_runner.mcps.mcp_connection_pool import MCPConnectionPool
 
 logger = logging.getLogger(__name__)
 
