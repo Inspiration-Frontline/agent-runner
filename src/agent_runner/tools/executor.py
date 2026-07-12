@@ -31,7 +31,7 @@ class ToolExecutor:
 
     async def execute(
         self,
-        tool_id: str,
+        tool_key: str,
         arguments: dict[str, Any],
         cancellation_token: CancellationToken | None = None,
     ) -> Any:
@@ -39,7 +39,7 @@ class ToolExecutor:
         Execute a single tool with given arguments.
 
         Args:
-            tool_id: ID of the tool to execute.
+            tool_key: Globally unique key of the Tool to execute.
             arguments: Arguments to pass to the tool.
             cancellation_token: Optional token for execution cancellation.
 
@@ -50,14 +50,14 @@ class ToolExecutor:
             ValueError: If tool is not found.
             asyncio.CancelledError: If execution is cancelled.
         """
-        tool = self.registry.get(tool_id)
+        tool = self.registry.get(tool_key)
         if not tool:
-            raise ValueError(f"Tool not found: {tool_id}")
+            raise ValueError(f"Tool not found: {tool_key}")
 
         if cancellation_token and cancellation_token.is_cancelled():
             raise asyncio.CancelledError("Tool execution cancelled")
 
-        logger.info(f"Executing tool: {tool_id} with arguments: {arguments}")
+        logger.info("Executing Tool %s with arguments: %s", tool_key, arguments)
 
         try:
             if tool.handler:
@@ -71,14 +71,14 @@ class ToolExecutor:
             else:
                 result = await self._execute_tool(tool, arguments)
 
-            logger.info(f"Tool {tool_id} executed successfully")
+            logger.info("Tool %s executed successfully", tool_key)
             return result
 
         except asyncio.CancelledError:
-            logger.info(f"Tool {tool_id} execution cancelled")
+            logger.info("Tool %s execution cancelled", tool_key)
             raise
         except Exception:
-            logger.exception(f"Error executing tool {tool_id}")
+            logger.exception("Error executing Tool %s", tool_key)
             raise
 
     async def _execute_tool(self, tool: ToolDefinition, arguments: dict[str, Any]) -> Any:
@@ -92,7 +92,7 @@ class ToolExecutor:
         Returns:
             Any: Placeholder result indicating tool is not implemented.
         """
-        return {"status": "not_implemented", "tool": tool.tool_id}
+        return {"status": "not_implemented", "tool_key": tool.tool_key}
 
     async def execute_batch(
         self,
@@ -114,19 +114,19 @@ class ToolExecutor:
             if cancellation_token and cancellation_token.is_cancelled():
                 break
 
-            tool_id = call.get("tool_id") or call.get("name")
+            tool_key = call.get("tool_key") or call.get("name")
             arguments = call.get("arguments", {})
 
             try:
-                result = await self.execute(tool_id, arguments, cancellation_token)
+                result = await self.execute(tool_key, arguments, cancellation_token)
                 results.append({
-                    "tool_id": tool_id,
+                    "tool_key": tool_key,
                     "status": "success",
                     "result": result,
                 })
             except Exception as e:
                 results.append({
-                    "tool_id": tool_id,
+                    "tool_key": tool_key,
                     "status": "error",
                     "error": str(e),
                 })

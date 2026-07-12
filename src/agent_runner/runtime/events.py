@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -72,7 +72,7 @@ class RuntimeEvent:
         return cls(
             event_id=str(uuid4()),
             event_type=event_type,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(UTC),
             data=data,
             request_id=request_id,
         )

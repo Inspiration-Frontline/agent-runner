@@ -1,10 +1,21 @@
+import hashlib
+import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class ToolSourceType(StrEnum):
+    """Origin from which agent-runner resolves and executes a Tool."""
+
+    INTERNAL = "INTERNAL"
+    BUSINESS = "BUSINESS"
+    MCP = "MCP"
 
 
 @dataclass
@@ -16,20 +27,42 @@ class ToolDefinition:
     and type classification for registry management.
 
     Attributes:
-        tool_id: Unique identifier for this tool.
-        name: Human-readable name for this tool.
+        tool_key: Globally unique and permanently stable Tool identity.
+        tool_name: Provider-facing function name exposed to the LLM.
         description: Detailed description of tool's functionality.
         parameters: Parameter schema defining tool's input structure.
+        strict: Whether strict JSON Schema argument generation is requested.
+        definition_hash: SHA-256 digest of the canonical normalized definition.
         handler: Optional handler function for tool execution.
-        tool_type: Type of tool: 'internal', 'mcp', or 'business'.
+        source_type: Origin from which the Tool is resolved and executed.
     """
 
-    tool_id: str
-    name: str
+    tool_key: str
+    tool_name: str
     description: str
     parameters: dict[str, Any]
+    strict: bool = False
+    definition_hash: str = field(init=False)
     handler: Callable | None = None
-    tool_type: str = "internal"
+    source_type: ToolSourceType = ToolSourceType.INTERNAL
+
+    def __post_init__(self):
+        """Calculate the initial audit digest of this normalized definition."""
+        canonical_definition = {
+            "description": self.description,
+            "parameters": self.parameters,
+            "source_type": self.source_type.value,
+            "strict": self.strict,
+            "tool_key": self.tool_key,
+            "tool_name": self.tool_name,
+        }
+        canonical_json = json.dumps(
+            canonical_definition,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self.definition_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
 class ToolRegistry:
@@ -37,11 +70,11 @@ class ToolRegistry:
     Registry for managing available tools.
 
     Provides registration, retrieval, and categorization of tools,
-    supporting tool lookup by ID, type, and specification generation.
+    supporting Tool lookup by stable key, source, and specification generation.
 
     Attributes:
-        _tools: Dictionary mapping tool IDs to tool definitions.
-        _tools_by_type: Dictionary mapping tool types to lists of tool IDs.
+        _tools: Dictionary mapping Tool keys to Tool definitions.
+        _tools_by_source: Dictionary mapping source types to lists of Tool keys.
     """
 
     def __init__(self):
@@ -49,10 +82,10 @@ class ToolRegistry:
         Initialize the tool registry with empty collections.
         """
         self._tools: dict[str, ToolDefinition] = {}
-        self._tools_by_type: dict[str, list[str]] = {
-            "internal": [],
-            "mcp": [],
-            "business": [],
+        self._tools_by_source: dict[ToolSourceType, list[str]] = {
+            ToolSourceType.INTERNAL: [],
+            ToolSourceType.BUSINESS: [],
+            ToolSourceType.MCP: [],
         }
 
     def register(self, tool: ToolDefinition):
@@ -62,36 +95,40 @@ class ToolRegistry:
         Args:
             tool: The tool definition to register.
         """
-        self._tools[tool.tool_id] = tool
-        if tool.tool_type in self._tools_by_type:
-            self._tools_by_type[tool.tool_type].append(tool.tool_id)
-        logger.info(f"Registered tool: {tool.tool_id} (type: {tool.tool_type})")
+        existing = self._tools.get(tool.tool_key)
+        if existing and existing.source_type in self._tools_by_source:
+            self._tools_by_source[existing.source_type].remove(tool.tool_key)
 
-    def unregister(self, tool_id: str):
+        self._tools[tool.tool_key] = tool
+        if tool.source_type in self._tools_by_source:
+            self._tools_by_source[tool.source_type].append(tool.tool_key)
+        logger.info("Registered Tool: %s (source: %s)", tool.tool_key, tool.source_type)
+
+    def unregister(self, tool_key: str):
         """
         Unregister a tool from the registry.
 
         Args:
-            tool_id: ID of the tool to unregister.
+            tool_key: Globally unique key of the Tool to unregister.
         """
-        if tool_id in self._tools:
-            tool = self._tools[tool_id]
-            if tool.tool_type in self._tools_by_type:
-                self._tools_by_type[tool.tool_type].remove(tool_id)
-            del self._tools[tool_id]
-            logger.info(f"Unregistered tool: {tool_id}")
+        if tool_key in self._tools:
+            tool = self._tools[tool_key]
+            if tool.source_type in self._tools_by_source:
+                self._tools_by_source[tool.source_type].remove(tool_key)
+            del self._tools[tool_key]
+            logger.info("Unregistered Tool: %s", tool_key)
 
-    def get(self, tool_id: str) -> ToolDefinition | None:
+    def get(self, tool_key: str) -> ToolDefinition | None:
         """
-        Retrieve a tool by ID.
+        Retrieve a Tool by its stable global key.
 
         Args:
-            tool_id: ID of the tool to retrieve.
+            tool_key: Globally unique key of the Tool to retrieve.
 
         Returns:
             ToolDefinition | None: The tool if found, None otherwise.
         """
-        return self._tools.get(tool_id)
+        return self._tools.get(tool_key)
 
     def get_all(self) -> list[ToolDefinition]:
         """
@@ -102,39 +139,40 @@ class ToolRegistry:
         """
         return list(self._tools.values())
 
-    def get_by_type(self, tool_type: str) -> list[ToolDefinition]:
+    def get_by_source(self, source_type: ToolSourceType) -> list[ToolDefinition]:
         """
-        Get all tools of a specific type.
+        Get all Tools from a specific execution source.
 
         Args:
-            tool_type: Type of tools to retrieve.
+            source_type: Origin of Tools to retrieve.
 
         Returns:
             list[ToolDefinition]: List of tools of the specified type.
         """
-        tool_ids = self._tools_by_type.get(tool_type, [])
-        return [self._tools[tid] for tid in tool_ids if tid in self._tools]
+        tool_keys = self._tools_by_source.get(source_type, [])
+        return [self._tools[key] for key in tool_keys if key in self._tools]
 
-    def get_tool_specs(self, tool_ids: list[str]) -> list[dict[str, Any]]:
+    def get_tool_specs(self, tool_keys: list[str]) -> list[dict[str, Any]]:
         """
         Generate OpenAI-compatible tool specifications.
 
         Args:
-            tool_ids: List of tool IDs to generate specs for.
+            tool_keys: Globally unique keys of Tools to generate specs for.
 
         Returns:
             list[dict[str, Any]]: List of tool specifications in OpenAI format.
         """
         specs = []
-        for tool_id in tool_ids:
-            tool = self.get(tool_id)
+        for tool_key in tool_keys:
+            tool = self.get(tool_key)
             if tool:
                 specs.append({
                     "type": "function",
                     "function": {
-                        "name": tool.name,
+                        "name": tool.tool_name,
                         "description": tool.description,
                         "parameters": tool.parameters,
+                        "strict": tool.strict,
                     },
                 })
         return specs
@@ -150,20 +188,20 @@ class BaseTool(ABC):
 
     @property
     @abstractmethod
-    def tool_id(self) -> str:
+    def tool_key(self) -> str:
         """
-        Get the unique identifier for this tool.
+        Get the globally unique and permanently stable identity for this Tool.
 
         Returns:
-            str: The tool ID.
+            str: The stable global Tool key.
         """
         pass
 
     @property
     @abstractmethod
-    def name(self) -> str:
+    def tool_name(self) -> str:
         """
-        Get the human-readable name for this tool.
+        Get the provider-facing function name exposed to the LLM.
 
         Returns:
             str: The tool name.
@@ -192,14 +230,24 @@ class BaseTool(ABC):
         return {}
 
     @property
-    def tool_type(self) -> str:
+    def strict(self) -> bool:
         """
-        Get the type classification for this tool.
+        Return whether strict JSON Schema argument generation is requested.
 
         Returns:
-            str: Tool type (default: 'internal').
+            bool: False unless the Tool explicitly opts in.
         """
-        return "internal"
+        return False
+
+    @property
+    def source_type(self) -> ToolSourceType:
+        """
+        Get the origin from which this Tool is resolved and executed.
+
+        Returns:
+            ToolSourceType: Tool origin (default: INTERNAL).
+        """
+        return ToolSourceType.INTERNAL
 
     @abstractmethod
     async def execute(self, **kwargs) -> Any:
@@ -222,10 +270,11 @@ class BaseTool(ABC):
             ToolDefinition: The tool definition for this instance.
         """
         return ToolDefinition(
-            tool_id=self.tool_id,
-            name=self.name,
+            tool_key=self.tool_key,
+            tool_name=self.tool_name,
             description=self.description,
             parameters=self.parameters,
+            strict=self.strict,
             handler=self.execute,
-            tool_type=self.tool_type,
+            source_type=self.source_type,
         )

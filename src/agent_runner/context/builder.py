@@ -166,12 +166,12 @@ class ContextBuilder:
 
         return []
 
-    async def _load_tool_specs(self, tool_ids: list[str]) -> list[dict[str, Any]]:
+    async def _load_tool_specs(self, tool_keys: list[str]) -> list[dict[str, Any]]:
         """
         Load tool specifications for the agent.
 
         Args:
-            tool_ids: List of tool IDs to load specifications for.
+            tool_keys: Globally unique keys of Tools to load specifications for.
 
         Returns:
             list[dict[str, Any]]: List of tool specification dictionaries.
