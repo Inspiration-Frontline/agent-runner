@@ -40,6 +40,7 @@ class OpenAIAgentsRuntime:
         """
         Execute an agent request with an SDK-managed streaming response.
         """
+        # Agents SDK agents are declarative; Runner owns execution and streaming.
         sdk_agent = self._build_sdk_agent(agent, context.system_prompt)
         sdk_input = self._build_input(context)
         result = Runner.run_streamed(

@@ -2,8 +2,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from agent_runner.api.debug_routes import router as debug_router
+from agent_runner.api.responses import HealthResponse
 from agent_runner.api.routes import router as agent_router
 from agent_runner.config import get_settings, initialize_settings
 from agent_runner.nacos_config import close_nacos_loader
@@ -42,7 +44,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Agent Runner",
     description="Core runtime component for AI Runtime Platform",
-    version="0.1.0",
+    version="0.0.1",
     lifespan=lifespan,
 )
 
@@ -59,12 +61,17 @@ app.middleware("http")(metrics_middleware)
 app.include_router(agent_router, prefix="/v1/agent")
 
 
-@app.get("/health")
-async def health_check():
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check() -> HealthResponse:
     """
     Health check endpoint.
 
     Returns:
-        dict: A dictionary with status "healthy" indicating the service is running.
+        HealthResponse: The current service health status.
     """
-    return {"status": "healthy"}
+    return HealthResponse(status="healthy")

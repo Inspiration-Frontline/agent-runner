@@ -1,9 +1,13 @@
-import asyncio
+import inspect
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class RuntimeEventType(StrEnum):
@@ -78,6 +82,9 @@ class RuntimeEvent:
         )
 
 
+type RuntimeEventHandler = Callable[[RuntimeEvent], Any]
+
+
 class RuntimeEventBus:
     """
     Event bus for publishing and subscribing to runtime events.
@@ -90,15 +97,15 @@ class RuntimeEventBus:
         _handlers: Dictionary mapping event types to handler lists.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the event bus with empty handler lists.
         """
-        self._handlers: dict[RuntimeEventType, list] = {
+        self._handlers: dict[RuntimeEventType, list[RuntimeEventHandler]] = {
             event_type: [] for event_type in RuntimeEventType
         }
 
-    def subscribe(self, event_type: RuntimeEventType, handler):
+    def subscribe(self, event_type: RuntimeEventType, handler: RuntimeEventHandler) -> None:
         """
         Subscribe a handler to a specific event type.
 
@@ -108,7 +115,7 @@ class RuntimeEventBus:
         """
         self._handlers[event_type].append(handler)
 
-    def unsubscribe(self, event_type: RuntimeEventType, handler):
+    def unsubscribe(self, event_type: RuntimeEventType, handler: RuntimeEventHandler) -> None:
         """
         Unsubscribe a handler from a specific event type.
 
@@ -119,19 +126,22 @@ class RuntimeEventBus:
         if handler in self._handlers[event_type]:
             self._handlers[event_type].remove(handler)
 
-    async def publish(self, event: RuntimeEvent):
+    async def publish(self, event: RuntimeEvent) -> None:
         """
         Publish an event to all subscribed handlers.
 
         Args:
             event: The event to publish.
         """
-        handlers = self._handlers.get(event.event_type, [])
+        handlers: list[RuntimeEventHandler] = self._handlers.get(event.event_type, [])
         for handler in handlers:
             try:
-                if asyncio.iscoroutinefunction(handler):
-                    await handler(event)
-                else:
-                    handler(event)
+                result: Any = handler(event)
+                if inspect.isawaitable(result):
+                    await result
             except Exception:
-                pass
+                logger.exception(
+                    "Runtime event handler failed: event_type=%s handler=%r",
+                    event.event_type,
+                    handler,
+                )

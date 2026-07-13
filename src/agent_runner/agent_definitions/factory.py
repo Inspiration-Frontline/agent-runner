@@ -7,6 +7,7 @@ from agent_runner.config import AgentConfig
 logger = logging.getLogger(__name__)
 
 
+# TODO: Why do we need the separate AgentConfig & AgentDefinition?
 class AgentFactory:
     """
     Factory for creating and managing agent instances.

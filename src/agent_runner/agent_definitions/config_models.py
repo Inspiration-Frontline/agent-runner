@@ -65,33 +65,6 @@ class AgentDefinition:
 
 
 @dataclass
-class ToolSpec:
-    """
-    Specification of a tool available to agents.
-
-    Defines the tool's identity, interface, and configuration
-    for execution by the tool executor.
-
-    Attributes:
-        tool_key: Globally unique and permanently stable Tool identity.
-        tool_name: Provider-facing function name exposed to the LLM.
-        description: Detailed description of tool's functionality.
-        parameters: Parameter schema defining tool's input structure.
-        strict: Whether strict JSON Schema argument generation is requested.
-        definition_hash: SHA-256 digest of the canonical normalized definition.
-        source_type: Tool origin: 'INTERNAL', 'BUSINESS', or 'MCP'.
-    """
-
-    tool_key: str
-    tool_name: str
-    description: str
-    parameters: dict[str, Any]
-    definition_hash: str
-    strict: bool = False
-    source_type: str = "INTERNAL"
-
-
-@dataclass
 class MCPServerSpec:
     """
     Specification of an MCP (Model Context Protocol) server.

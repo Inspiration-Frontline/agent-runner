@@ -19,6 +19,9 @@ from agent_runner.config import PROJECT_ROOT, AgentConfig, MemoryPolicy, get_set
 logger = logging.getLogger(__name__)
 
 
+# TODO: Mark, only load 1 or 2 sample agents from "D:\DinoStark\Projects\CodeSpaces\AgentBreaker\agent-runner\config\agents.json"
+# And load agents from agent-configuration-center.
+# But before implementing the load_agent() rpc method, we need to have a clear definition of agent.
 class AgentConfigLoader:
     """
     Agent configuration loader with Redis caching support.

@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     # Server configuration
     server_host: str = Field(default="0.0.0.0", validation_alias="SERVER_HOST")
     server_port: int = Field(default=8000, validation_alias="SERVER_PORT")
+    open_browser_on_startup: bool = Field(default=True, validation_alias="OPEN_BROWSER_ON_STARTUP")
 
     # LiteLLM gateway configuration
     lite_llm_base_url: str = "http://localhost:4000"
