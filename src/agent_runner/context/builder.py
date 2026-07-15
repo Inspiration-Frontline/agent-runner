@@ -106,6 +106,7 @@ class ContextBuilder:
         conversation_id: str | None,
         user_id: int,
         current_message: str,
+        conversation_history: list[Message] | None = None,
     ) -> AgentContext:
         """
         Build the complete execution context for an agent request.
@@ -119,7 +120,8 @@ class ContextBuilder:
         Returns:
             AgentContext: The complete execution context.
         """
-        conversation_history = await self._load_conversation_history(conversation_id)
+        if conversation_history is None:
+            conversation_history = await self._load_conversation_history(conversation_id)
 
         user_profile = {}
         if agent_config.memory_policy.profile:

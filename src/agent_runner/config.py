@@ -329,6 +329,12 @@ class ChatRequest(BaseModel):
         return normalized
 
 
+class CancelChatRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
+
+
 class AgentConfig(BaseModel):
     """
     Complete agent configuration model.

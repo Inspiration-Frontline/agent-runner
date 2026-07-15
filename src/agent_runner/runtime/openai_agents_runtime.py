@@ -48,6 +48,8 @@ class OpenAIAgentsRuntime:
             input=sdk_input,
             max_turns=10,
         )
+        if cancellation_token is not None:
+            cancellation_token.add_callback(result.cancel)
 
         try:
             async for event in result.stream_events():

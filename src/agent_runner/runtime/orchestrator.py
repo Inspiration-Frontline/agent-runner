@@ -45,13 +45,13 @@ from agent_runner.api.streaming import (
     UsageEvent,
 )
 from agent_runner.config import ChatRequest, get_settings
-from agent_runner.context.builder import ContextBuilder
+from agent_runner.context.builder import ContextBuilder, Message
 from agent_runner.conversation import (
     ConversationBusyError,
     ConversationExecutionLock,
     ConversationManagerClient,
 )
-from agent_runner.runtime.cancellation import CancellationManager
+from agent_runner.runtime.cancellation import CancellationManager, conversation_cancellation_registry
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.tools.executor import ToolExecutor
 
@@ -99,6 +99,13 @@ class RuntimeOrchestrator:
         self.openai_runtime = OpenAIAgentsRuntime()
         self.conversation_client = ConversationManagerClient()
         self.execution_lock = ConversationExecutionLock()
+        self._lock_acquired = False
+        self._terminal_round_persisted = False
+
+    async def acquire_conversation(self, conversation_id: str) -> None:
+        """Acquire the conversation execution lease before an SSE response is opened."""
+        await self.execution_lock.acquire(conversation_id)
+        self._lock_acquired = True
 
     async def run(
         self, chat_request: ChatRequest, user_id: int, http_request: Request
@@ -131,12 +138,16 @@ class RuntimeOrchestrator:
             asyncio.CancelledError: If the request is cancelled by client disconnect.
         """
         cancellation_token = self.cancellation_manager.create_token()
-        lock_acquired = False
         round_start = _epoch_millis()
+        next_round_number: int | None = None
+        user_request_validated = False
 
         try:
-            await self.execution_lock.acquire(chat_request.conversation_id)
-            lock_acquired = True
+            if not getattr(self, "_lock_acquired", False):
+                await self.acquire_conversation(chat_request.conversation_id)
+            conversation_cancellation_registry.register(
+                user_id, chat_request.conversation_id, cancellation_token
+            )
 
             history = await self.conversation_client.get_round_history(user_id, chat_request.conversation_id)
             if history.base is None or not history.base.success:
@@ -150,13 +161,26 @@ class RuntimeOrchestrator:
                     phase="preflight",
                 )
                 return
-            if history.data.latest_round_number != 0 or history.data.rounds:
-                yield ErrorEvent(
-                    "Phase 3 supports only the first persisted round in a conversation.",
-                    error_code="FIRST_ROUND_ONLY",
-                    phase="preflight",
+            next_round_number = history.data.latest_round_number + 1
+            user_request_validated = True
+
+            conversation_history: list[Message] = []
+            if history.data.latest_round_number > 0:
+                replay = await self.conversation_client.get_model_context(
+                    user_id, chat_request.conversation_id, history.data.latest_round_number
                 )
-                return
+                if replay.base is None or not replay.base.success:
+                    message = replay.base.message if replay.base is not None else "Conversation replay RPC failed."
+                    yield ErrorEvent(message, error_code="REPLAY_FAILED", phase="preflight")
+                    return
+                if replay.data is None:
+                    yield ErrorEvent(
+                        "Conversation replay RPC returned no data.",
+                        error_code="INVALID_REPLAY_RESPONSE",
+                        phase="preflight",
+                    )
+                    return
+                conversation_history = self._to_context_messages(replay.data.context_messages)
 
             settings = get_settings()
             agent_config = await self.config_loader.load(settings.default_agent_id)
@@ -166,6 +190,7 @@ class RuntimeOrchestrator:
                 conversation_id=chat_request.conversation_id,
                 user_id=user_id,
                 current_message=chat_request.message,
+                conversation_history=conversation_history,
             )
 
             agent = await self.agent_factory.create(agent_config)
@@ -177,13 +202,25 @@ class RuntimeOrchestrator:
                 if await http_request.is_disconnected():
                     logger.info("Client disconnected, cancelling request")
                     cancellation_token.cancel()
+                    await self._persist_terminal_round(
+                        user_id, chat_request, next_round_number, round_start,
+                        RoundStatus.CANCELLED, "Generation cancelled."
+                    )
                     return
 
                 if cancellation_token.is_cancelled():
+                    await self._persist_terminal_round(
+                        user_id, chat_request, next_round_number, round_start,
+                        RoundStatus.CANCELLED, "Generation cancelled."
+                    )
                     return
 
                 converted = self._convert_event(event)
                 if isinstance(converted, ErrorEvent):
+                    await self._persist_terminal_round(
+                        user_id, chat_request, next_round_number, round_start,
+                        RoundStatus.FAILED, converted.error_message or "Model execution failed."
+                    )
                     yield converted
                     return
                 if isinstance(converted, TokenDeltaEvent):
@@ -196,7 +233,17 @@ class RuntimeOrchestrator:
                     cancellation_token.cancel()
 
             call_end = _epoch_millis()
+            if cancellation_token.is_cancelled() or await http_request.is_disconnected():
+                await self._persist_terminal_round(
+                    user_id, chat_request, next_round_number, round_start,
+                    RoundStatus.CANCELLED, "Generation cancelled."
+                )
+                return
             if not response_text.strip():
+                await self._persist_terminal_round(
+                    user_id, chat_request, next_round_number, round_start,
+                    RoundStatus.FAILED, "The model returned an empty response."
+                )
                 yield ErrorEvent(
                     "The model returned an empty response.",
                     error_code="EMPTY_MODEL_RESPONSE",
@@ -215,6 +262,8 @@ class RuntimeOrchestrator:
                 round_start=round_start,
                 call_start=call_start,
                 call_end=call_end,
+                round_number=next_round_number,
+                conversation_history=conversation_history,
             )
             yield SavingEvent()
             try:
@@ -233,7 +282,20 @@ class RuntimeOrchestrator:
 
         except asyncio.CancelledError:
             logger.info("Request cancelled")
+            if user_request_validated and next_round_number is not None:
+                await self._persist_terminal_round(
+                    user_id, chat_request, next_round_number, round_start,
+                    RoundStatus.CANCELLED, "Generation cancelled."
+                )
             await self._cleanup(cancellation_token)
+            raise
+
+        except GeneratorExit:
+            if user_request_validated and next_round_number is not None:
+                await self._persist_terminal_round(
+                    user_id, chat_request, next_round_number, round_start,
+                    RoundStatus.CANCELLED, "Generation cancelled."
+                )
             raise
 
         except ConversationBusyError as error:
@@ -241,11 +303,20 @@ class RuntimeOrchestrator:
 
         except Exception as e:
             logger.exception("Error during agent execution")
+            if user_request_validated and next_round_number is not None:
+                await self._persist_terminal_round(
+                    user_id, chat_request, next_round_number, round_start,
+                    RoundStatus.FAILED, str(e) or "Agent execution failed."
+                )
             yield ErrorEvent(error_message=str(e), error_code="EXECUTION_FAILED", phase="execution")
         finally:
+            conversation_cancellation_registry.unregister(
+                user_id, chat_request.conversation_id, cancellation_token
+            )
             await self._cleanup(cancellation_token)
-            if lock_acquired:
+            if getattr(self, "_lock_acquired", False):
                 await self.execution_lock.release()
+                self._lock_acquired = False
 
     def _build_save_request(
         self,
@@ -260,6 +331,8 @@ class RuntimeOrchestrator:
         round_start: int,
         call_start: int,
         call_end: int,
+        round_number: int,
+        conversation_history: list[Message],
     ) -> SaveConversationRoundRequest:
         token_usage = None
         if usage is not None:
@@ -272,10 +345,9 @@ class RuntimeOrchestrator:
         llm_request = LlmRequest(
             provider="litellm",
             model=agent.model,
-            messages=[
-                LlmConversationMessage(role=MessageRole.SYSTEM, content=system_prompt),
-                LlmConversationMessage(role=MessageRole.USER, content=user_message),
-            ],
+            messages=[LlmConversationMessage(role=MessageRole.SYSTEM, content=system_prompt)]
+            + [self._to_llm_message(message) for message in conversation_history]
+            + [LlmConversationMessage(role=MessageRole.USER, content=user_message)],
             temperature=agent.temperature,
             max_output_tokens=agent.max_output_tokens,
             message_storage_mode=LlmMessageStorageMode.FULL_SNAPSHOT,
@@ -307,7 +379,7 @@ class RuntimeOrchestrator:
         return SaveConversationRoundRequest(
             user_id=user_id,
             conversation_id=conversation_id,
-            round_number=1,
+            round_number=round_number,
             user_request=UserRequest(content=user_message),
             turns=[turn],
             final_answer=AssistantAnswer(content=response_text, source_turn_number=1),
@@ -315,6 +387,56 @@ class RuntimeOrchestrator:
             start_time=round_start,
             end_time=call_end,
         )
+
+    async def _persist_terminal_round(
+        self,
+        user_id: int,
+        chat_request: ChatRequest,
+        round_number: int,
+        round_start: int,
+        status: RoundStatus,
+        error_message: str,
+    ) -> None:
+        if getattr(self, "_terminal_round_persisted", False):
+            return
+        request = SaveConversationRoundRequest(
+            user_id=user_id,
+            conversation_id=chat_request.conversation_id,
+            round_number=round_number,
+            user_request=UserRequest(content=chat_request.message),
+            status=status,
+            error_message=error_message,
+            start_time=round_start,
+            end_time=max(round_start, _epoch_millis()),
+        )
+        try:
+            response = await self.conversation_client.save_round(request)
+            if response.base is None or not response.base.success:
+                logger.error("Failed to persist terminal round: %s", response.base)
+            else:
+                self._terminal_round_persisted = True
+        except Exception:
+            logger.exception("Failed to persist terminal round")
+
+    def _to_context_messages(self, messages) -> list[Message]:
+        role_names = {
+            MessageRole.USER: "user",
+            MessageRole.ASSISTANT: "assistant",
+            MessageRole.TOOL: "tool",
+        }
+        return [
+            Message(role=role_names[message.role], content=message.content)
+            for message in messages
+            if message.role in role_names
+        ]
+
+    def _to_llm_message(self, message: Message) -> LlmConversationMessage:
+        roles = {
+            "user": MessageRole.USER,
+            "assistant": MessageRole.ASSISTANT,
+            "tool": MessageRole.TOOL,
+        }
+        return LlmConversationMessage(role=roles[message.role], content=message.content)
 
     def _convert_event(self, event: dict) -> StreamEvent:
         """

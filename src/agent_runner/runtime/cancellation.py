@@ -135,3 +135,26 @@ class CancellationManager:
         """
         if token_id in self._tokens:
             del self._tokens[token_id]
+
+
+class ConversationCancellationRegistry:
+    def __init__(self) -> None:
+        self._tokens: dict[tuple[int, str], CancellationToken] = {}
+
+    def register(self, user_id: int, conversation_id: str, token: CancellationToken) -> None:
+        self._tokens[(user_id, conversation_id)] = token
+
+    def cancel(self, user_id: int, conversation_id: str) -> bool:
+        token = self._tokens.get((user_id, conversation_id))
+        if token is None:
+            return False
+        token.cancel()
+        return True
+
+    def unregister(self, user_id: int, conversation_id: str, token: CancellationToken) -> None:
+        key = (user_id, conversation_id)
+        if self._tokens.get(key) is token:
+            del self._tokens[key]
+
+
+conversation_cancellation_registry = ConversationCancellationRegistry()

@@ -1,8 +1,11 @@
 from typing import Any
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    GetConversationReplayRequest,
+    GetConversationReplayResponse,
     GetConversationRoundHistoryRequest,
     GetConversationRoundHistoryResponse,
+    ReplayDetailLevel,
     SaveConversationRoundRequest,
     SaveConversationRoundResponse,
 )
@@ -35,6 +38,18 @@ class ConversationManagerClient:
 
     async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         return await self._service.save_conversation_round(request, timeout=10.0)
+
+    async def get_model_context(
+        self, user_id: int, conversation_id: str, end_round_number: int
+    ) -> GetConversationReplayResponse:
+        return await self._service.get_conversation_replay(
+            GetConversationReplayRequest(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                end_round_number=end_round_number,
+                detail_level=ReplayDetailLevel.MODEL_CONTEXT,
+            )
+        )
 
     async def close(self) -> None:
         await self._runtime.close()
