@@ -1,10 +1,11 @@
 {
   "agents": [
     {
-      "agent_id": "smoke-test",
-      "version": "local",
-      "model": "gpt-5.5",
-      "system_prompt": "You are AgentBreaker's local smoke-test agent. Answer briefly and directly.",
+      "agent_id": 1,
+      "version": 1,
+      "name": "general-assistant",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "You are AgentBreaker's general assistant. Answer general questions accurately, clearly, and directly. If information is uncertain, say so instead of inventing details.",
       "tools": [],
       "mcp_servers": [],
       "memory_policy": {

@@ -5,7 +5,7 @@ This module defines the FastAPI routes for agent chat interactions,
 providing streaming response endpoints for real-time agent communication.
 """
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from agent_runner.config import ChatRequest
@@ -15,7 +15,11 @@ router = APIRouter()
 
 
 @router.post("/chat/stream")
-async def chat_stream(request: Request, chat_request: ChatRequest):
+async def chat_stream(
+    request: Request,
+    chat_request: ChatRequest,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
     """
     Stream agent chat responses through SSE (Server-Sent Events).
 
@@ -47,11 +51,20 @@ async def chat_stream(request: Request, chat_request: ChatRequest):
             "message": "Hello, how can I help?"
         }
     """
+    if x_user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is required.")
+    try:
+        user_id = int(x_user_id)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is invalid.") from error
+    if user_id <= 0:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is invalid.")
+
     orchestrator = RuntimeOrchestrator()
 
     async def event_generator():
         try:
-            async for event in orchestrator.run(chat_request, request):
+            async for event in orchestrator.run(chat_request, user_id, request):
                 yield f"data: {event.model_dump_json()}\n\n"
         finally:
             await orchestrator.close()

@@ -24,6 +24,8 @@ class StreamEventType(StrEnum):
     TOOL_START = "tool_start"
     TOOL_RESULT = "tool_result"
     USAGE = "usage"
+    SAVING = "saving"
+    PERSISTED = "persisted"
     ERROR = "error"
     DONE = "done"
 
@@ -56,6 +58,8 @@ class StreamEvent(BaseModel):
     completion_tokens: int | None = None
     total_tokens: int | None = None
     error_message: str | None = None
+    error_code: str | None = None
+    phase: str | None = None
 
 
 class TokenDeltaEvent(StreamEvent):
@@ -121,14 +125,29 @@ class ErrorEvent(StreamEvent):
     a descriptive error message.
     """
 
-    def __init__(self, error_message: str):
+    def __init__(self, error_message: str, error_code: str | None = None, phase: str | None = None):
         """
         Initialize an error event.
 
         Args:
             error_message: Description of the error that occurred.
         """
-        super().__init__(type=StreamEventType.ERROR, error_message=error_message)
+        super().__init__(
+            type=StreamEventType.ERROR,
+            error_message=error_message,
+            error_code=error_code,
+            phase=phase,
+        )
+
+
+class SavingEvent(StreamEvent):
+    def __init__(self):
+        super().__init__(type=StreamEventType.SAVING)
+
+
+class PersistedEvent(StreamEvent):
+    def __init__(self):
+        super().__init__(type=StreamEventType.PERSISTED)
 
 
 class UsageEvent(StreamEvent):

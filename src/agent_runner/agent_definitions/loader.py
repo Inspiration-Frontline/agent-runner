@@ -75,7 +75,7 @@ class AgentConfigLoader:
         if not self.local_config_path.is_absolute():
             self.local_config_path = PROJECT_ROOT / self.local_config_path
 
-    async def load(self, agent_id: str, version: str | None = None) -> AgentConfig:
+    async def load(self, agent_id: int, version: int | None = None) -> AgentConfig:
         """
         Load agent configuration from cache, local file, or remote service.
 
@@ -169,6 +169,7 @@ class AgentConfigLoader:
             config_data = {
                 "agent_id": config.agent_id,
                 "version": config.version,
+                "name": config.name,
                 "model": config.model,
                 "system_prompt": config.system_prompt,
                 "tools": config.tools,
@@ -186,7 +187,7 @@ class AgentConfigLoader:
         except Exception as e:
             logger.warning(f"Failed to set config in Redis cache: {e}")
 
-    def _load_local_config(self, agent_id: str, version: str | None = None) -> AgentConfig | None:
+    def _load_local_config(self, agent_id: int, version: int | None = None) -> AgentConfig | None:
         """
         Load agent configuration from local JSON file.
 
@@ -235,7 +236,8 @@ class AgentConfigLoader:
 
         return AgentConfig(
             agent_id=data["agent_id"],
-            version=data.get("version", "latest"),
+            version=data.get("version", 1),
+            name=data.get("name", f"agent-{data['agent_id']}"),
             model=data.get("model", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
             system_prompt=data.get("system_prompt", ""),
             tools=data.get("tools", []),
@@ -245,7 +247,7 @@ class AgentConfigLoader:
             temperature=data.get("temperature", 0.7),
         )
 
-    async def invalidate_cache(self, agent_id: str | None = None):
+    async def invalidate_cache(self, agent_id: int | None = None):
         """
         Invalidate cached agent configurations in Redis.
 

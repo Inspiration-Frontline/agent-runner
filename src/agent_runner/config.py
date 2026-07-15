@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     # Service URLs for downstream dependencies
     agent_config_center_url: str = "http://localhost:8081"
     conversation_service_url: str = "http://localhost:8082"
+    conversation_rpc_url: str = Field(
+        default="tri://127.0.0.1:20880", validation_alias="CONVERSATION_RPC_URL"
+    )
+    default_agent_id: int = Field(default=1, validation_alias="DEFAULT_AGENT_ID")
     user_profiler_url: str = "http://localhost:8083"
     knowledge_service_url: str = "http://localhost:8084"
 
@@ -176,9 +180,11 @@ class ConfigurationManager:
             "services": {
                 "agent_config_center_url": "agent_config_center_url",
                 "conversation_service_url": "conversation_service_url",
+                "conversation_rpc_url": "conversation_rpc_url",
                 "user_profiler_url": "user_profiler_url",
                 "knowledge_service_url": "knowledge_service_url",
             },
+            "agent": {"default_agent_id": "default_agent_id"},
             "local_agent_config": {"enabled": "local_agent_config_enabled", "path": "local_agent_config_path"},
             "context": {"max_context_tokens": "max_context_tokens", "max_output_tokens": "max_output_tokens"},
             "redis": {
@@ -309,11 +315,18 @@ class ChatRequest(BaseModel):
         message: The user's message content to process.
     """
 
-    agent_id: str
-    version: str | None = None
-    conversation_id: str | None = None
-    user_id: str
-    message: str
+    model_config = {"extra": "forbid"}
+
+    conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
+    message: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("message")
+    @classmethod
+    def reject_blank_message(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("message cannot be blank")
+        return normalized
 
 
 class AgentConfig(BaseModel):
@@ -335,8 +348,9 @@ class AgentConfig(BaseModel):
         temperature: Sampling temperature for response generation (0.0 to 2.0).
     """
 
-    agent_id: str
-    version: str
+    agent_id: int
+    version: int
+    name: str
     model: str
     system_prompt: str
     tools: list[str] = Field(default_factory=list)

@@ -24,7 +24,7 @@ class AgentFactory:
         """
         Initialize the agent factory with an empty registry.
         """
-        self._agent_registry: dict[str, Any] = {}
+        self._agent_registry: dict[int, Any] = {}
 
     async def create(self, config: AgentConfig) -> AgentDefinition:
         """
@@ -42,8 +42,8 @@ class AgentFactory:
         agent = AgentDefinition(
             agent_id=config.agent_id,
             version=config.version,
-            name=config.agent_id,
-            description=f"Agent {config.agent_id}",
+            name=config.name,
+            description=f"Agent {config.name}",
             model=config.model,
             system_prompt=config.system_prompt,
             tools=config.tools,
@@ -91,7 +91,7 @@ class AgentFactory:
 
         return agent
 
-    def get_agent(self, agent_id: str) -> AgentDefinition | None:
+    def get_agent(self, agent_id: int) -> AgentDefinition | None:
         """
         Retrieve a previously created agent from the registry.
 
@@ -103,7 +103,7 @@ class AgentFactory:
         """
         return self._agent_registry.get(agent_id)
 
-    def remove_agent(self, agent_id: str):
+    def remove_agent(self, agent_id: int):
         """
         Remove an agent from the registry.
 

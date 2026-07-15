@@ -21,6 +21,9 @@ dependencies = [
     "nacos-sdk-python>=3.2.0",
     "pyyaml>=6.0.2",
     "openai-agents>=0.17.7",
+    "agent-breaker-conversation-manager-protos==0.0.1",
+    "agent-breaker-commons==0.0.1",
+    "fancy-grpc-py==0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +34,16 @@ dev = [
     "ruff==0.15.13",
     "mypy==2.1.0",
 ]
+
+[[tool.uv.index]]
+name = "agentbreaker-private"
+url = "https://packages.aliyun.com/6284861a3e81781f3ad0f3e9/pypi/repo-dawn"
+explicit = true
+
+[tool.uv.sources]
+agent-breaker-conversation-manager-protos = { index = "agentbreaker-private" }
+agent-breaker-commons = { index = "agentbreaker-private" }
+fancy-grpc-py = { index = "agentbreaker-private" }
 
 [tool.ruff]
 line-length = 120

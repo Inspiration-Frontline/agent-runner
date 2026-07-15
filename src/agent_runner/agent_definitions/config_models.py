@@ -50,8 +50,8 @@ class AgentDefinition:
         metadata: Additional metadata for this agent definition.
     """
 
-    agent_id: str
-    version: str
+    agent_id: int
+    version: int
     name: str
     description: str
     model: str

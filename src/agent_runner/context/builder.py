@@ -104,7 +104,7 @@ class ContextBuilder:
         self,
         agent_config: AgentConfig,
         conversation_id: str | None,
-        user_id: str,
+        user_id: int,
         current_message: str,
     ) -> AgentContext:
         """
