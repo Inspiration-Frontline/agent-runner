@@ -52,8 +52,10 @@ class StreamEvent(BaseModel):
     type: StreamEventType
     content: str | None = None
     tool: str | None = None
+    tool_call_id: str | None = None
     tool_args: dict[str, Any] | None = None
     tool_result: Any = None
+    tool_status: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
@@ -87,7 +89,7 @@ class ToolStartEvent(StreamEvent):
     and arguments being used.
     """
 
-    def __init__(self, tool: str, tool_args: dict[str, Any] | None = None):
+    def __init__(self, tool: str, tool_call_id: str, tool_args: dict[str, Any] | None = None):
         """
         Initialize a tool start event.
 
@@ -95,7 +97,13 @@ class ToolStartEvent(StreamEvent):
             tool: The identifier of the tool being executed.
             tool_args: Optional arguments passed to the tool.
         """
-        super().__init__(type=StreamEventType.TOOL_START, tool=tool, tool_args=tool_args)
+        super().__init__(
+            type=StreamEventType.TOOL_START,
+            tool=tool,
+            tool_call_id=tool_call_id,
+            tool_args=tool_args,
+            tool_status="RUNNING",
+        )
 
 
 class ToolResultEvent(StreamEvent):
@@ -106,7 +114,7 @@ class ToolResultEvent(StreamEvent):
     that can be used by the agent.
     """
 
-    def __init__(self, tool: str, tool_result: Any):
+    def __init__(self, tool: str, tool_call_id: str, tool_result: Any, tool_status: str):
         """
         Initialize a tool result event.
 
@@ -114,7 +122,13 @@ class ToolResultEvent(StreamEvent):
             tool: The identifier of the tool that was executed.
             tool_result: The result returned by the tool execution.
         """
-        super().__init__(type=StreamEventType.TOOL_RESULT, tool=tool, tool_result=tool_result)
+        super().__init__(
+            type=StreamEventType.TOOL_RESULT,
+            tool=tool,
+            tool_call_id=tool_call_id,
+            tool_result=tool_result,
+            tool_status=tool_status,
+        )
 
 
 class ErrorEvent(StreamEvent):

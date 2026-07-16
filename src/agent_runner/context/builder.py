@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent_runner.config import AgentConfig, get_settings
+from agent_runner.tools.registry import ToolRegistry
 
 from .profile_adapter import ProfileAdapter
 from .prompt_assembler import PromptAssembler
@@ -91,7 +92,7 @@ class ContextBuilder:
         token_budget_manager: Manager for token budget and truncation.
     """
 
-    def __init__(self):
+    def __init__(self, tool_registry: ToolRegistry | None = None):
         """
         Initialize the context builder with required adapters.
         """
@@ -99,6 +100,7 @@ class ContextBuilder:
         self.rag_adapter = RAGAdapter()
         self.prompt_assembler = PromptAssembler()
         self.token_budget_manager = TokenBudgetManager(max_tokens=get_settings().max_context_tokens)
+        self.tool_registry = tool_registry or ToolRegistry()
 
     async def build(
         self,
@@ -178,4 +180,4 @@ class ContextBuilder:
         Returns:
             list[dict[str, Any]]: List of tool specification dictionaries.
         """
-        return []
+        return self.tool_registry.get_tool_specs(tool_keys)

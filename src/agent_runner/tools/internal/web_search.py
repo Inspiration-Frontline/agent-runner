@@ -1,0 +1,198 @@
+import asyncio
+import ipaddress
+import socket
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, urljoin, urlparse
+
+import httpx
+
+from agent_runner.config import get_settings
+from agent_runner.tools.registry import BaseTool
+
+
+class WebSearchTool(BaseTool):
+    @property
+    def tool_key(self) -> str:
+        return "builtin.web_search"
+
+    @property
+    def tool_name(self) -> str:
+        return "search_web"
+
+    @property
+    def description(self) -> str:
+        return "Search the public web, fetch result pages, and return extracted page content with source URLs."
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        }
+
+    @property
+    def strict(self) -> bool:
+        return True
+
+    async def execute(self, query: str) -> dict:
+        normalized = query.strip()
+        if not normalized:
+            raise ValueError("Search query cannot be blank.")
+        settings = get_settings()
+        async with httpx.AsyncClient(
+            timeout=settings.tool_http_timeout_seconds,
+            headers={"User-Agent": "AgentBreaker/0.0.1 (+local development)"},
+            follow_redirects=False,
+        ) as client:
+            search_response = await client.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": normalized},
+            )
+            search_response.raise_for_status()
+            parser = _DuckDuckGoResultParser(settings.web_search_max_results)
+            parser.feed(search_response.text)
+            parser.close()
+            raw_results = parser.results
+            if not raw_results:
+                raise ValueError(f"DuckDuckGo returned no results for: {normalized}")
+            pages = await asyncio.gather(
+                *(self._fetch_result(client, result) for result in raw_results),
+            )
+
+        usable_pages = [page for page in pages if page.get("content")]
+        if not usable_pages:
+            raise ValueError("Search succeeded, but no result page produced readable content.")
+        return {"query": normalized, "results": pages}
+
+    async def _fetch_result(self, client: httpx.AsyncClient, result: dict) -> dict:
+        url = str(result.get("href") or result.get("url") or "")
+        item = {
+            "title": result.get("title") or "",
+            "url": url,
+            "snippet": result.get("body") or result.get("snippet") or "",
+            "content": "",
+            "error": "",
+        }
+        try:
+            html, final_url = await self._safe_get(client, url)
+            parser = _VisibleTextParser()
+            parser.feed(html)
+            parser.close()
+            content = parser.text()
+            item["url"] = final_url
+            item["content"] = content or ""
+            if not item["content"]:
+                item["error"] = "No readable page content was extracted."
+        except Exception as error:
+            item["error"] = str(error)
+        return item
+
+    async def _safe_get(self, client: httpx.AsyncClient, url: str) -> tuple[str, str]:
+        settings = get_settings()
+        current_url = url
+        for _ in range(settings.web_fetch_max_redirects + 1):
+            await self._require_public_http_url(current_url)
+            async with client.stream("GET", current_url) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("Page redirect did not include a location.")
+                    current_url = urljoin(current_url, location)
+                    continue
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+                if "text/html" not in content_type and "text/plain" not in content_type:
+                    raise ValueError(f"Unsupported page content type: {content_type or 'unknown'}")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > settings.web_fetch_max_bytes:
+                        raise ValueError("Page exceeded the network safety byte limit.")
+                return body.decode(response.encoding or "utf-8", errors="replace"), str(response.url)
+        raise ValueError("Page exceeded the redirect limit.")
+
+    async def _require_public_http_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Search result URL must use public HTTP or HTTPS.")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addresses = await asyncio.get_running_loop().getaddrinfo(
+            parsed.hostname,
+            port,
+            type=socket.SOCK_STREAM,
+        )
+        if not addresses:
+            raise ValueError("Search result hostname did not resolve.")
+        for address in addresses:
+            ip = ipaddress.ip_address(address[4][0])
+            if not ip.is_global:
+                raise ValueError("Search result resolved to a non-public address.")
+
+
+class _DuckDuckGoResultParser(HTMLParser):
+    def __init__(self, limit: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.limit = limit
+        self.results: list[dict] = []
+        self._current: dict | None = None
+        self._capture: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        if tag == "a" and "result__a" in classes and len(self.results) < self.limit:
+            href = attributes.get("href") or ""
+            parsed = urlparse(href)
+            redirected = parse_qs(parsed.query).get("uddg")
+            self._current = {"url": redirected[0] if redirected else href, "title": "", "snippet": ""}
+            self._capture = "title"
+        elif self._current is not None and "result__snippet" in classes:
+            self._capture = "snippet"
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._current is not None and self._capture == "title":
+            self._capture = None
+        elif tag in {"a", "div"} and self._current is not None and self._capture == "snippet":
+            self.results.append(self._current)
+            self._current = None
+            self._capture = None
+
+    def handle_data(self, data: str) -> None:
+        if self._current is not None and self._capture:
+            self._current[self._capture] += data
+
+    def close(self) -> None:
+        super().close()
+        if self._current is not None and len(self.results) < self.limit:
+            self.results.append(self._current)
+            self._current = None
+
+
+class _VisibleTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._ignored_depth = 0
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "noscript", "svg"}:
+            self._ignored_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript", "svg"} and self._ignored_depth:
+            self._ignored_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self._ignored_depth:
+            normalized = " ".join(data.split())
+            if normalized:
+                self._parts.append(normalized)
+
+    def text(self) -> str:
+        # TODO: Apply a shared semantic context trimmer after AgentBreaker defines a unified
+        # replay/tool/RAG context policy. Phase 5 retains all extracted text within the network cap.
+        return "\n".join(self._parts)

@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
+from uuid import uuid4
 
-from agents import Agent, ModelSettings, Runner
+from agents import Agent, FunctionTool, ModelSettings, Runner
 from agents.retry import ModelRetrySettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
 from openai.types.responses.response_completed_event import ResponseCompletedEvent
@@ -14,6 +16,16 @@ from agent_runner.config import get_settings
 from agent_runner.context.builder import AgentContext
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
 from agent_runner.runtime.cancellation import CancellationToken
+from agent_runner.runtime.tool_loop import (
+    AgentRunCapture,
+    CapturedModelTurn,
+    CapturedToolCall,
+    CapturedToolExecution,
+    ToolExecutionCollector,
+    epoch_millis,
+)
+from agent_runner.tools.executor import ToolExecutor
+from agent_runner.tools.registry import ToolDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +42,33 @@ class OpenAIAgentsRuntime:
 
     def __init__(self, model_factory: LiteLLMModelFactory | None = None):
         self.model_factory = model_factory or LiteLLMModelFactory()
+        self.last_capture = AgentRunCapture()
 
     async def run_streamed(
         self,
         agent: AgentDefinition,
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
+        tool_executor: ToolExecutor | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         """
         Execute an agent request with an SDK-managed streaming response.
         """
         # Agents SDK agents are declarative; Runner owns execution and streaming.
-        sdk_agent = self._build_sdk_agent(agent, context.system_prompt)
+        self.last_capture = AgentRunCapture()
+        collector = ToolExecutionCollector()
+        executor = tool_executor or ToolExecutor()
+        definitions = self._resolve_tool_definitions(agent, executor)
+        sdk_agent = self._build_sdk_agent(
+            agent,
+            context.system_prompt,
+            self._build_sdk_tools(definitions, executor, collector, cancellation_token),
+        )
         sdk_input = self._build_input(context)
+        run_start = epoch_millis()
+        trace_id = str(uuid4())
+        model_completed_times: list[int] = []
+        model_completed_usages: list[tuple[int, int, int]] = []
         result = Runner.run_streamed(
             starting_agent=sdk_agent,
             input=sdk_input,
@@ -58,7 +84,15 @@ class OpenAIAgentsRuntime:
                     result.cancel()
                     break
 
-                converted = self._convert_stream_event(event)
+                converted = self._convert_stream_event(event, collector)
+                if isinstance(event, RawResponsesStreamEvent) and isinstance(event.data, ResponseCompletedEvent):
+                    model_completed_times.append(epoch_millis())
+                    usage = getattr(event.data.response, "usage", None)
+                    model_completed_usages.append((
+                        getattr(usage, "input_tokens", 0) if usage is not None else 0,
+                        getattr(usage, "output_tokens", 0) if usage is not None else 0,
+                        getattr(usage, "total_tokens", 0) if usage is not None else 0,
+                    ))
                 if converted is not None:
                     yield converted
 
@@ -73,6 +107,18 @@ class OpenAIAgentsRuntime:
         except Exception as exc:
             logger.exception("Error during SDK streaming")
             yield {"type": "error", "content": str(exc)}
+        finally:
+            self.last_capture = self._build_capture(
+                result=result,
+                context=context,
+                definitions=definitions,
+                collector=collector,
+                run_start=run_start,
+                trace_id=trace_id,
+                model_completed_times=model_completed_times,
+                model_completed_usages=model_completed_usages,
+                cancellation_token=cancellation_token,
+            )
 
     async def run(
         self,
@@ -86,7 +132,7 @@ class OpenAIAgentsRuntime:
         if cancellation_token and cancellation_token.is_cancelled():
             raise asyncio.CancelledError("Execution cancelled")
 
-        sdk_agent = self._build_sdk_agent(agent, context.system_prompt)
+        sdk_agent = self._build_sdk_agent(agent, context.system_prompt, [])
         result = await Runner.run(
             starting_agent=sdk_agent,
             input=self._build_input(context),
@@ -97,7 +143,9 @@ class OpenAIAgentsRuntime:
             "role": "assistant",
         }
 
-    def _build_sdk_agent(self, agent: AgentDefinition, system_prompt: str) -> Agent:
+    def _build_sdk_agent(
+        self, agent: AgentDefinition, system_prompt: str, tools: list[FunctionTool] | None = None
+    ) -> Agent:
         settings = get_settings()
         return Agent(
             name=agent.name,
@@ -109,17 +157,72 @@ class OpenAIAgentsRuntime:
                 include_usage=True,
                 extra_args={"timeout": settings.lite_llm_request_timeout_seconds},
                 retry=ModelRetrySettings(max_retries=settings.lite_llm_max_retries),
+                parallel_tool_calls=True,
             ),
-            tools=[],
+            tools=tools or [],
         )
 
-    def _build_input(self, context: AgentContext) -> list[dict[str, str]]:
-        input_items: list[dict[str, str]] = []
+    def _resolve_tool_definitions(
+        self, agent: AgentDefinition, executor: ToolExecutor
+    ) -> list[ToolDefinition]:
+        definitions: list[ToolDefinition] = []
+        for tool_key in agent.tools:
+            definition = executor.registry.get(tool_key)
+            if definition is None:
+                raise ValueError(f"Configured Tool is not registered: {tool_key}")
+            definitions.append(definition)
+        return definitions
+
+    def _build_sdk_tools(
+        self,
+        definitions: list[ToolDefinition],
+        executor: ToolExecutor,
+        collector: ToolExecutionCollector,
+        cancellation_token: CancellationToken | None,
+    ) -> list[FunctionTool]:
+        tools: list[FunctionTool] = []
+        for definition in definitions:
+            async def invoke(tool_context, arguments_json: str, captured=definition):
+                return await collector.execute(
+                    tool_call_id=str(tool_context.tool_call_id),
+                    definition=captured,
+                    arguments_json=arguments_json,
+                    executor=executor,
+                cancellation_token=cancellation_token,
+            )
+
+            tools.append(FunctionTool(
+                name=definition.tool_name,
+                description=definition.description,
+                params_json_schema=definition.parameters,
+                on_invoke_tool=invoke,
+                strict_json_schema=definition.strict,
+            ))
+        return tools
+
+    def _build_input(self, context: AgentContext) -> list[dict[str, Any]]:
+        input_items: list[dict[str, Any]] = []
         for message in context.conversation_history:
-            input_items.append({
-                "role": message.role,
-                "content": message.content,
-            })
+            tool_calls = message.metadata.get("tool_calls") or []
+            if message.role == "assistant" and tool_calls:
+                if message.content:
+                    input_items.append({"role": "assistant", "content": message.content})
+                for tool_call in tool_calls:
+                    function = tool_call.get("function") or {}
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": tool_call.get("id") or "",
+                        "name": function.get("name") or "",
+                        "arguments": function.get("arguments") or "{}",
+                    })
+            elif message.role == "tool":
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": message.metadata.get("tool_call_id") or "",
+                    "output": message.content,
+                })
+            else:
+                input_items.append({"role": message.role, "content": message.content})
 
         input_items.append({
             "role": "user",
@@ -127,9 +230,15 @@ class OpenAIAgentsRuntime:
         })
         return input_items
 
-    def _convert_stream_event(self, event: StreamEvent) -> dict[str, Any] | None:
+    def _convert_stream_event(
+        self,
+        event: StreamEvent,
+        collector: ToolExecutionCollector | None = None,
+    ) -> dict[str, Any] | None:
         if isinstance(event, RawResponsesStreamEvent):
             if isinstance(event.data, ResponseTextDeltaEvent):
+                if not event.data.delta:
+                    return None
                 return {
                     "type": "token_delta",
                     "content": event.data.delta,
@@ -143,17 +252,29 @@ class OpenAIAgentsRuntime:
         if isinstance(event, RunItemStreamEvent):
             if event.name == "tool_called":
                 raw_item = getattr(event.item, "raw_item", None)
+                captured_call = CapturedToolCall(
+                    tool_call_id=str(getattr(event.item, "call_id", None) or ""),
+                    tool_name=getattr(raw_item, "name", "") if raw_item is not None else "",
+                    arguments=getattr(raw_item, "arguments", None) if raw_item is not None else "{}",
+                )
+                if collector is not None:
+                    collector.record_call(captured_call)
                 return {
                     "type": "tool_start",
-                    "tool": getattr(raw_item, "name", "") if raw_item is not None else "",
-                    "args": getattr(raw_item, "arguments", None) if raw_item is not None else None,
+                    "tool": captured_call.tool_name,
+                    "tool_call_id": captured_call.tool_call_id,
+                    "args": captured_call.arguments,
                 }
 
             if event.name == "tool_output":
+                tool_call_id = str(getattr(event.item, "call_id", None) or "")
+                execution = collector.get(tool_call_id) if collector is not None else None
                 return {
                     "type": "tool_result",
-                    "tool": getattr(event.item, "tool_name", ""),
+                    "tool": execution.tool_name if execution is not None else "",
+                    "tool_call_id": tool_call_id,
                     "tool_result": getattr(event.item, "output", None),
+                    "tool_status": execution.status if execution is not None else "COMPLETED",
                 }
 
         return None
@@ -169,6 +290,300 @@ class OpenAIAgentsRuntime:
             "completion_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens,
         }
+
+    def _build_capture(
+        self,
+        *,
+        result,
+        context: AgentContext,
+        definitions: list[ToolDefinition],
+        collector: ToolExecutionCollector,
+        run_start: int,
+        trace_id: str,
+        model_completed_times: list[int],
+        model_completed_usages: list[tuple[int, int, int]],
+        cancellation_token: CancellationToken | None,
+    ) -> AgentRunCapture:
+        initial_messages = [{"role": "system", "content": context.system_prompt}]
+        initial_messages.extend(
+            {"role": message.role, "content": message.content, **message.metadata}
+            for message in context.conversation_history
+        )
+        initial_messages.append({"role": "user", "content": context.current_message.content})
+
+        turns: list[CapturedModelTurn] = []
+        request_messages = initial_messages
+        full_model_input = list(initial_messages)
+        previous_turn_end = run_start
+        raw_responses = list(result.raw_responses)
+        if not raw_responses and collector.calls():
+            return self._build_observed_partial_capture(
+                initial_messages=initial_messages,
+                definitions=definitions,
+                collector=collector,
+                run_start=run_start,
+                trace_id=trace_id,
+                model_completed_times=model_completed_times,
+                model_completed_usages=model_completed_usages,
+                cancelled=cancellation_token is not None and cancellation_token.is_cancelled(),
+            )
+        assigned_tool_call_ids: set[str] = set()
+        for index, response in enumerate(raw_responses):
+            event_llm_end = (
+                model_completed_times[index]
+                if index < len(model_completed_times)
+                else max(previous_turn_end, epoch_millis())
+            )
+            response_content, tool_calls = self._normalize_response_output(response.output)
+            if not tool_calls and index == len(raw_responses) - 1:
+                # The SDK may clear a cancelled response's output after already publishing
+                # tool_called events. Those events remain authoritative audit evidence.
+                tool_calls = [
+                    call for call in collector.calls()
+                    if call.tool_call_id not in assigned_tool_call_ids
+                ]
+            assigned_tool_call_ids.update(call.tool_call_id for call in tool_calls)
+            executions = self._complete_execution_audit(
+                tool_calls=tool_calls,
+                definitions=definitions,
+                collector=collector,
+                fallback_time=event_llm_end,
+                cancelled=cancellation_token is not None and cancellation_token.is_cancelled(),
+            )
+            # Some providers begin scheduling Tool handlers before the SDK publishes the response
+            # completed event. Persist the LLM boundary no later than the first observed Tool start.
+            llm_end = min([event_llm_end, *(execution.start_time for execution in executions)])
+            llm_end = max(previous_turn_end, llm_end)
+            turn_end = max([llm_end, *(execution.end_time for execution in executions)])
+            raw_request = json.dumps(
+                {
+                    "messages": full_model_input,
+                    "tools": [self._definition_dict(definition) for definition in definitions],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            raw_response = json.dumps(
+                {
+                    "output": [self._model_dump(item) for item in response.output],
+                    "observed_tool_calls": [
+                        {
+                            "id": call.tool_call_id,
+                            "name": call.tool_name,
+                            "arguments": call.arguments,
+                        }
+                        for call in tool_calls
+                    ],
+                    "response_id": getattr(response, "response_id", None),
+                    "request_id": getattr(response, "request_id", None),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                default=str,
+            )
+            turns.append(CapturedModelTurn(
+                request_messages=request_messages,
+                message_storage_mode="FULL_SNAPSHOT" if index == 0 else "APPEND_DELTA",
+                tools=definitions,
+                response_content=response_content,
+                response_tool_calls=tool_calls,
+                tool_executions=executions,
+                request_id=(
+                    getattr(response, "request_id", None)
+                    or getattr(response, "response_id", None)
+                    or str(uuid4())
+                ),
+                trace_id=trace_id,
+                start_time=previous_turn_end,
+                llm_end_time=llm_end,
+                end_time=turn_end,
+                prompt_tokens=response.usage.input_tokens,
+                completion_tokens=response.usage.output_tokens,
+                total_tokens=response.usage.total_tokens,
+                raw_request=raw_request,
+                raw_response=raw_response,
+            ))
+            request_messages = self._next_turn_delta(response_content, tool_calls, executions)
+            full_model_input.extend(request_messages)
+            previous_turn_end = turn_end
+        return AgentRunCapture(turns=turns, final_output=str(result.final_output or ""))
+
+    def _build_observed_partial_capture(
+        self,
+        *,
+        initial_messages: list[dict[str, Any]],
+        definitions: list[ToolDefinition],
+        collector: ToolExecutionCollector,
+        run_start: int,
+        trace_id: str,
+        model_completed_times: list[int],
+        model_completed_usages: list[tuple[int, int, int]],
+        cancelled: bool,
+    ) -> AgentRunCapture:
+        tool_calls = collector.calls()
+        event_llm_end = model_completed_times[-1] if model_completed_times else epoch_millis()
+        executions = self._complete_execution_audit(
+            tool_calls=tool_calls,
+            definitions=definitions,
+            collector=collector,
+            fallback_time=event_llm_end,
+            cancelled=cancelled,
+        )
+        llm_end = max(run_start, min([event_llm_end, *(item.start_time for item in executions)]))
+        turn_end = max([llm_end, *(item.end_time for item in executions)])
+        prompt_tokens, completion_tokens, total_tokens = (
+            model_completed_usages[-1] if model_completed_usages else (0, 0, 0)
+        )
+        raw_request = json.dumps(
+            {
+                "messages": initial_messages,
+                "tools": [self._definition_dict(definition) for definition in definitions],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        raw_response = json.dumps(
+            {
+                "output": [],
+                "observed_tool_calls": [
+                    {"id": call.tool_call_id, "name": call.tool_name, "arguments": call.arguments}
+                    for call in tool_calls
+                ],
+                "raw_response_removed_by_sdk_cancellation": cancelled,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        turn = CapturedModelTurn(
+            request_messages=initial_messages,
+            message_storage_mode="FULL_SNAPSHOT",
+            tools=definitions,
+            response_content="",
+            response_tool_calls=tool_calls,
+            tool_executions=executions,
+            request_id=str(uuid4()),
+            trace_id=trace_id,
+            start_time=run_start,
+            llm_end_time=llm_end,
+            end_time=turn_end,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            raw_request=raw_request,
+            raw_response=raw_response,
+        )
+        return AgentRunCapture(turns=[turn], final_output="")
+
+    def _complete_execution_audit(
+        self,
+        *,
+        tool_calls: list[CapturedToolCall],
+        definitions: list[ToolDefinition],
+        collector: ToolExecutionCollector,
+        fallback_time: int,
+        cancelled: bool,
+    ) -> list[CapturedToolExecution]:
+        definitions_by_name = {definition.tool_name: definition for definition in definitions}
+        executions: list[CapturedToolExecution] = []
+        for tool_call in tool_calls:
+            execution = collector.get(tool_call.tool_call_id)
+            if execution is not None:
+                executions.append(execution)
+                continue
+
+            definition = definitions_by_name.get(tool_call.tool_name)
+            status = "CANCELLED" if cancelled else "FAILED"
+            error_message = (
+                "Generation cancelled before the Tool produced a result."
+                if cancelled
+                else "Tool execution did not produce an auditable result."
+            )
+            result_content = "" if cancelled else json.dumps(
+                {"status": "error", "error": error_message},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            executions.append(CapturedToolExecution(
+                tool_call_id=tool_call.tool_call_id,
+                tool_key=definition.tool_key if definition is not None else "unknown",
+                tool_name=tool_call.tool_name,
+                arguments=tool_call.arguments,
+                status=status,
+                result_content=result_content,
+                raw_result=result_content,
+                error_message=error_message,
+                start_time=fallback_time,
+                end_time=fallback_time,
+            ))
+        return executions
+
+    def _normalize_response_output(self, outputs: list[Any]) -> tuple[str, list[CapturedToolCall]]:
+        text_parts: list[str] = []
+        tool_calls: list[CapturedToolCall] = []
+        for item in outputs:
+            item_type = getattr(item, "type", "")
+            if item_type == "message":
+                for part in getattr(item, "content", []) or []:
+                    text = getattr(part, "text", None)
+                    if text is not None:
+                        text_parts.append(str(text))
+            elif item_type == "function_call":
+                tool_calls.append(CapturedToolCall(
+                    tool_call_id=str(getattr(item, "call_id", "")),
+                    tool_name=str(getattr(item, "name", "")),
+                    arguments=str(getattr(item, "arguments", "{}")),
+                ))
+        return "".join(text_parts), tool_calls
+
+    def _next_turn_delta(
+        self,
+        response_content: str,
+        tool_calls: list[CapturedToolCall],
+        executions,
+    ) -> list[dict[str, Any]]:
+        if not tool_calls:
+            return []
+        messages: list[dict[str, Any]] = [{
+            "role": "assistant",
+            "content": response_content,
+            "tool_calls": [
+                {
+                    "id": call.tool_call_id,
+                    "type": "function",
+                    "function": {"name": call.tool_name, "arguments": call.arguments},
+                }
+                for call in tool_calls
+            ],
+        }]
+        executions_by_id = {execution.tool_call_id: execution for execution in executions}
+        for call in tool_calls:
+            execution = executions_by_id.get(call.tool_call_id)
+            messages.append({
+                "role": "tool",
+                "content": execution.result_content if execution is not None else "",
+                "tool_call_id": call.tool_call_id,
+            })
+        return messages
+
+    def _definition_dict(self, definition: ToolDefinition) -> dict[str, Any]:
+        return {
+            "tool_key": definition.tool_key,
+            "tool_name": definition.tool_name,
+            "description": definition.description,
+            "parameters": definition.parameters,
+            "strict": definition.strict,
+            "source_type": definition.source_type.value,
+            "definition_hash": definition.definition_hash,
+        }
+
+    def _model_dump(self, value: Any) -> Any:
+        model_dump = getattr(value, "model_dump", None)
+        return model_dump(mode="json") if callable(model_dump) else value
 
     async def close(self):
         await self.model_factory.close()

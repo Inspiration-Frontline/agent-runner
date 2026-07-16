@@ -109,26 +109,34 @@ class ToolExecutor:
         Returns:
             list[dict[str, Any]]: List of execution results with status.
         """
-        results = []
-        for call in tool_calls:
-            if cancellation_token and cancellation_token.is_cancelled():
-                break
-
+        async def execute_call(call: dict[str, Any]) -> dict[str, Any]:
             tool_key = call.get("tool_key") or call.get("name")
             arguments = call.get("arguments", {})
-
             try:
                 result = await self.execute(tool_key, arguments, cancellation_token)
-                results.append({
+                return {
                     "tool_key": tool_key,
                     "status": "success",
                     "result": result,
-                })
+                }
             except Exception as e:
-                results.append({
+                return {
                     "tool_key": tool_key,
                     "status": "error",
                     "error": str(e),
-                })
+                }
 
-        return results
+        tasks = [asyncio.create_task(execute_call(call)) for call in tool_calls]
+
+        def cancel_tasks() -> None:
+            for task in tasks:
+                task.cancel()
+
+        if cancellation_token is not None:
+            cancellation_token.add_callback(cancel_tasks)
+        try:
+            # Results retain model-emitted order while execution happens concurrently.
+            return await asyncio.gather(*tasks)
+        finally:
+            if cancellation_token is not None:
+                cancellation_token.remove_callback(cancel_tasks)

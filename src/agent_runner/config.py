@@ -126,6 +126,13 @@ class Settings(BaseSettings):
     environment: str = Field(default="local", validation_alias="ENVIRONMENT")
     debug_endpoints_enabled: bool = Field(default=True, validation_alias="DEBUG_ENDPOINTS_ENABLED")
 
+    # Built-in Tool network safety settings. Persisted Tool results are not semantically trimmed
+    # in Phase 5; the byte limit protects the HTTP client from unbounded remote responses.
+    tool_http_timeout_seconds: float = Field(default=15.0, validation_alias="TOOL_HTTP_TIMEOUT_SECONDS")
+    web_search_max_results: int = Field(default=5, validation_alias="WEB_SEARCH_MAX_RESULTS")
+    web_fetch_max_bytes: int = Field(default=2_000_000, validation_alias="WEB_FETCH_MAX_BYTES")
+    web_fetch_max_redirects: int = Field(default=3, validation_alias="WEB_FETCH_MAX_REDIRECTS")
+
 
 # Base settings loaded from local environment files (before Nacos merge)
 _base_settings = Settings()

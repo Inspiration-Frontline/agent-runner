@@ -7,8 +7,10 @@ and model invocation through the OpenAI Agents SDK runtime.
 """
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from time import time_ns
 from uuid import uuid4
 
@@ -17,6 +19,7 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     AssistantAnswer,
     AssistantMessage,
     ConversationTurn,
+    FunctionCall,
     LlmCall,
     LlmConversationMessage,
     LlmMessageStorageMode,
@@ -26,8 +29,15 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     RoundStatus,
     SaveConversationRoundRequest,
     TokenUsage,
+    ToolCall,
+    ToolCallExecution,
+    ToolCallExecutionStatus,
+    ToolSourceType,
     TurnStatus,
     UserRequest,
+)
+from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    ToolDefinition as ProtoToolDefinition,
 )
 from fastapi import Request
 
@@ -53,7 +63,9 @@ from agent_runner.conversation import (
 )
 from agent_runner.runtime.cancellation import CancellationManager, conversation_cancellation_registry
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
+from agent_runner.runtime.tool_loop import AgentRunCapture, CapturedModelTurn
 from agent_runner.tools.executor import ToolExecutor
+from agent_runner.tools.internal.catalog import build_internal_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +104,10 @@ class RuntimeOrchestrator:
         tool executor, cancellation manager, and OpenAI runtime wrapper.
         """
         self.config_loader = AgentConfigLoader()
-        self.context_builder = ContextBuilder()
+        tool_registry = build_internal_tool_registry()
+        self.context_builder = ContextBuilder(tool_registry)
         self.agent_factory = AgentFactory()
-        self.tool_executor = ToolExecutor()
+        self.tool_executor = ToolExecutor(tool_registry)
         self.cancellation_manager = CancellationManager()
         self.openai_runtime = OpenAIAgentsRuntime()
         self.conversation_client = ConversationManagerClient()
@@ -141,6 +154,7 @@ class RuntimeOrchestrator:
         round_start = _epoch_millis()
         next_round_number: int | None = None
         user_request_validated = False
+        agent = None
 
         try:
             if not getattr(self, "_lock_acquired", False):
@@ -197,32 +211,33 @@ class RuntimeOrchestrator:
             response_text = ""
             usage: UsageEvent | None = None
             call_start = _epoch_millis()
-
-            async for event in self.openai_runtime.run_streamed(agent, context, cancellation_token):
+            if isinstance(self.openai_runtime, OpenAIAgentsRuntime):
+                runtime_stream = self.openai_runtime.run_streamed(
+                    agent, context, cancellation_token, getattr(self, "tool_executor", None)
+                )
+            else:
+                runtime_stream = self.openai_runtime.run_streamed(agent, context, cancellation_token)
+            terminal_status: RoundStatus | None = None
+            terminal_error = ""
+            async for event in runtime_stream:
                 if await http_request.is_disconnected():
                     logger.info("Client disconnected, cancelling request")
                     cancellation_token.cancel()
-                    await self._persist_terminal_round(
-                        user_id, chat_request, next_round_number, round_start,
-                        RoundStatus.CANCELLED, "Generation cancelled."
-                    )
-                    return
+                    terminal_status = RoundStatus.CANCELLED
+                    terminal_error = "Generation cancelled."
+                    break
 
                 if cancellation_token.is_cancelled():
-                    await self._persist_terminal_round(
-                        user_id, chat_request, next_round_number, round_start,
-                        RoundStatus.CANCELLED, "Generation cancelled."
-                    )
-                    return
+                    terminal_status = RoundStatus.CANCELLED
+                    terminal_error = "Generation cancelled."
+                    break
 
                 converted = self._convert_event(event)
                 if isinstance(converted, ErrorEvent):
-                    await self._persist_terminal_round(
-                        user_id, chat_request, next_round_number, round_start,
-                        RoundStatus.FAILED, converted.error_message or "Model execution failed."
-                    )
+                    terminal_status = RoundStatus.FAILED
+                    terminal_error = converted.error_message or "Model execution failed."
                     yield converted
-                    return
+                    break
                 if isinstance(converted, TokenDeltaEvent):
                     response_text += converted.content or ""
                 elif isinstance(converted, UsageEvent):
@@ -232,17 +247,52 @@ class RuntimeOrchestrator:
                 if await http_request.is_disconnected():
                     cancellation_token.cancel()
 
-            call_end = _epoch_millis()
-            if cancellation_token.is_cancelled() or await http_request.is_disconnected():
+            await runtime_stream.aclose()
+
+            capture = getattr(self.openai_runtime, "last_capture", AgentRunCapture())
+            disconnected = await http_request.is_disconnected()
+            if terminal_status is not None or cancellation_token.is_cancelled() or disconnected:
+                terminal_status = terminal_status or RoundStatus.CANCELLED
+                terminal_error = terminal_error or "Generation cancelled."
                 await self._persist_terminal_round(
                     user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.CANCELLED, "Generation cancelled."
+                    terminal_status, terminal_error, agent=agent, capture=capture
                 )
                 return
+            if not capture.turns and terminal_status is None:
+                legacy_end = _epoch_millis()
+                capture = AgentRunCapture(
+                    turns=[CapturedModelTurn(
+                        request_messages=[{"role": "system", "content": context.system_prompt}]
+                        + [
+                            {"role": message.role, "content": message.content, **message.metadata}
+                            for message in conversation_history
+                        ]
+                        + [{"role": "user", "content": chat_request.message}],
+                        message_storage_mode="FULL_SNAPSHOT",
+                        tools=[],
+                        response_content=response_text,
+                        response_tool_calls=[],
+                        tool_executions=[],
+                        request_id=str(uuid4()),
+                        trace_id=str(uuid4()),
+                        start_time=call_start,
+                        llm_end_time=legacy_end,
+                        end_time=legacy_end,
+                        prompt_tokens=usage.prompt_tokens if usage else 0,
+                        completion_tokens=usage.completion_tokens if usage else 0,
+                        total_tokens=usage.total_tokens if usage else 0,
+                        raw_request="",
+                        raw_response="",
+                    )],
+                    final_output=response_text,
+                )
+            call_end = capture.turns[-1].end_time if capture.turns else _epoch_millis()
             if not response_text.strip():
                 await self._persist_terminal_round(
                     user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.FAILED, "The model returned an empty response."
+                    RoundStatus.FAILED, "The model returned an empty response.",
+                    agent=agent, capture=capture
                 )
                 yield ErrorEvent(
                     "The model returned an empty response.",
@@ -257,13 +307,10 @@ class RuntimeOrchestrator:
                 user_message=chat_request.message,
                 response_text=response_text,
                 agent=agent,
-                system_prompt=context.system_prompt,
-                usage=usage,
+                capture=capture,
                 round_start=round_start,
-                call_start=call_start,
                 call_end=call_end,
                 round_number=next_round_number,
-                conversation_history=conversation_history,
             )
             yield SavingEvent()
             try:
@@ -285,7 +332,8 @@ class RuntimeOrchestrator:
             if user_request_validated and next_round_number is not None:
                 await self._persist_terminal_round(
                     user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.CANCELLED, "Generation cancelled."
+                    RoundStatus.CANCELLED, "Generation cancelled.",
+                    agent=agent, capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture())
                 )
             await self._cleanup(cancellation_token)
             raise
@@ -294,7 +342,8 @@ class RuntimeOrchestrator:
             if user_request_validated and next_round_number is not None:
                 await self._persist_terminal_round(
                     user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.CANCELLED, "Generation cancelled."
+                    RoundStatus.CANCELLED, "Generation cancelled.",
+                    agent=agent, capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture())
                 )
             raise
 
@@ -306,7 +355,8 @@ class RuntimeOrchestrator:
             if user_request_validated and next_round_number is not None:
                 await self._persist_terminal_round(
                     user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.FAILED, str(e) or "Agent execution failed."
+                    RoundStatus.FAILED, str(e) or "Agent execution failed.",
+                    agent=agent, capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture())
                 )
             yield ErrorEvent(error_message=str(e), error_code="EXECUTION_FAILED", phase="execution")
         finally:
@@ -326,66 +376,135 @@ class RuntimeOrchestrator:
         user_message: str,
         response_text: str,
         agent,
-        system_prompt: str,
-        usage: UsageEvent | None,
+        capture: AgentRunCapture,
         round_start: int,
-        call_start: int,
         call_end: int,
         round_number: int,
-        conversation_history: list[Message],
     ) -> SaveConversationRoundRequest:
-        token_usage = None
-        if usage is not None:
-            token_usage = TokenUsage(
-                prompt_tokens=usage.prompt_tokens or 0,
-                completion_tokens=usage.completion_tokens or 0,
-                total_tokens=usage.total_tokens or 0,
-            )
+        turns = [self._to_proto_turn(index + 1, turn, agent) for index, turn in enumerate(capture.turns)]
+        if not turns:
+            raise ValueError("A completed Agent run did not capture any model Turns.")
+        return SaveConversationRoundRequest(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            round_number=round_number,
+            user_request=UserRequest(content=user_message),
+            turns=turns,
+            final_answer=AssistantAnswer(content=response_text, source_turn_number=len(turns)),
+            status=RoundStatus.COMPLETED,
+            start_time=round_start,
+            end_time=call_end,
+        )
 
-        llm_request = LlmRequest(
+    def _to_proto_turn(
+        self,
+        turn_number: int,
+        captured: CapturedModelTurn,
+        agent,
+        status: TurnStatus = TurnStatus.COMPLETED,
+        error_message: str = "",
+    ) -> ConversationTurn:
+        tool_definitions = [
+            ProtoToolDefinition(
+                source_type=ToolSourceType[definition.source_type.name],
+                tool_name=definition.tool_name,
+                description=definition.description,
+                parameters_json=json.dumps(
+                    definition.parameters,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                strict=definition.strict,
+                tool_key=definition.tool_key,
+                definition_hash=definition.definition_hash,
+            )
+            for definition in captured.tools
+        ]
+        request = LlmRequest(
             provider="litellm",
             model=agent.model,
-            messages=[LlmConversationMessage(role=MessageRole.SYSTEM, content=system_prompt)]
-            + [self._to_llm_message(message) for message in conversation_history]
-            + [LlmConversationMessage(role=MessageRole.USER, content=user_message)],
+            messages=[self._captured_message_to_proto(message) for message in captured.request_messages],
+            tools=tool_definitions,
             temperature=agent.temperature,
             max_output_tokens=agent.max_output_tokens,
-            message_storage_mode=LlmMessageStorageMode.FULL_SNAPSHOT,
+            raw_request=captured.raw_request,
+            message_storage_mode=LlmMessageStorageMode[captured.message_storage_mode],
         )
-        llm_response = LlmResponse(
-            message=AssistantMessage(content=response_text),
-            finish_reason="stop",
-            usage=token_usage,
-        )
-        turn = ConversationTurn(
-            turn_number=1,
-            llm_call=LlmCall(
-                request=llm_request,
-                response=llm_response,
-                request_id=str(uuid4()),
-                trace_id=str(uuid4()),
-                start_time=call_start,
-                end_time=call_end,
+        response_tool_calls = [self._captured_tool_call_to_proto(call) for call in captured.response_tool_calls]
+        response = LlmResponse(
+            message=AssistantMessage(content=captured.response_content, tool_calls=response_tool_calls),
+            finish_reason="tool_calls" if response_tool_calls else "stop",
+            usage=TokenUsage(
+                prompt_tokens=captured.prompt_tokens,
+                completion_tokens=captured.completion_tokens,
+                total_tokens=captured.total_tokens,
             ),
-            status=TurnStatus.COMPLETED,
-            start_time=call_start,
-            end_time=call_end,
+            raw_response=captured.raw_response,
+        )
+        executions = [
+            ToolCallExecution(
+                tool_call_id=execution.tool_call_id,
+                tool_name=execution.tool_name,
+                arguments=execution.arguments,
+                status=ToolCallExecutionStatus[execution.status],
+                result_content=execution.result_content,
+                raw_result=execution.raw_result,
+                error_message=execution.error_message,
+                start_time=execution.start_time,
+                end_time=execution.end_time,
+                tool_key=execution.tool_key,
+            )
+            for execution in captured.tool_executions
+        ]
+        return ConversationTurn(
+            turn_number=turn_number,
+            llm_call=LlmCall(
+                request=request,
+                response=response,
+                request_id=captured.request_id,
+                trace_id=captured.trace_id,
+                start_time=captured.start_time,
+                end_time=captured.llm_end_time,
+            ),
+            tool_call_executions=executions,
+            status=status,
+            error_message=error_message,
+            start_time=captured.start_time,
+            end_time=captured.end_time,
             agent_identity=AgentIdentity(
                 agent_id=agent.agent_id,
                 name=agent.name,
                 version=agent.version,
             ),
         )
-        return SaveConversationRoundRequest(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            round_number=round_number,
-            user_request=UserRequest(content=user_message),
-            turns=[turn],
-            final_answer=AssistantAnswer(content=response_text, source_turn_number=1),
-            status=RoundStatus.COMPLETED,
-            start_time=round_start,
-            end_time=call_end,
+
+    def _captured_message_to_proto(self, message: dict) -> LlmConversationMessage:
+        role = MessageRole[message["role"].upper()]
+        tool_calls = [self._captured_tool_call_to_proto_dict(call) for call in message.get("tool_calls", [])]
+        return LlmConversationMessage(
+            role=role,
+            content=message.get("content") or "",
+            tool_calls=tool_calls,
+            tool_call_id=message.get("tool_call_id") or "",
+        )
+
+    def _captured_tool_call_to_proto_dict(self, call: dict) -> ToolCall:
+        function = call.get("function") or {}
+        return ToolCall(
+            id=call.get("id") or "",
+            type=call.get("type") or "function",
+            function=FunctionCall(
+                name=function.get("name") or "",
+                arguments=function.get("arguments") or "{}",
+            ),
+        )
+
+    def _captured_tool_call_to_proto(self, call) -> ToolCall:
+        return ToolCall(
+            id=call.tool_call_id,
+            type="function",
+            function=FunctionCall(name=call.tool_name, arguments=call.arguments),
         )
 
     async def _persist_terminal_round(
@@ -396,14 +515,28 @@ class RuntimeOrchestrator:
         round_start: int,
         status: RoundStatus,
         error_message: str,
+        *,
+        agent=None,
+        capture: AgentRunCapture | None = None,
     ) -> None:
         if getattr(self, "_terminal_round_persisted", False):
             return
+        turns = []
+        if agent is not None and capture is not None:
+            for index, captured in enumerate(capture.turns):
+                is_last = index == len(capture.turns) - 1
+                turn_status = TurnStatus.COMPLETED
+                turn_error = ""
+                if is_last and status != RoundStatus.COMPLETED:
+                    turn_status = TurnStatus.CANCELLED if status == RoundStatus.CANCELLED else TurnStatus.FAILED
+                    turn_error = error_message
+                turns.append(self._to_proto_turn(index + 1, captured, agent, turn_status, turn_error))
         request = SaveConversationRoundRequest(
             user_id=user_id,
             conversation_id=chat_request.conversation_id,
             round_number=round_number,
             user_request=UserRequest(content=chat_request.message),
+            turns=turns,
             status=status,
             error_message=error_message,
             start_time=round_start,
@@ -425,7 +558,26 @@ class RuntimeOrchestrator:
             MessageRole.TOOL: "tool",
         }
         return [
-            Message(role=role_names[message.role], content=message.content)
+            Message(
+                role=role_names[message.role],
+                content=message.content,
+                metadata={
+                    **({"tool_call_id": message.tool_call_id} if message.tool_call_id else {}),
+                    **({
+                        "tool_calls": [
+                            {
+                                "id": tool_call.id,
+                                "type": tool_call.type,
+                                "function": {
+                                    "name": tool_call.function.name,
+                                    "arguments": tool_call.function.arguments,
+                                },
+                            }
+                            for tool_call in message.tool_calls
+                        ]
+                    } if message.tool_calls else {}),
+                },
+            )
             for message in messages
             if message.role in role_names
         ]
@@ -459,9 +611,28 @@ class RuntimeOrchestrator:
         if event_type == "token_delta":
             return TokenDeltaEvent(content=event.get("content", ""))
         elif event_type == "tool_start":
-            return ToolStartEvent(tool=event.get("tool", ""), tool_args=event.get("args"))
+            arguments = event.get("args")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {"raw_arguments": arguments}
+            return ToolStartEvent(
+                tool=event.get("tool", ""),
+                tool_call_id=event.get("tool_call_id", ""),
+                tool_args=arguments,
+            )
         elif event_type == "tool_result":
-            return ToolResultEvent(tool=event.get("tool", ""), tool_result=event.get("tool_result") or event.get("result"))
+            result = event["tool_result"] if "tool_result" in event else event.get("result")
+            if isinstance(result, str):
+                with suppress(json.JSONDecodeError):
+                    result = json.loads(result)
+            return ToolResultEvent(
+                tool=event.get("tool", ""),
+                tool_call_id=event.get("tool_call_id", ""),
+                tool_result=result,
+                tool_status=event.get("tool_status", "COMPLETED"),
+            )
         elif event_type == "usage":
             return UsageEvent(
                 prompt_tokens=event["prompt_tokens"],

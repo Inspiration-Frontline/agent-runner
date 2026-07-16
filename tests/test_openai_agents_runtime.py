@@ -38,6 +38,41 @@ def test_build_input_preserves_history_and_current_message():
     ]
 
 
+def test_build_input_converts_provider_neutral_tool_history_to_responses_items():
+    runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
+    context = AgentContext(
+        agent_config=_agent(),
+        system_prompt="system",
+        conversation_history=[
+            Message(role="assistant", content="", metadata={
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "calculate_expression", "arguments": '{"expression":"6*7"}'},
+                }]
+            }),
+            Message(role="tool", content='{"result":42}', metadata={"tool_call_id": "call-1"}),
+            Message(role="assistant", content="The result was 42."),
+        ],
+        user_profile={},
+        rag_chunks=[],
+        current_message=Message(role="user", content="What was it?"),
+        tool_specs=[],
+    )
+
+    assert runtime._build_input(context) == [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "calculate_expression",
+            "arguments": '{"expression":"6*7"}',
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": '{"result":42}'},
+        {"role": "assistant", "content": "The result was 42."},
+        {"role": "user", "content": "What was it?"},
+    ]
+
+
 def test_build_sdk_agent_uses_agents_sdk_model():
     model_factory = DummyModelFactory()
     runtime = OpenAIAgentsRuntime(model_factory=model_factory)
