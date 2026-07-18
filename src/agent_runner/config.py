@@ -1,9 +1,9 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     # Context and output token limits
     max_context_tokens: int = 128000
     max_output_tokens: int = 4096
+    file_preparation_timeout_seconds: float = Field(
+        default=120.0, validation_alias="FILE_PREPARATION_TIMEOUT_SECONDS"
+    )
 
     # Redis configuration for caching
     redis_host: str = Field(default="localhost", validation_alias="REDIS_HOST")
@@ -325,15 +328,30 @@ class ChatRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
-    message: str = Field(min_length=1, max_length=100_000)
+    message: str = Field(default="", max_length=100_000)
+    file_ids: list[str] = Field(default_factory=list, max_length=5)
+    ui_locale: Literal["zh-CN", "en-US"] = "zh-CN"
 
     @field_validator("message")
     @classmethod
     def reject_blank_message(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("message cannot be blank")
+        return value.strip()
+
+    @field_validator("file_ids")
+    @classmethod
+    def validate_file_ids(cls, value: list[str]) -> list[str]:
+        normalized = [file_id.strip() for file_id in value]
+        if any(not file_id for file_id in normalized):
+            raise ValueError("file_ids cannot contain blank values")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("file_ids must be unique")
         return normalized
+
+    @model_validator(mode="after")
+    def require_message_or_files(self) -> "ChatRequest":
+        if not self.message and not self.file_ids:
+            raise ValueError("message or file_ids is required")
+        return self
 
 
 class CancelChatRequest(BaseModel):

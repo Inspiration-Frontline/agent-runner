@@ -15,7 +15,7 @@ from openai.types.responses.response_text_delta_event import ResponseTextDeltaEv
 
 from agent_runner.agent_definitions.config_models import AgentDefinition
 from agent_runner.config import get_settings
-from agent_runner.context.builder import AgentContext
+from agent_runner.context.builder import AgentContext, Message
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.runtime.tool_loop import (
@@ -240,13 +240,29 @@ class OpenAIAgentsRuntime:
                     "output": message.content,
                 })
             else:
-                input_items.append({"role": message.role, "content": message.content})
+                input_items.append({
+                    "role": message.role,
+                    "content": message.metadata.get("sdk_content", message.content),
+                })
 
         input_items.append({
             "role": "user",
-            "content": context.current_message.content,
+            "content": context.current_message.metadata.get(
+                "sdk_content", context.current_message.content
+            ),
         })
         return input_items
+
+    def _to_capture_message(self, message: Message) -> dict[str, Any]:
+        """Keep stable provider-neutral content while excluding transient signed SDK input URLs."""
+        captured: dict[str, Any] = {
+            "role": message.role,
+            "content": message.metadata.get("capture_content", message.content),
+        }
+        for key in ("tool_calls", "tool_call_id"):
+            if key in message.metadata:
+                captured[key] = message.metadata[key]
+        return captured
 
     def _convert_stream_event(
         self,
@@ -333,11 +349,8 @@ class OpenAIAgentsRuntime:
         # Rebuild the normalized context supplied to the first model call. System instructions are
         # stored for audit even though the SDK receives them through Agent.instructions.
         initial_messages = [{"role": "system", "content": context.system_prompt}]
-        initial_messages.extend(
-            {"role": message.role, "content": message.content, **message.metadata}
-            for message in context.conversation_history
-        )
-        initial_messages.append({"role": "user", "content": context.current_message.content})
+        initial_messages.extend(self._to_capture_message(message) for message in context.conversation_history)
+        initial_messages.append(self._to_capture_message(context.current_message))
 
         turns: list[CapturedModelTurn] = []
         request_messages = initial_messages

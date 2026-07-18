@@ -24,6 +24,7 @@ class StreamEventType(StrEnum):
     TOOL_START = "tool_start"
     TOOL_RESULT = "tool_result"
     USAGE = "usage"
+    ATTACHMENT_PROCESSING = "attachment_processing"
     SAVING = "saving"
     PERSISTED = "persisted"
     ERROR = "error"
@@ -62,6 +63,7 @@ class StreamEvent(BaseModel):
     error_message: str | None = None
     error_code: str | None = None
     phase: str | None = None
+    pending_files: int | None = None
 
 
 class TokenDeltaEvent(StreamEvent):
@@ -157,6 +159,17 @@ class ErrorEvent(StreamEvent):
 class SavingEvent(StreamEvent):
     def __init__(self):
         super().__init__(type=StreamEventType.SAVING)
+
+
+class AttachmentProcessingEvent(StreamEvent):
+    """Transient status emitted while confirmed files are still being prepared."""
+
+    def __init__(self, pending_files: int) -> None:
+        super().__init__(
+            type=StreamEventType.ATTACHMENT_PROCESSING,
+            phase="attachment_preparation",
+            pending_files=pending_files,
+        )
 
 
 class PersistedEvent(StreamEvent):

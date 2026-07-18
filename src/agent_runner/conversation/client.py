@@ -5,6 +5,8 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     GetConversationReplayResponse,
     GetConversationRoundHistoryRequest,
     GetConversationRoundHistoryResponse,
+    PrepareConversationFilesRequest,
+    PrepareConversationFilesResponse,
     ReplayDetailLevel,
     SaveConversationRoundRequest,
     SaveConversationRoundResponse,
@@ -38,6 +40,23 @@ class ConversationManagerClient:
 
     async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         return await self._service.save_conversation_round(request, timeout=10.0)
+
+    async def prepare_files(
+        self,
+        user_id: int,
+        conversation_id: str,
+        request_id: str,
+        file_ids: list[str],
+    ) -> PrepareConversationFilesResponse:
+        return await self._service.prepare_conversation_files(
+            PrepareConversationFilesRequest(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                request_id=request_id,
+                file_ids=file_ids,
+            ),
+            timeout=10.0,
+        )
 
     async def get_model_context(
         self, user_id: int, conversation_id: str, end_round_number: int

@@ -109,6 +109,8 @@ class ContextBuilder:
         user_id: int,
         current_message: str,
         conversation_history: list[Message] | None = None,
+        current_message_metadata: dict[str, Any] | None = None,
+        additional_system_instruction: str = "",
     ) -> AgentContext:
         """
         Build the complete execution context for an agent request.
@@ -142,6 +144,8 @@ class ContextBuilder:
             user_profile=user_profile,
             rag_chunks=rag_chunks,
         )
+        if additional_system_instruction:
+            system_prompt += "\n\n" + additional_system_instruction
 
         tool_specs = await self._load_tool_specs(agent_config.tools)
 
@@ -151,7 +155,11 @@ class ContextBuilder:
             conversation_history=conversation_history,
             user_profile=user_profile,
             rag_chunks=rag_chunks,
-            current_message=Message(role="user", content=current_message),
+            current_message=Message(
+                role="user",
+                content=current_message,
+                metadata=current_message_metadata or {},
+            ),
             tool_specs=tool_specs,
         )
 
