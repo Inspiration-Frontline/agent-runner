@@ -4,8 +4,9 @@ from dataclasses import dataclass, field
 from time import time_ns
 from typing import Any
 
+from agents.tool_context import ToolContext
+
 from agent_runner.runtime.cancellation import CancellationToken
-from agent_runner.tools.executor import ToolExecutor
 from agent_runner.tools.registry import ToolDefinition
 
 
@@ -77,15 +78,16 @@ class ToolExecutionCollector:
         tool_call_id: str,
         definition: ToolDefinition,
         arguments_json: str,
-        executor: ToolExecutor,
+        tool_context: ToolContext[Any],
         cancellation_token: CancellationToken | None,
     ) -> str:
         start_time = epoch_millis()
         try:
-            arguments = json.loads(arguments_json)
-            if not isinstance(arguments, dict):
-                raise ValueError("Tool arguments must be a JSON object.")
-            result = await executor.execute(definition.tool_key, arguments, cancellation_token)
+            if cancellation_token is not None and cancellation_token.is_cancelled():
+                raise asyncio.CancelledError("Tool execution cancelled")
+            if definition.function_tool is None:
+                raise ValueError(f"Tool has no SDK FunctionTool: {definition.tool_key}")
+            result = await definition.function_tool.on_invoke_tool(tool_context, arguments_json)
             result_content = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
             self._executions[tool_call_id] = CapturedToolExecution(
                 tool_call_id=tool_call_id,

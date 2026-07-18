@@ -3,46 +3,57 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from agents import function_tool
 from agents.stream_events import RunItemStreamEvent
+from agents.tool_context import ToolContext
 
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.runtime.tool_loop import CapturedToolCall, ToolExecutionCollector
 from agent_runner.tools.executor import ToolExecutor
-from agent_runner.tools.internal.calculator import CalculatorTool
-from agent_runner.tools.internal.current_time import CurrentTimeTool
-from agent_runner.tools.internal.weather import WeatherTool
-from agent_runner.tools.internal.web_search import WebSearchTool, _DuckDuckGoResultParser, _VisibleTextParser
-from agent_runner.tools.registry import BaseTool, ToolRegistry
+from agent_runner.tools.internal.catalog import build_internal_tool_registry
+from agent_runner.tools.internal.web_search import (
+    _DuckDuckGoResultParser,
+    _VisibleTextParser,
+    _WebSearchClient,
+)
+from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
 
-class _DelayTool(BaseTool):
-    def __init__(self, tool_key: str, delay: float, fails: bool = False) -> None:
-        self._tool_key = tool_key
-        self.delay = delay
-        self.fails = fails
+def _delay_definition(tool_key: str, delay: float, fails: bool = False) -> ToolDefinition:
+    async def execute(value: int) -> dict[str, int]:
+        """Run a delayed test Tool.
 
-    @property
-    def tool_key(self) -> str:
-        return self._tool_key
-
-    @property
-    def tool_name(self) -> str:
-        return self._tool_key.replace(".", "_")
-
-    @property
-    def description(self) -> str:
-        return "Test Tool"
-
-    async def execute(self, value: int) -> dict:
-        await asyncio.sleep(self.delay)
-        if self.fails:
+        Args:
+            value: Value returned by the test Tool.
+        """
+        await asyncio.sleep(delay)
+        if fails:
             raise ValueError(f"failed:{value}")
         return {"value": value}
 
+    sdk_tool = function_tool(
+        name_override=tool_key.replace(".", "_"),
+        failure_error_function=None,
+    )(execute)
+    return ToolDefinition.from_function_tool(tool_key, sdk_tool)
+
+
+def _tool_context(tool_name: str, call_id: str, arguments: str) -> ToolContext[None]:
+    return ToolContext(
+        context=None,
+        tool_name=tool_name,
+        tool_call_id=call_id,
+        tool_arguments=arguments,
+    )
+
+
+async def _execute_builtin(tool_key: str, arguments: dict) -> dict:
+    return await ToolExecutor(build_internal_tool_registry()).execute(tool_key, arguments)
+
 
 async def test_current_time_includes_timezone_offset_and_time() -> None:
-    result = await CurrentTimeTool().execute("Asia/Shanghai")
+    result = await _execute_builtin("builtin.current_time", {"timezone": "Asia/Shanghai"})
 
     assert result["timezone"] == "Asia/Shanghai"
     assert result["utc_offset"] == "+08:00"
@@ -52,7 +63,7 @@ async def test_current_time_includes_timezone_offset_and_time() -> None:
 
 async def test_current_time_rejects_unknown_timezone() -> None:
     with pytest.raises(ValueError, match="Unknown IANA timezone"):
-        await CurrentTimeTool().execute("Invalid/AgentBreaker")
+        await _execute_builtin("builtin.current_time", {"timezone": "Invalid/AgentBreaker"})
 
 
 @pytest.mark.parametrize(
@@ -62,16 +73,28 @@ async def test_current_time_rejects_unknown_timezone() -> None:
         ("-3 * (+2 + 4)", -18),
     ],
 )
-async def test_calculator_supports_phase5_grammar(expression: str, expected: float) -> None:
-    result = await CalculatorTool().execute(expression)
+async def test_calculator_supports_restricted_arithmetic_grammar(expression: str, expected: float) -> None:
+    result = await _execute_builtin("builtin.calculator", {"expression": expression})
     assert result == {"expression": expression, "result": expected}
 
 
 async def test_calculator_rejects_code_and_reports_division_by_zero() -> None:
     with pytest.raises(ValueError, match="unsupported syntax"):
-        await CalculatorTool().execute("pow(2, 8)")
+        await _execute_builtin("builtin.calculator", {"expression": "pow(2, 8)"})
     with pytest.raises(ZeroDivisionError):
-        await CalculatorTool().execute("1 / 0")
+        await _execute_builtin("builtin.calculator", {"expression": "1 / 0"})
+
+
+def test_builtin_definitions_are_derived_from_sdk_function_tools() -> None:
+    registry = build_internal_tool_registry()
+    definition = registry.get("builtin.calculator")
+
+    assert definition is not None
+    assert definition.function_tool is not None
+    assert definition.tool_name == "calculate_expression"
+    assert definition.strict is True
+    assert definition.description.startswith("Evaluate an arithmetic expression")
+    assert definition.parameters["properties"]["expression"]["description"].startswith("Code-style")
 
 
 async def test_weather_uses_geocoding_and_current_weather(monkeypatch) -> None:
@@ -95,7 +118,7 @@ async def test_weather_uses_geocoding_and_current_weather(monkeypatch) -> None:
     client = _GetOnlyClient(responses)
     monkeypatch.setattr("agent_runner.tools.internal.weather.httpx.AsyncClient", lambda **_: client)
 
-    result = await WeatherTool().execute(" Shanghai ")
+    result = await _execute_builtin("builtin.weather", {"location": " Shanghai "})
 
     assert result["location"]["name"] == "Shanghai"
     assert result["timezone"] == "Asia/Shanghai"
@@ -113,15 +136,14 @@ async def test_web_search_parses_duckduckgo_and_keeps_partial_page_failures(monk
     client = _GetOnlyClient([_TextResponse(search_html)])
     monkeypatch.setattr("agent_runner.tools.internal.web_search.httpx.AsyncClient", lambda **_: client)
 
-    async def fetch_result(_client, result: dict) -> dict:
+    async def fetch_result(_self, _client, result: dict) -> dict:
         if result["title"].strip() == "A title":
             return {**result, "content": "Readable A", "error": ""}
         return {**result, "content": "", "error": "page failed"}
 
-    tool = WebSearchTool()
-    monkeypatch.setattr(tool, "_fetch_result", fetch_result)
+    monkeypatch.setattr(_WebSearchClient, "_fetch_result", fetch_result)
 
-    result = await tool.execute(" AgentBreaker ")
+    result = await _execute_builtin("builtin.web_search", {"query": " AgentBreaker "})
 
     assert result["query"] == "AgentBreaker"
     assert len(result["results"]) == 2
@@ -143,8 +165,8 @@ def test_html_parsers_close_open_results_and_remove_hidden_content() -> None:
 
 async def test_batch_execution_is_parallel_and_partial_failure_does_not_cancel_sibling() -> None:
     registry = ToolRegistry()
-    registry.register(_DelayTool("test.success", 0.05).to_definition())
-    registry.register(_DelayTool("test.failure", 0.05, fails=True).to_definition())
+    registry.register(_delay_definition("test.success", 0.05))
+    registry.register(_delay_definition("test.failure", 0.05, fails=True))
     executor = ToolExecutor(registry)
     started = asyncio.get_running_loop().time()
 
@@ -163,8 +185,8 @@ async def test_batch_execution_is_parallel_and_partial_failure_does_not_cancel_s
 
 async def test_batch_cancellation_cancels_every_in_flight_tool() -> None:
     registry = ToolRegistry()
-    registry.register(_DelayTool("test.first", 10).to_definition())
-    registry.register(_DelayTool("test.second", 10).to_definition())
+    registry.register(_delay_definition("test.first", 10))
+    registry.register(_delay_definition("test.second", 10))
     token = CancellationToken()
     task = asyncio.create_task(ToolExecutor(registry).execute_batch([
         {"tool_key": "test.first", "arguments": {"value": 1}},
@@ -179,16 +201,15 @@ async def test_batch_cancellation_cancels_every_in_flight_tool() -> None:
 
 
 async def test_collector_returns_structured_failure_for_model_and_audit() -> None:
-    definition = _DelayTool("test.failure", 0, fails=True).to_definition()
-    registry = ToolRegistry()
-    registry.register(definition)
+    definition = _delay_definition("test.failure", 0, fails=True)
     collector = ToolExecutionCollector()
+    arguments = '{"value":2}'
 
     model_result = await collector.execute(
         tool_call_id="call-1",
         definition=definition,
-        arguments_json='{"value":2}',
-        executor=ToolExecutor(registry),
+        arguments_json=arguments,
+        tool_context=_tool_context(definition.tool_name, "call-1", arguments),
         cancellation_token=None,
     )
 
@@ -198,9 +219,7 @@ async def test_collector_returns_structured_failure_for_model_and_audit() -> Non
 
 
 async def test_cancelled_observed_call_builds_partial_turn_when_sdk_removes_raw_response() -> None:
-    definition = _DelayTool("test.cancel", 10).to_definition()
-    registry = ToolRegistry()
-    registry.register(definition)
+    definition = _delay_definition("test.cancel", 10)
     collector = ToolExecutionCollector()
     collector.record_call(CapturedToolCall(
         tool_call_id="call-cancel",
@@ -212,7 +231,7 @@ async def test_cancelled_observed_call_builds_partial_turn_when_sdk_removes_raw_
         tool_call_id="call-cancel",
         definition=definition,
         arguments_json='{"value":1}',
-        executor=ToolExecutor(registry),
+        tool_context=_tool_context(definition.tool_name, "call-cancel", '{"value":1}'),
         cancellation_token=token,
     ))
     await asyncio.sleep(0)

@@ -1,7 +1,10 @@
 import asyncio
+import json
 import logging
-from functools import partial
 from typing import Any
+from uuid import uuid4
+
+from agents.tool_context import ToolContext
 
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.tools.registry import ToolDefinition, ToolRegistry
@@ -13,8 +16,8 @@ class ToolExecutor:
     """
     Executor for running tool implementations.
 
-    Handles tool execution with support for both async and sync handlers,
-    cancellation tokens, and batch execution of multiple tool calls.
+    Invokes SDK-decorated FunctionTools outside an Agent run, with cancellation
+    tokens and concurrent batch execution for tests and non-SDK callers.
 
     Attributes:
         registry: Tool registry containing available tools.
@@ -60,16 +63,17 @@ class ToolExecutor:
         logger.info("Executing Tool %s with arguments: %s", tool_key, arguments)
 
         try:
-            if tool.handler:
-                if asyncio.iscoroutinefunction(tool.handler):
-                    result = await tool.handler(**arguments)
-                else:
-                    handler = partial(tool.handler, **arguments)
-                    result = await asyncio.get_event_loop().run_in_executor(
-                        None, handler
-                    )
-            else:
+            if tool.function_tool is None:
                 result = await self._execute_tool(tool, arguments)
+            else:
+                arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                context = ToolContext(
+                    context=None,
+                    tool_name=tool.tool_name,
+                    tool_call_id=str(uuid4()),
+                    tool_arguments=arguments_json,
+                )
+                result = await tool.function_tool.on_invoke_tool(context, arguments_json)
 
             logger.info("Tool %s executed successfully", tool_key)
             return result

@@ -24,7 +24,7 @@ class FakeLock:
         self.released = False
 
     async def acquire(self, conversation_id: str) -> None:
-        assert conversation_id == "conv_phase3"
+        assert conversation_id == "conv_persistence"
 
     async def release(self) -> None:
         self.released = True
@@ -124,7 +124,7 @@ async def test_success_reports_done_only_after_persistence():
     orchestrator, client, lock = _orchestrator(save_success=True)
 
     events = [event async for event in orchestrator.run(
-        ChatRequest(conversation_id="conv_phase3", message="Question"), 1, FakeRequest()
+        ChatRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
     )]
 
     assert [event.type for event in events] == [
@@ -137,7 +137,7 @@ async def test_success_reports_done_only_after_persistence():
     ]
     assert client.saved_request.final_answer.content == "Persisted answer"
     assert client.saved_request.user_id == 1
-    assert client.saved_request.conversation_id == "conv_phase3"
+    assert client.saved_request.conversation_id == "conv_persistence"
     assert lock.released is True
 
 
@@ -145,7 +145,7 @@ async def test_persistence_failure_never_reports_persisted_or_done():
     orchestrator, _, lock = _orchestrator(save_success=False)
 
     events: list[StreamEvent] = [event async for event in orchestrator.run(
-        ChatRequest(conversation_id="conv_phase3", message="Question"), 1, FakeRequest()
+        ChatRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
     )]
 
     assert events[-2].type == StreamEventType.SAVING
@@ -157,7 +157,7 @@ async def test_persistence_failure_never_reports_persisted_or_done():
 
 
 def test_public_request_forbids_user_and_agent_identity():
-    fields = {"conversation_id": "conv_phase3", "message": "Question", "user_id": 1, "agent_id": 1}
+    fields = {"conversation_id": "conv_persistence", "message": "Question", "user_id": 1, "agent_id": 1}
     try:
         ChatRequest.model_validate(fields)
     except ValueError:
@@ -167,7 +167,7 @@ def test_public_request_forbids_user_and_agent_identity():
 
 def test_public_request_rejects_blank_messages():
     try:
-        ChatRequest(conversation_id="conv_phase3", message="   ")
+        ChatRequest(conversation_id="conv_persistence", message="   ")
     except ValueError:
         return
     raise AssertionError("Blank messages must be rejected before model execution.")

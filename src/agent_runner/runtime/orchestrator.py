@@ -64,7 +64,6 @@ from agent_runner.conversation import (
 from agent_runner.runtime.cancellation import CancellationManager, conversation_cancellation_registry
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.runtime.tool_loop import AgentRunCapture, CapturedModelTurn
-from agent_runner.tools.executor import ToolExecutor
 from agent_runner.tools.internal.catalog import build_internal_tool_registry
 
 logger = logging.getLogger(__name__)
@@ -90,7 +89,7 @@ class RuntimeOrchestrator:
         config_loader: Loader for agent configurations.
         context_builder: Builder for agent execution context.
         agent_factory: Factory for creating agent instances.
-        tool_executor: Executor for tool invocations.
+        tool_registry: Registry of SDK-decorated Tools available to the request.
         cancellation_manager: Manager for request cancellation tokens.
         openai_runtime: Runtime wrapper for OpenAI Agents SDK.
     """
@@ -105,9 +104,9 @@ class RuntimeOrchestrator:
         """
         self.config_loader = AgentConfigLoader()
         tool_registry = build_internal_tool_registry()
+        self.tool_registry = tool_registry
         self.context_builder = ContextBuilder(tool_registry)
         self.agent_factory = AgentFactory()
-        self.tool_executor = ToolExecutor(tool_registry)
         self.cancellation_manager = CancellationManager()
         self.openai_runtime = OpenAIAgentsRuntime()
         self.conversation_client = ConversationManagerClient()
@@ -213,7 +212,7 @@ class RuntimeOrchestrator:
             call_start = _epoch_millis()
             if isinstance(self.openai_runtime, OpenAIAgentsRuntime):
                 runtime_stream = self.openai_runtime.run_streamed(
-                    agent, context, cancellation_token, getattr(self, "tool_executor", None)
+                    agent, context, cancellation_token, getattr(self, "tool_registry", None)
                 )
             else:
                 runtime_stream = self.openai_runtime.run_streamed(agent, context, cancellation_token)

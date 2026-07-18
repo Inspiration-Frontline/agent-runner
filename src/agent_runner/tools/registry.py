@@ -1,11 +1,11 @@
 import hashlib
 import json
 import logging
-from abc import ABC, abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+
+from agents import FunctionTool
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +23,7 @@ class ToolDefinition:
     """
     Definition of a tool available for agent execution.
 
-    Contains the tool's identity, interface, handler function,
-    and type classification for registry management.
+    Adds AgentBreaker identity and provenance to the SDK-generated Tool interface.
 
     Attributes:
         tool_key: Globally unique and permanently stable Tool identity.
@@ -33,7 +32,7 @@ class ToolDefinition:
         parameters: Parameter schema defining tool's input structure.
         strict: Whether strict JSON Schema argument generation is requested.
         definition_hash: SHA-256 digest of the canonical normalized definition.
-        handler: Optional handler function for tool execution.
+        function_tool: SDK FunctionTool produced by OpenAI's @function_tool decorator.
         source_type: Origin from which the Tool is resolved and executed.
     """
 
@@ -43,7 +42,7 @@ class ToolDefinition:
     parameters: dict[str, Any]
     strict: bool = False
     definition_hash: str = field(init=False)
-    handler: Callable | None = None
+    function_tool: FunctionTool | None = None
     source_type: ToolSourceType = ToolSourceType.INTERNAL
 
     def __post_init__(self):
@@ -63,6 +62,24 @@ class ToolDefinition:
             sort_keys=True,
         )
         self.definition_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_function_tool(
+        cls,
+        tool_key: str,
+        function_tool: FunctionTool,
+        source_type: ToolSourceType = ToolSourceType.INTERNAL,
+    ) -> "ToolDefinition":
+        """Add AgentBreaker identity/provenance to an SDK-generated FunctionTool definition."""
+        return cls(
+            tool_key=tool_key,
+            tool_name=function_tool.name,
+            description=function_tool.description,
+            parameters=function_tool.params_json_schema,
+            strict=function_tool.strict_json_schema,
+            function_tool=function_tool,
+            source_type=source_type,
+        )
 
 
 class ToolRegistry:
@@ -176,105 +193,3 @@ class ToolRegistry:
                     },
                 })
         return specs
-
-
-class BaseTool(ABC):
-    """
-    Abstract base class for tool implementations.
-
-    Provides a standard interface for defining tools with
-    identity, interface, and execution logic.
-    """
-
-    @property
-    @abstractmethod
-    def tool_key(self) -> str:
-        """
-        Get the globally unique and permanently stable identity for this Tool.
-
-        Returns:
-            str: The stable global Tool key.
-        """
-        pass
-
-    @property
-    @abstractmethod
-    def tool_name(self) -> str:
-        """
-        Get the provider-facing function name exposed to the LLM.
-
-        Returns:
-            str: The tool name.
-        """
-        pass
-
-    @property
-    @abstractmethod
-    def description(self) -> str:
-        """
-        Get the detailed description of this tool.
-
-        Returns:
-            str: The tool description.
-        """
-        pass
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        """
-        Get the parameter schema for this tool.
-
-        Returns:
-            dict[str, Any]: Parameter schema dictionary.
-        """
-        return {}
-
-    @property
-    def strict(self) -> bool:
-        """
-        Return whether strict JSON Schema argument generation is requested.
-
-        Returns:
-            bool: False unless the Tool explicitly opts in.
-        """
-        return False
-
-    @property
-    def source_type(self) -> ToolSourceType:
-        """
-        Get the origin from which this Tool is resolved and executed.
-
-        Returns:
-            ToolSourceType: Tool origin (default: INTERNAL).
-        """
-        return ToolSourceType.INTERNAL
-
-    @abstractmethod
-    async def execute(self, **kwargs) -> Any:
-        """
-        Execute the tool with given arguments.
-
-        Args:
-            **kwargs: Arguments for tool execution.
-
-        Returns:
-            Any: The result of tool execution.
-        """
-        pass
-
-    def to_definition(self) -> ToolDefinition:
-        """
-        Convert this tool instance to a ToolDefinition.
-
-        Returns:
-            ToolDefinition: The tool definition for this instance.
-        """
-        return ToolDefinition(
-            tool_key=self.tool_key,
-            tool_name=self.tool_name,
-            description=self.description,
-            parameters=self.parameters,
-            strict=self.strict,
-            handler=self.execute,
-            source_type=self.source_type,
-        )

@@ -2,12 +2,14 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
 from agents import Agent, FunctionTool, ModelSettings, Runner
 from agents.retry import ModelRetrySettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
+from agents.tool_context import ToolContext
 from openai.types.responses.response_completed_event import ResponseCompletedEvent
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
 
@@ -24,8 +26,7 @@ from agent_runner.runtime.tool_loop import (
     ToolExecutionCollector,
     epoch_millis,
 )
-from agent_runner.tools.executor import ToolExecutor
-from agent_runner.tools.registry import ToolDefinition
+from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class OpenAIAgentsRuntime:
     """
 
     def __init__(self, model_factory: LiteLLMModelFactory | None = None):
+        """Create a runtime and initialize the request result snapshot exposed to the orchestrator."""
         self.model_factory = model_factory or LiteLLMModelFactory()
         self.last_capture = AgentRunCapture()
 
@@ -49,20 +51,23 @@ class OpenAIAgentsRuntime:
         agent: AgentDefinition,
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
-        tool_executor: ToolExecutor | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
-        """
-        Execute an agent request with an SDK-managed streaming response.
+        """Run one request through the SDK Tool loop and yield AgentBreaker semantic events.
+
+        The SDK owns repeated model/Tool scheduling. AgentBreaker wraps the configured decorated
+        FunctionTools only to collect persistence evidence and translate SDK events to SSE.
+        ``last_capture`` is finalized even when streaming fails or is cancelled.
         """
         # Agents SDK agents are declarative; Runner owns execution and streaming.
         self.last_capture = AgentRunCapture()
         collector = ToolExecutionCollector()
-        executor = tool_executor or ToolExecutor()
-        definitions = self._resolve_tool_definitions(agent, executor)
+        registry = tool_registry or ToolRegistry()
+        definitions = self._resolve_tool_definitions(agent, registry)
         sdk_agent = self._build_sdk_agent(
             agent,
             context.system_prompt,
-            self._build_sdk_tools(definitions, executor, collector, cancellation_token),
+            self._build_sdk_tools(definitions, collector, cancellation_token),
         )
         sdk_input = self._build_input(context)
         run_start = epoch_millis()
@@ -126,9 +131,7 @@ class OpenAIAgentsRuntime:
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
     ) -> dict[str, Any]:
-        """
-        Execute an agent request and return the final output.
-        """
+        """Execute the non-streaming compatibility path without configured Tools."""
         if cancellation_token and cancellation_token.is_cancelled():
             raise asyncio.CancelledError("Execution cancelled")
 
@@ -146,6 +149,7 @@ class OpenAIAgentsRuntime:
     def _build_sdk_agent(
         self, agent: AgentDefinition, system_prompt: str, tools: list[FunctionTool] | None = None
     ) -> Agent:
+        """Translate an AgentBreaker definition into one request-scoped SDK Agent."""
         settings = get_settings()
         return Agent(
             name=agent.name,
@@ -163,11 +167,12 @@ class OpenAIAgentsRuntime:
         )
 
     def _resolve_tool_definitions(
-        self, agent: AgentDefinition, executor: ToolExecutor
+        self, agent: AgentDefinition, registry: ToolRegistry
     ) -> list[ToolDefinition]:
+        """Resolve stable configured Tool keys and fail before model invocation when one is missing."""
         definitions: list[ToolDefinition] = []
         for tool_key in agent.tools:
-            definition = executor.registry.get(tool_key)
+            definition = registry.get(tool_key)
             if definition is None:
                 raise ValueError(f"Configured Tool is not registered: {tool_key}")
             definitions.append(definition)
@@ -176,31 +181,44 @@ class OpenAIAgentsRuntime:
     def _build_sdk_tools(
         self,
         definitions: list[ToolDefinition],
-        executor: ToolExecutor,
         collector: ToolExecutionCollector,
         cancellation_token: CancellationToken | None,
     ) -> list[FunctionTool]:
+        """Wrap decorated SDK Tools with auditing while preserving their generated metadata.
+
+        ``dataclasses.replace`` keeps schema, strict mode, timeout, approval, guardrail, and future
+        FunctionTool options produced by ``@function_tool``. Only the invocation hook changes.
+        """
         tools: list[FunctionTool] = []
         for definition in definitions:
-            async def invoke(tool_context, arguments_json: str, captured=definition):
+            if definition.function_tool is None:
+                raise ValueError(f"Tool has no SDK FunctionTool: {definition.tool_key}")
+
+            async def invoke(
+                tool_context: ToolContext[Any],
+                arguments_json: str,
+                captured: ToolDefinition = definition,
+            ) -> str:
                 return await collector.execute(
                     tool_call_id=str(tool_context.tool_call_id),
                     definition=captured,
                     arguments_json=arguments_json,
-                    executor=executor,
-                cancellation_token=cancellation_token,
-            )
+                    tool_context=tool_context,
+                    cancellation_token=cancellation_token,
+                )
 
-            tools.append(FunctionTool(
-                name=definition.tool_name,
-                description=definition.description,
-                params_json_schema=definition.parameters,
-                on_invoke_tool=invoke,
-                strict_json_schema=definition.strict,
-            ))
+            # Preserve every option generated/configured by @function_tool and replace only the
+            # invocation hook needed for AgentBreaker execution auditing.
+            tools.append(replace(definition.function_tool, on_invoke_tool=invoke))
         return tools
 
     def _build_input(self, context: AgentContext) -> list[dict[str, Any]]:
+        """Convert provider-neutral replay messages into Responses API input item shapes.
+
+        Conversation Manager stores assistant Tool Calls and Tool results as neutral messages.
+        Responses input represents them as separate ``function_call`` and
+        ``function_call_output`` items, so this conversion remains at the SDK boundary.
+        """
         input_items: list[dict[str, Any]] = []
         for message in context.conversation_history:
             tool_calls = message.metadata.get("tool_calls") or []
@@ -235,6 +253,7 @@ class OpenAIAgentsRuntime:
         event: StreamEvent,
         collector: ToolExecutionCollector | None = None,
     ) -> dict[str, Any] | None:
+        """Map SDK raw/run-item events to the small event vocabulary exposed over SSE."""
         if isinstance(event, RawResponsesStreamEvent):
             if isinstance(event.data, ResponseTextDeltaEvent):
                 if not event.data.delta:
@@ -280,6 +299,7 @@ class OpenAIAgentsRuntime:
         return None
 
     def _convert_response_completed_usage(self, event_data: Any) -> dict[str, Any] | None:
+        """Extract provider usage when a completed response reports it."""
         usage = getattr(getattr(event_data, "response", None), "usage", None)
         if usage is None:
             return None
@@ -304,6 +324,14 @@ class OpenAIAgentsRuntime:
         model_completed_usages: list[tuple[int, int, int]],
         cancellation_token: CancellationToken | None,
     ) -> AgentRunCapture:
+        """Reconstruct durable provider-neutral Turns from one completed or interrupted SDK run.
+
+        One SDK raw response corresponds to one LLM Call/Turn. The first request stores a complete
+        snapshot; later requests store only the assistant Tool Calls and Tool results appended by
+        the preceding Turn.
+        """
+        # Rebuild the normalized context supplied to the first model call. System instructions are
+        # stored for audit even though the SDK receives them through Agent.instructions.
         initial_messages = [{"role": "system", "content": context.system_prompt}]
         initial_messages.extend(
             {"role": message.role, "content": message.content, **message.metadata}
@@ -316,6 +344,8 @@ class OpenAIAgentsRuntime:
         full_model_input = list(initial_messages)
         previous_turn_end = run_start
         raw_responses = list(result.raw_responses)
+        # Cancellation can remove SDK raw_responses after tool_called was already emitted. Preserve
+        # that observed evidence as a partial Turn instead of losing the Tool Call entirely.
         if not raw_responses and collector.calls():
             return self._build_observed_partial_capture(
                 initial_messages=initial_messages,
@@ -328,6 +358,8 @@ class OpenAIAgentsRuntime:
                 cancelled=cancellation_token is not None and cancellation_token.is_cancelled(),
             )
         assigned_tool_call_ids: set[str] = set()
+        # Normalize every actual model response independently so one Tool loop becomes multiple
+        # persisted Turns rather than one flattened request/answer pair.
         for index, response in enumerate(raw_responses):
             event_llm_end = (
                 model_completed_times[index]
@@ -355,6 +387,8 @@ class OpenAIAgentsRuntime:
             llm_end = min([event_llm_end, *(execution.start_time for execution in executions)])
             llm_end = max(previous_turn_end, llm_end)
             turn_end = max([llm_end, *(execution.end_time for execution in executions)])
+            # Raw payloads are audit snapshots assembled from SDK objects. Logical replay uses the
+            # normalized messages above and never depends on these provider-oriented JSON strings.
             raw_request = json.dumps(
                 {
                     "messages": full_model_input,
@@ -405,6 +439,8 @@ class OpenAIAgentsRuntime:
                 raw_request=raw_request,
                 raw_response=raw_response,
             ))
+            # Only Tool-producing responses have a following LLM request. Persist precisely the
+            # assistant call plus ordered execution outputs required for that next request.
             request_messages = self._next_turn_delta(response_content, tool_calls, executions)
             full_model_input.extend(request_messages)
             previous_turn_end = turn_end
@@ -422,6 +458,11 @@ class OpenAIAgentsRuntime:
         model_completed_usages: list[tuple[int, int, int]],
         cancelled: bool,
     ) -> AgentRunCapture:
+        """Build a cancellable audit Turn when SDK raw output is no longer available.
+
+        This path uses model-emitted ``tool_called`` events and collected executions. It does not
+        invent a successful response; the owning Round/Turn remains FAILED or CANCELLED.
+        """
         tool_calls = collector.calls()
         event_llm_end = model_completed_times[-1] if model_completed_times else epoch_millis()
         executions = self._complete_execution_audit(
@@ -487,6 +528,11 @@ class OpenAIAgentsRuntime:
         fallback_time: int,
         cancelled: bool,
     ) -> list[CapturedToolExecution]:
+        """Guarantee one terminal execution record for every model-emitted Tool Call.
+
+        Missing outcomes can occur when cancellation wins before a Tool coroutine starts. The
+        synthesized FAILED/CANCELLED record makes the one-to-one persistence invariant explicit.
+        """
         definitions_by_name = {definition.tool_name: definition for definition in definitions}
         executions: list[CapturedToolExecution] = []
         for tool_call in tool_calls:
@@ -523,6 +569,7 @@ class OpenAIAgentsRuntime:
         return executions
 
     def _normalize_response_output(self, outputs: list[Any]) -> tuple[str, list[CapturedToolCall]]:
+        """Extract assistant text and function calls from heterogeneous SDK response items."""
         text_parts: list[str] = []
         tool_calls: list[CapturedToolCall] = []
         for item in outputs:
@@ -546,6 +593,7 @@ class OpenAIAgentsRuntime:
         tool_calls: list[CapturedToolCall],
         executions,
     ) -> list[dict[str, Any]]:
+        """Create the provider-neutral APPEND_DELTA consumed by the next model Turn."""
         if not tool_calls:
             return []
         messages: list[dict[str, Any]] = [{
@@ -571,6 +619,7 @@ class OpenAIAgentsRuntime:
         return messages
 
     def _definition_dict(self, definition: ToolDefinition) -> dict[str, Any]:
+        """Serialize the frozen AgentBreaker Tool definition included in raw request audit JSON."""
         return {
             "tool_key": definition.tool_key,
             "tool_name": definition.tool_name,
@@ -582,8 +631,16 @@ class OpenAIAgentsRuntime:
         }
 
     def _model_dump(self, value: Any) -> Any:
+        """Convert an SDK response item, not an LLM model, into JSON-compatible audit data.
+
+        SDK output items are usually Pydantic models, while provider adapters may already return
+        dictionaries or primitives. Calling the public ``model_dump`` API when present preserves
+        structured fields; returning other values unchanged lets ``json.dumps(default=str)`` handle
+        adapter-specific fallbacks without coupling this runtime to every SDK item subclass.
+        """
         model_dump = getattr(value, "model_dump", None)
         return model_dump(mode="json") if callable(model_dump) else value
 
     async def close(self):
+        """Release HTTP resources owned by the LiteLLM model factory."""
         await self.model_factory.close()

@@ -5,40 +5,13 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
+from agents import function_tool
 
 from agent_runner.config import get_settings
-from agent_runner.tools.registry import BaseTool
 
 
-class WebSearchTool(BaseTool):
-    @property
-    def tool_key(self) -> str:
-        return "builtin.web_search"
-
-    @property
-    def tool_name(self) -> str:
-        return "search_web"
-
-    @property
-    def description(self) -> str:
-        return "Search the public web, fetch result pages, and return extracted page content with source URLs."
-
-    @property
-    def parameters(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query."},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        }
-
-    @property
-    def strict(self) -> bool:
-        return True
-
-    async def execute(self, query: str) -> dict:
+class _WebSearchClient:
+    async def search(self, query: str) -> dict[str, object]:
         normalized = query.strip()
         if not normalized:
             raise ValueError("Search query cannot be blank.")
@@ -131,6 +104,16 @@ class WebSearchTool(BaseTool):
             ip = ipaddress.ip_address(address[4][0])
             if not ip.is_global:
                 raise ValueError("Search result resolved to a non-public address.")
+
+
+@function_tool(failure_error_function=None)
+async def search_web(query: str) -> dict[str, object]:
+    """Search the public web and return fetched page content with source URLs.
+
+    Args:
+        query: Search query to send to DuckDuckGo.
+    """
+    return await _WebSearchClient().search(query)
 
 
 class _DuckDuckGoResultParser(HTMLParser):
