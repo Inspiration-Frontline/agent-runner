@@ -205,6 +205,9 @@ class RuntimeOrchestrator:
             settings = get_settings()
             prepared_files: list[PreparedConversationFile] = []
             if chat_request.file_ids:
+                # File IDs are a frozen selection, not downloadable content. Conversation Manager
+                # re-authorizes them in one RPC, reserves them for this request, and reports durable
+                # processing state. The Agent is deliberately not invoked until all files are READY.
                 preparation_started = monotonic()
                 processing_event_emitted = False
                 while True:
@@ -755,6 +758,12 @@ class RuntimeOrchestrator:
         chat_request: ChatRequest,
         prepared_files: list[PreparedConversationFile],
     ) -> tuple[str, dict[str, object], str]:
+        """Convert authorized resources into provider-neutral model content and stable capture data.
+
+        Image resources become signed vision inputs for this request. Text resources become inline
+        extracted evidence. Persisted capture data uses stable file IDs so replay can obtain fresh
+        signed URLs instead of retaining expired credentials.
+        """
         if not prepared_files:
             return chat_request.message, {}, ""
 

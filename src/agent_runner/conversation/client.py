@@ -48,6 +48,11 @@ class ConversationManagerClient:
         request_id: str,
         file_ids: list[str],
     ) -> PrepareConversationFilesResponse:
+        """Authorize and reserve one frozen attachment selection in Conversation Manager.
+
+        The request carries IDs because the manager owns file permissions, processing state, and
+        signed image URLs. Runner polls with the same request ID until every resource is READY.
+        """
         return await self._service.prepare_conversation_files(
             PrepareConversationFilesRequest(
                 user_id=user_id,

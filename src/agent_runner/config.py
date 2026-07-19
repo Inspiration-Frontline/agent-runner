@@ -312,8 +312,9 @@ class ChatRequest(BaseModel):
     """
     Chat request model for agent interactions.
 
-    Represents a single chat request to an agent, including the agent identity,
-    conversation context, user information, and the message to process.
+    Represents a single chat request to an agent, including conversation context and the message to
+    process. ``file_ids`` are stable references selected by the browser; Agent Runner sends them to
+    Conversation Manager for authorization/preparation and never interprets them as file bytes.
 
     Attributes:
         agent_id: Unique identifier of the agent to invoke.
@@ -321,7 +322,7 @@ class ChatRequest(BaseModel):
                 If None, the latest version will be loaded.
         conversation_id: Optional conversation ID for continuing an existing conversation.
                         If None, a new conversation will be started.
-        user_id: Unique identifier of the user making the request.
+        file_ids: Optional immutable attachment IDs to freeze and prepare before model execution.
         message: The user's message content to process.
     """
 
