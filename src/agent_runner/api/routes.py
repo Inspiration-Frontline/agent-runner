@@ -19,6 +19,7 @@ router = APIRouter()
 
 
 def trusted_user_id(x_user_id: str | None) -> int:
+    """Parse the gateway-provided authenticated user header and reject spoofed values."""
     if x_user_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is required.")
     try:
@@ -35,6 +36,7 @@ async def cancel_chat(
     cancel_request: CancelChatRequest,
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
+    """Request cancellation of the active generation for one authenticated Conversation."""
     user_id = trusted_user_id(x_user_id)
     cancelled = False
     for _ in range(10):
@@ -95,6 +97,7 @@ async def chat_stream(
         }) from error
 
     async def event_generator():
+        """Yield orchestrator events as SSE frames while preserving disconnect cleanup."""
         try:
             async for event in orchestrator.run(chat_request, user_id, request):
                 yield f"data: {event.model_dump_json()}\n\n"

@@ -154,6 +154,7 @@ class ConfigurationManager:
     """
 
     def __init__(self, base_settings: Settings):
+        """Create a settings manager with the local settings snapshot as its merge base."""
         self._base_settings = base_settings
 
     async def initialize(self) -> Settings:
@@ -336,11 +337,13 @@ class ChatRequest(BaseModel):
     @field_validator("message")
     @classmethod
     def reject_blank_message(cls, value: str) -> str:
+        """Normalize message whitespace before request-level validation runs."""
         return value.strip()
 
     @field_validator("file_ids")
     @classmethod
     def validate_file_ids(cls, value: list[str]) -> list[str]:
+        """Reject duplicate or blank stable attachment IDs supplied by the caller."""
         normalized = [file_id.strip() for file_id in value]
         if any(not file_id for file_id in normalized):
             raise ValueError("file_ids cannot contain blank values")
@@ -350,6 +353,7 @@ class ChatRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_message_or_files(self) -> "ChatRequest":
+        """Require visible text unless the request contains at least one attachment."""
         if not self.message and not self.file_ids:
             raise ValueError("message or file_ids is required")
         return self

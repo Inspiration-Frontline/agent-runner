@@ -6,6 +6,8 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
 )
 
 from agent_runner.config import ChatRequest
+from agent_runner.context.builder import Message
+from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -93,3 +95,15 @@ def test_attachment_only_instruction_uses_the_ui_locale_without_visible_fake_tex
     assert user_request.content == ""
     assert len(user_request.content_parts) == 1
     assert user_request.content_parts[0].type == "file_url"
+
+
+def test_plain_text_capture_does_not_persist_an_empty_content_parts_list() -> None:
+    """The attachment metadata envelope must not turn an ordinary text message into invalid RPC content."""
+    runtime = OpenAIAgentsRuntime()
+    captured = runtime._to_capture_message(Message(
+        role="user",
+        content="Question",
+        metadata={"capture_content": []},
+    ))
+
+    assert captured == {"role": "user", "content": "Question"}

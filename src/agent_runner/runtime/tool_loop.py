@@ -11,6 +11,11 @@ from agent_runner.tools.registry import ToolDefinition
 
 
 def epoch_millis() -> int:
+    """Return epoch milliseconds used for LLM/Tool audit boundaries.
+
+    Returns:
+        Current wall-clock epoch timestamp in milliseconds.
+    """
     return time_ns() // 1_000_000
 
 
@@ -65,11 +70,21 @@ class ToolExecutionCollector:
     """Request-scoped audit collector used by concurrently executing SDK Tool handlers."""
 
     def __init__(self) -> None:
+        """Create a request-scoped collector for Tool calls and terminal outcomes.
+
+        The SDK may invoke sibling Tools concurrently and may discard raw response objects during
+        cancellation. Keeping calls and executions here lets persistence reconstruct a complete,
+        one-to-one audit trail independently of SDK object lifetime.
+        """
         self._executions: dict[str, CapturedToolExecution] = {}
         self._calls: dict[str, CapturedToolCall] = {}
 
     def record_call(self, tool_call: CapturedToolCall) -> None:
-        """Retain model-emitted calls even if SDK cancellation later clears raw_responses output."""
+        """Retain a model-emitted call before its handler starts or SDK output is discarded.
+
+        Args:
+            tool_call: Stable call ID, Tool name, and model-emitted JSON arguments.
+        """
         self._calls.setdefault(tool_call.tool_call_id, tool_call)
 
     async def execute(
@@ -81,6 +96,21 @@ class ToolExecutionCollector:
         tool_context: ToolContext[Any],
         cancellation_token: CancellationToken | None,
     ) -> str:
+        """Execute one configured Tool and retain normalized terminal evidence.
+
+        Args:
+            tool_call_id: SDK call ID used to join result evidence to the model response.
+            definition: Frozen Tool definition and decorated invocation hook.
+            arguments_json: Exact JSON arguments emitted by the model.
+            tool_context: SDK context passed to the Tool handler.
+            cancellation_token: Request token checked before invocation.
+
+        Returns:
+            JSON text returned to the model for success or a normalized error object.
+
+        Raises:
+            asyncio.CancelledError: When cancellation interrupts the Tool invocation.
+        """
         start_time = epoch_millis()
         try:
             if cancellation_token is not None and cancellation_token.is_cancelled():
@@ -141,10 +171,28 @@ class ToolExecutionCollector:
             return result_content
 
     def get(self, tool_call_id: str) -> CapturedToolExecution | None:
+        """Return terminal evidence for one Tool call when a handler recorded it.
+
+        Args:
+            tool_call_id: SDK/model call ID.
+
+        Returns:
+            Captured execution or ``None`` while a handler has not produced an outcome.
+        """
         return self._executions.get(tool_call_id)
 
     def values(self) -> list[CapturedToolExecution]:
+        """Return recorded executions in observation order for persistence mapping.
+
+        Returns:
+            Snapshot list of terminal Tool executions.
+        """
         return list(self._executions.values())
 
     def calls(self) -> list[CapturedToolCall]:
+        """Return model-emitted calls in observation order.
+
+        Returns:
+            Snapshot list used to synthesize missing cancelled/failed outcomes.
+        """
         return list(self._calls.values())

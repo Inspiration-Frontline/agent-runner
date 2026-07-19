@@ -93,8 +93,10 @@ class ContextBuilder:
     """
 
     def __init__(self, tool_registry: ToolRegistry | None = None):
-        """
-        Initialize the context builder with required adapters.
+        """Create adapters that assemble one request's model context.
+
+        Args:
+            tool_registry: Registry used to expose only configured Tool schemas to the agent.
         """
         self.profile_adapter = ProfileAdapter()
         self.rag_adapter = RAGAdapter()
@@ -118,11 +120,14 @@ class ContextBuilder:
         Args:
             agent_config: Configuration for the agent to execute.
             conversation_id: Optional ID of the conversation to continue.
-            user_id: ID of the user making the request.
-            current_message: The current user message text.
+            user_id: Trusted user ID used for profile/RAG authorization.
+            current_message: Searchable text representation of the current request.
+            conversation_history: Already loaded replay messages, when the orchestrator has them.
+            current_message_metadata: Provider-neutral model/capture parts for the current request.
+            additional_system_instruction: Internal attachment/locale instruction not shown as user text.
 
         Returns:
-            AgentContext: The complete execution context.
+            AgentContext: Complete prompt, replay history, profile/RAG evidence, and Tool schemas.
         """
         if conversation_history is None:
             conversation_history = await self._load_conversation_history(conversation_id)
@@ -167,11 +172,14 @@ class ContextBuilder:
         """
         Load conversation history from storage.
 
+        This hook remains empty until the orchestrator's Conversation Manager replay path is used;
+        keeping the boundary explicit prevents a second, inconsistent history source from appearing.
+
         Args:
             conversation_id: Optional ID of the conversation to load.
 
         Returns:
-            list[Message]: List of messages in the conversation history.
+            list[Message]: Messages in chronological order, or an empty list for a new Conversation.
         """
         if not conversation_id:
             return []
@@ -180,12 +188,12 @@ class ContextBuilder:
 
     async def _load_tool_specs(self, tool_keys: list[str]) -> list[dict[str, Any]]:
         """
-        Load tool specifications for the agent.
+        Resolve configured Tool keys into schemas before model invocation.
 
         Args:
             tool_keys: Globally unique keys of Tools to load specifications for.
 
         Returns:
-            list[dict[str, Any]]: List of tool specification dictionaries.
+            list[dict[str, Any]]: Tool schemas the model is allowed to call.
         """
         return self.tool_registry.get_tool_specs(tool_keys)

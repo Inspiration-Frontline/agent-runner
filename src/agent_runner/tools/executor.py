@@ -114,6 +114,7 @@ class ToolExecutor:
             list[dict[str, Any]]: List of execution results with status.
         """
         async def execute_call(call: dict[str, Any]) -> dict[str, Any]:
+            """Execute one batch item and convert exceptions into an item-level error result."""
             tool_key = call.get("tool_key") or call.get("name")
             arguments = call.get("arguments", {})
             try:
@@ -133,6 +134,7 @@ class ToolExecutor:
         tasks = [asyncio.create_task(execute_call(call)) for call in tool_calls]
 
         def cancel_tasks() -> None:
+            """Cancel every concurrently scheduled batch item."""
             for task in tasks:
                 task.cancel()
 

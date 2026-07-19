@@ -63,6 +63,7 @@ app.include_router(agent_router, prefix="/v1/agent")
 
 @app.get("/", include_in_schema=False)
 async def root() -> RedirectResponse:
+    """Redirect the service root to the interactive API documentation."""
     return RedirectResponse(url="/docs")
 
 

@@ -12,6 +12,7 @@ from agent_runner.config import get_settings
 
 class _WebSearchClient:
     async def search(self, query: str) -> dict[str, object]:
+        """Search DuckDuckGo and fetch readable content from the bounded result set."""
         normalized = query.strip()
         if not normalized:
             raise ValueError("Search query cannot be blank.")
@@ -42,6 +43,7 @@ class _WebSearchClient:
         return {"query": normalized, "results": pages}
 
     async def _fetch_result(self, client: httpx.AsyncClient, result: dict) -> dict:
+        """Fetch and sanitize one result page while preserving per-page errors."""
         url = str(result.get("href") or result.get("url") or "")
         item = {
             "title": result.get("title") or "",
@@ -65,6 +67,7 @@ class _WebSearchClient:
         return item
 
     async def _safe_get(self, client: httpx.AsyncClient, url: str) -> tuple[str, str]:
+        """Follow safe public redirects and enforce content, byte, and redirect limits."""
         settings = get_settings()
         current_url = url
         for _ in range(settings.web_fetch_max_redirects + 1):
@@ -89,6 +92,7 @@ class _WebSearchClient:
         raise ValueError("Page exceeded the redirect limit.")
 
     async def _require_public_http_url(self, url: str) -> None:
+        """Reject non-HTTP, private, loopback, or otherwise non-public result destinations."""
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("Search result URL must use public HTTP or HTTPS.")
@@ -118,6 +122,7 @@ async def search_web(query: str) -> dict[str, object]:
 
 class _DuckDuckGoResultParser(HTMLParser):
     def __init__(self, limit: int) -> None:
+        """Initialize an HTML parser that captures at most the configured result count."""
         super().__init__(convert_charrefs=True)
         self.limit = limit
         self.results: list[dict] = []
@@ -125,6 +130,7 @@ class _DuckDuckGoResultParser(HTMLParser):
         self._capture: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Start collecting a result title or snippet when the expected class is encountered."""
         attributes = dict(attrs)
         classes = set((attributes.get("class") or "").split())
         if tag == "a" and "result__a" in classes and len(self.results) < self.limit:
@@ -137,6 +143,7 @@ class _DuckDuckGoResultParser(HTMLParser):
             self._capture = "snippet"
 
     def handle_endtag(self, tag: str) -> None:
+        """Finalize a result when its title or snippet container closes."""
         if tag == "a" and self._current is not None and self._capture == "title":
             self._capture = None
         elif tag in {"a", "div"} and self._current is not None and self._capture == "snippet":
@@ -145,10 +152,12 @@ class _DuckDuckGoResultParser(HTMLParser):
             self._capture = None
 
     def handle_data(self, data: str) -> None:
+        """Append visible text to the currently captured result field."""
         if self._current is not None and self._capture:
             self._current[self._capture] += data
 
     def close(self) -> None:
+        """Flush a partially closed result before releasing parser state."""
         super().close()
         if self._current is not None and len(self.results) < self.limit:
             self.results.append(self._current)
@@ -157,25 +166,30 @@ class _DuckDuckGoResultParser(HTMLParser):
 
 class _VisibleTextParser(HTMLParser):
     def __init__(self) -> None:
+        """Initialize an HTML parser that ignores executable and non-visible elements."""
         super().__init__(convert_charrefs=True)
         self._ignored_depth = 0
         self._parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Enter an ignored region for scripts, styles, SVG, and noscript content."""
         if tag in {"script", "style", "noscript", "svg"}:
             self._ignored_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
+        """Leave an ignored region when its closing tag is observed."""
         if tag in {"script", "style", "noscript", "svg"} and self._ignored_depth:
             self._ignored_depth -= 1
 
     def handle_data(self, data: str) -> None:
+        """Normalize and retain visible text fragments from the current HTML document."""
         if not self._ignored_depth:
             normalized = " ".join(data.split())
             if normalized:
                 self._parts.append(normalized)
 
     def text(self) -> str:
+        """Return normalized visible text joined into model-readable lines."""
         # TODO: Apply a shared semantic context trimmer after AgentBreaker defines a unified
         # replay/tool/RAG context policy. Phase 5 retains all extracted text within the network cap.
         return "\n".join(self._parts)

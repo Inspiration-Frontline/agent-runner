@@ -42,7 +42,12 @@ class OpenAIAgentsRuntime:
     """
 
     def __init__(self, model_factory: LiteLLMModelFactory | None = None):
-        """Create a runtime and initialize the request result snapshot exposed to the orchestrator."""
+        """Create the SDK adapter and an empty durable capture snapshot.
+
+        Args:
+            model_factory: Provider-neutral model factory. The default uses the configured LiteLLM
+                gateway, allowing ModelScope or another OpenAI-compatible provider behind it.
+        """
         self.model_factory = model_factory or LiteLLMModelFactory()
         self.last_capture = AgentRunCapture()
 
@@ -58,6 +63,15 @@ class OpenAIAgentsRuntime:
         The SDK owns repeated model/Tool scheduling. AgentBreaker wraps the configured decorated
         FunctionTools only to collect persistence evidence and translate SDK events to SSE.
         ``last_capture`` is finalized even when streaming fails or is cancelled.
+
+        Args:
+            agent: Resolved AgentBreaker definition.
+            context: Prompt, replay history, attachment metadata, and Tool context for this run.
+            cancellation_token: Optional request token that cancels SDK streaming and Tool work.
+            tool_registry: Registry containing the configured decorated Tools.
+
+        Yields:
+            AgentBreaker stream event dictionaries consumed by the orchestrator.
         """
         # Agents SDK agents are declarative; Runner owns execution and streaming.
         self.last_capture = AgentRunCapture()
@@ -131,7 +145,19 @@ class OpenAIAgentsRuntime:
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
     ) -> dict[str, Any]:
-        """Execute the non-streaming compatibility path without configured Tools."""
+        """Execute the non-streaming compatibility path without configured Tools.
+
+        Args:
+            agent: Resolved AgentBreaker definition.
+            context: Provider-neutral execution context.
+            cancellation_token: Optional token checked before invoking the model.
+
+        Returns:
+            Assistant response dictionary for legacy callers.
+
+        Raises:
+            asyncio.CancelledError: When cancellation was already signalled.
+        """
         if cancellation_token and cancellation_token.is_cancelled():
             raise asyncio.CancelledError("Execution cancelled")
 
@@ -149,7 +175,16 @@ class OpenAIAgentsRuntime:
     def _build_sdk_agent(
         self, agent: AgentDefinition, system_prompt: str, tools: list[FunctionTool] | None = None
     ) -> Agent:
-        """Translate an AgentBreaker definition into one request-scoped SDK Agent."""
+        """Translate an AgentBreaker definition into one request-scoped SDK Agent.
+
+        Args:
+            agent: Stable name/model/tool configuration.
+            system_prompt: Request-specific prompt assembled by ``ContextBuilder``.
+            tools: Audited SDK FunctionTools available to the model.
+
+        Returns:
+            SDK Agent configured with provider timeout, retry, and parallel Tool policy.
+        """
         settings = get_settings()
         return Agent(
             name=agent.name,
@@ -169,7 +204,18 @@ class OpenAIAgentsRuntime:
     def _resolve_tool_definitions(
         self, agent: AgentDefinition, registry: ToolRegistry
     ) -> list[ToolDefinition]:
-        """Resolve stable configured Tool keys and fail before model invocation when one is missing."""
+        """Resolve configured Tool keys before model invocation.
+
+        Args:
+            agent: Definition containing stable Tool keys.
+            registry: Runtime registry of decorated Tool definitions.
+
+        Returns:
+            Definitions in the agent's configured order.
+
+        Raises:
+            ValueError: When configuration references a Tool not registered in this process.
+        """
         definitions: list[ToolDefinition] = []
         for tool_key in agent.tools:
             definition = registry.get(tool_key)
@@ -188,6 +234,14 @@ class OpenAIAgentsRuntime:
 
         ``dataclasses.replace`` keeps schema, strict mode, timeout, approval, guardrail, and future
         FunctionTool options produced by ``@function_tool``. Only the invocation hook changes.
+
+        Args:
+            definitions: Frozen Tool definitions selected by the Agent.
+            collector: Request-scoped audit collector.
+            cancellation_token: Token propagated into each Tool invocation.
+
+        Returns:
+            SDK FunctionTools with auditing hooks attached.
         """
         tools: list[FunctionTool] = []
         for definition in definitions:
@@ -199,6 +253,16 @@ class OpenAIAgentsRuntime:
                 arguments_json: str,
                 captured: ToolDefinition = definition,
             ) -> str:
+                """Invoke one SDK Tool through the audit collector.
+
+                Args:
+                    tool_context: SDK context containing the model call ID.
+                    arguments_json: Exact serialized arguments emitted by the model.
+                    captured: Frozen Tool definition bound by the loop closure.
+
+                Returns:
+                    Normalized result JSON returned to the SDK.
+                """
                 return await collector.execute(
                     tool_call_id=str(tool_context.tool_call_id),
                     definition=captured,
@@ -218,8 +282,22 @@ class OpenAIAgentsRuntime:
         Conversation Manager stores assistant Tool Calls and Tool results as neutral messages.
         Responses input represents them as separate ``function_call`` and
         ``function_call_output`` items, so this conversion remains at the SDK boundary.
+
+        Args:
+            context: Neutral history/current message including Tool metadata and model-only parts.
+
+        Returns:
+            Responses API input items with transient signed URLs confined to the current run.
         """
         def sdk_content(message: Message) -> Any:
+            """Translate one neutral content list into provider-bound Responses parts.
+
+            Args:
+                message: Neutral runtime message with optional model-only content metadata.
+
+            Returns:
+                Scalar text or Responses-compatible text/image parts.
+            """
             parts = message.metadata.get("model_content")
             if parts is None:
                 # Compatibility for contexts created by older callers during rolling deploys.
@@ -271,10 +349,23 @@ class OpenAIAgentsRuntime:
         return input_items
 
     def _to_capture_message(self, message: Message) -> dict[str, Any]:
-        """Keep stable provider-neutral content while excluding transient signed SDK input URLs."""
+        """Keep stable provider-neutral content while excluding transient signed SDK URLs.
+
+        Args:
+            message: Runtime message whose metadata may contain model and capture representations.
+
+        Returns:
+            Durable role/content dictionary using scalar text or non-empty stable parts.
+        """
+        # ``capture_content`` is present in the context metadata for every attachment-aware
+        # request, including plain-text requests where it is an empty list.  An empty list is not
+        # a valid persisted content representation: Conversation Manager requires either scalar
+        # text or at least one content part.  Fall back to the scalar message in that case so a
+        # normal text-only Round remains persistable.
+        capture_content = message.metadata.get("capture_content")
         captured: dict[str, Any] = {
             "role": message.role,
-            "content": message.metadata.get("capture_content", message.content),
+            "content": capture_content if capture_content else message.content,
         }
         for key in ("tool_calls", "tool_call_id"):
             if key in message.metadata:
@@ -286,7 +377,15 @@ class OpenAIAgentsRuntime:
         event: StreamEvent,
         collector: ToolExecutionCollector | None = None,
     ) -> dict[str, Any] | None:
-        """Map SDK raw/run-item events to the small event vocabulary exposed over SSE."""
+        """Map SDK raw/run-item events to the small event vocabulary exposed over SSE.
+
+        Args:
+            event: SDK stream event.
+            collector: Collector used to enrich Tool result events with audit status.
+
+        Returns:
+            Event dictionary, or ``None`` for SDK bookkeeping events.
+        """
         if isinstance(event, RawResponsesStreamEvent):
             if isinstance(event.data, ResponseTextDeltaEvent):
                 if not event.data.delta:
@@ -332,7 +431,14 @@ class OpenAIAgentsRuntime:
         return None
 
     def _convert_response_completed_usage(self, event_data: Any) -> dict[str, Any] | None:
-        """Extract provider usage when a completed response reports it."""
+        """Extract provider usage when a completed response reports it.
+
+        Args:
+            event_data: SDK response-completed event.
+
+        Returns:
+            Normalized usage dictionary, or ``None`` when usage was omitted.
+        """
         usage = getattr(getattr(event_data, "response", None), "usage", None)
         if usage is None:
             return None
@@ -362,6 +468,20 @@ class OpenAIAgentsRuntime:
         One SDK raw response corresponds to one LLM Call/Turn. The first request stores a complete
         snapshot; later requests store only the assistant Tool Calls and Tool results appended by
         the preceding Turn.
+
+        Args:
+            result: SDK run result containing raw responses.
+            context: Initial provider-neutral execution context.
+            definitions: Frozen Tool definitions.
+            collector: Observed Tool calls and executions.
+            run_start: Epoch-millisecond request start.
+            trace_id: Request trace identifier.
+            model_completed_times: Completion timestamps observed from SDK events.
+            model_completed_usages: Provider usage tuples in response order.
+            cancellation_token: Optional token indicating interrupted capture.
+
+        Returns:
+            Durable provider-neutral capture for Conversation Manager persistence.
         """
         # Rebuild the normalized context supplied to the first model call. System instructions are
         # stored for audit even though the SDK receives them through Agent.instructions.
@@ -492,6 +612,19 @@ class OpenAIAgentsRuntime:
 
         This path uses model-emitted ``tool_called`` events and collected executions. It does not
         invent a successful response; the owning Round/Turn remains FAILED or CANCELLED.
+
+        Args:
+            initial_messages: Messages supplied to the first model call.
+            definitions: Frozen Tool definitions.
+            collector: Calls observed before cancellation.
+            run_start: Epoch-millisecond request start.
+            trace_id: Request trace identifier.
+            model_completed_times: Observed model completion timestamps.
+            model_completed_usages: Observed provider usage tuples.
+            cancelled: Whether cancellation caused the missing raw response.
+
+        Returns:
+            Partial capture preserving observed Tool evidence.
         """
         tool_calls = collector.calls()
         event_llm_end = model_completed_times[-1] if model_completed_times else epoch_millis()
@@ -562,6 +695,16 @@ class OpenAIAgentsRuntime:
 
         Missing outcomes can occur when cancellation wins before a Tool coroutine starts. The
         synthesized FAILED/CANCELLED record makes the one-to-one persistence invariant explicit.
+
+        Args:
+            tool_calls: Model-emitted calls observed by the collector.
+            definitions: Frozen definitions used to resolve Tool keys.
+            collector: Existing successful/failed executions.
+            fallback_time: Timestamp used for synthesized records.
+            cancelled: Whether missing executions should be marked CANCELLED.
+
+        Returns:
+            Complete execution list aligned with model-emitted calls.
         """
         definitions_by_name = {definition.tool_name: definition for definition in definitions}
         executions: list[CapturedToolExecution] = []
@@ -599,7 +742,14 @@ class OpenAIAgentsRuntime:
         return executions
 
     def _normalize_response_output(self, outputs: list[Any]) -> tuple[str, list[CapturedToolCall]]:
-        """Extract assistant text and function calls from heterogeneous SDK response items."""
+        """Extract assistant text and Tool calls from heterogeneous SDK response items.
+
+        Args:
+            outputs: SDK response output items.
+
+        Returns:
+            Assistant text plus normalized Tool calls in model order.
+        """
         text_parts: list[str] = []
         tool_calls: list[CapturedToolCall] = []
         for item in outputs:
@@ -623,7 +773,16 @@ class OpenAIAgentsRuntime:
         tool_calls: list[CapturedToolCall],
         executions,
     ) -> list[dict[str, Any]]:
-        """Create the provider-neutral APPEND_DELTA consumed by the next model Turn."""
+        """Create neutral assistant/tool continuation messages for the next model Turn.
+
+        Args:
+            response_content: Assistant content from the preceding model response.
+            tool_calls: Tool calls emitted by that response.
+            executions: Normalized Tool execution results.
+
+        Returns:
+            APPEND_DELTA messages required to continue the model loop.
+        """
         if not tool_calls:
             return []
         messages: list[dict[str, Any]] = [{
@@ -649,7 +808,14 @@ class OpenAIAgentsRuntime:
         return messages
 
     def _definition_dict(self, definition: ToolDefinition) -> dict[str, Any]:
-        """Serialize the frozen AgentBreaker Tool definition included in raw request audit JSON."""
+        """Serialize a Tool definition into deterministic raw-request audit JSON.
+
+        Args:
+            definition: Frozen Tool schema and provenance.
+
+        Returns:
+            JSON-compatible dictionary stored in the raw request audit payload.
+        """
         return {
             "tool_key": definition.tool_key,
             "tool_name": definition.tool_name,
@@ -667,6 +833,12 @@ class OpenAIAgentsRuntime:
         dictionaries or primitives. Calling the public ``model_dump`` API when present preserves
         structured fields; returning other values unchanged lets ``json.dumps(default=str)`` handle
         adapter-specific fallbacks without coupling this runtime to every SDK item subclass.
+
+        Args:
+            value: SDK/Pydantic object, mapping, sequence, or scalar.
+
+        Returns:
+            JSON-compatible data or the original scalar fallback.
         """
         model_dump = getattr(value, "model_dump", None)
         return model_dump(mode="json") if callable(model_dump) else value

@@ -158,6 +158,7 @@ class ErrorEvent(StreamEvent):
 
 class SavingEvent(StreamEvent):
     def __init__(self):
+        """Create the transient event emitted before Round persistence begins."""
         super().__init__(type=StreamEventType.SAVING)
 
 
@@ -165,6 +166,7 @@ class AttachmentProcessingEvent(StreamEvent):
     """Transient status emitted while confirmed files are still being prepared."""
 
     def __init__(self, pending_files: int) -> None:
+        """Create a transient event reporting how many selected files remain unready."""
         super().__init__(
             type=StreamEventType.ATTACHMENT_PROCESSING,
             phase="attachment_preparation",
@@ -174,6 +176,7 @@ class AttachmentProcessingEvent(StreamEvent):
 
 class PersistedEvent(StreamEvent):
     def __init__(self):
+        """Create the event emitted after Conversation Manager confirms persistence."""
         super().__init__(type=StreamEventType.PERSISTED)
 
 

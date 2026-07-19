@@ -8,6 +8,8 @@ from agent_runner.config import get_settings
 
 
 class ConversationBusyError(RuntimeError):
+    """Raised when a second request would race the first request's Round allocation."""
+
     pass
 
 
@@ -28,6 +30,12 @@ return 0
 """
 
     def __init__(self) -> None:
+        """Create the Redis lease client used to serialize one Conversation at a time.
+
+        The lease exists because Round numbers are allocated from a database high-water mark and
+        two concurrent model runs could otherwise both persist the same next number. The token is
+        unique per request so a stale worker cannot release a newer worker's lease.
+        """
         settings = get_settings()
         self._redis = aioredis.Redis(
             host=settings.redis_host,
@@ -43,6 +51,14 @@ return 0
         self._renewal_task: asyncio.Task[None] | None = None
 
     async def acquire(self, conversation_id: str) -> None:
+        """Acquire a Conversation lease and start renewal before model execution begins.
+
+        Args:
+            conversation_id: Stable Conversation ID forming the distributed lock key.
+
+        Raises:
+            ConversationBusyError: If another active request already owns the key.
+        """
         key = f"agent-runner:execution:{conversation_id}"
         token = str(uuid4())
         acquired = await self._redis.set(key, token, nx=True, px=self._LEASE_MS)
@@ -53,6 +69,11 @@ return 0
         self._renewal_task = asyncio.create_task(self._renew())
 
     async def _renew(self) -> None:
+        """Renew the current lease until release or ownership loss.
+
+        Losing the token intentionally stops renewal; a stale worker must not extend a lease after
+        Redis has awarded it to another request.
+        """
         while True:
             await asyncio.sleep(self._RENEW_INTERVAL_SECONDS)
             if self._key is None or self._token is None:
@@ -64,6 +85,7 @@ return 0
                 return
 
     async def release(self) -> None:
+        """Cancel renewal and release only this instance's token-owned lease."""
         if self._renewal_task is not None:
             self._renewal_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -75,5 +97,6 @@ return 0
         self._token = None
 
     async def close(self) -> None:
+        """Release any active lease and close the Redis connection pool."""
         await self.release()
         await self._redis.aclose()

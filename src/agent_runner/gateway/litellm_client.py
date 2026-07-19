@@ -45,6 +45,7 @@ class LiteLLMModelFactory:
         api_key: str | None = None,
         request_timeout_seconds: float | None = None,
     ) -> None:
+        """Configure the LiteLLM proxy endpoint, credentials, and request timeout."""
         current_settings: Settings = get_settings()
         self.base_url: str = base_url or current_settings.lite_llm_base_url
         self.api_key: str = api_key or current_settings.lite_llm_api_key or "sk-agent-breaker-local"

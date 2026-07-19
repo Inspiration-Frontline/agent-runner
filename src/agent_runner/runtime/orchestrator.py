@@ -92,13 +92,25 @@ class AttachmentInput:
     additional_instruction: str = ""
 
     def as_metadata(self) -> dict[str, object]:
+        """Expose model parts and durable capture parts to the context builder.
+
+        The representations intentionally differ: provider adapters may need signed URLs, while
+        persisted history must contain stable file IDs that remain valid after URL expiry.
+
+        Returns:
+            Metadata consumed by ``ContextBuilder`` and the runtime capture layer.
+        """
         return {
             "model_content": self.model_content,
             "capture_content": self.capture_content,
         }
 
     def __iter__(self):
-        """Keep tuple unpacking source-compatible for integrations during the contract migration."""
+        """Expose the former tuple shape during the AttachmentInput contract migration.
+
+        Returns:
+            Current text, legacy SDK metadata, and the internal language instruction in order.
+        """
         yield self.current_message
         legacy_model_content = []
         for part in self.model_content:
@@ -160,7 +172,14 @@ class RuntimeOrchestrator:
         self._terminal_round_persisted = False
 
     async def acquire_conversation(self, conversation_id: str) -> None:
-        """Acquire the conversation execution lease before an SSE response is opened."""
+        """Acquire the distributed lease that serializes writes for one Conversation.
+
+        Args:
+            conversation_id: Stable Conversation ID used as the Redis lease key.
+
+        Raises:
+            ConversationBusyError: If another request owns the lease.
+        """
         await self.execution_lock.acquire(conversation_id)
         self._lock_acquired = True
 
@@ -179,8 +198,9 @@ class RuntimeOrchestrator:
         6. Clean up resources on completion or error
 
         Args:
-            chat_request: The chat request containing agent ID, user info, and message.
-            http_request: The HTTP request object for disconnect detection.
+            chat_request: Validated visible message, locale, Conversation ID, and stable file IDs.
+            user_id: Trusted identity supplied by the gateway header, never by request JSON.
+            http_request: HTTP lifecycle used to detect disconnect/cancellation.
 
         Returns:
             AsyncGenerator[StreamEvent, None]: Stream of events including:
@@ -193,6 +213,7 @@ class RuntimeOrchestrator:
 
         Raises:
             asyncio.CancelledError: If the request is cancelled by client disconnect.
+            ConversationBusyError: If the caller did not acquire the Conversation lease first.
         """
         cancellation_token = self.cancellation_manager.create_token()
         round_start = _epoch_millis()
@@ -511,6 +532,22 @@ class RuntimeOrchestrator:
         call_end: int,
         round_number: int,
     ) -> SaveConversationRoundRequest:
+        """Build the durable Round RPC payload from completed request-scoped evidence.
+
+        Args:
+            user_id: Trusted authenticated owner.
+            conversation_id: Destination Conversation.
+            chat_request: Original visible text and stable file references.
+            response_text: Final assistant answer assembled from stream deltas.
+            agent: Resolved agent identity persisted on every Turn.
+            capture: Provider-neutral model and Tool evidence.
+            round_start: Epoch-millisecond start time.
+            call_end: Epoch-millisecond final model-call end time.
+            round_number: Next high-water-mark number selected during preflight.
+
+        Returns:
+            A protobuf request accepted by Conversation Manager's Round validator.
+        """
         turns = [self._to_proto_turn(index + 1, turn, agent) for index, turn in enumerate(capture.turns)]
         if not turns:
             raise ValueError("A completed Agent run did not capture any model Turns.")
@@ -534,6 +571,18 @@ class RuntimeOrchestrator:
         status: TurnStatus = TurnStatus.COMPLETED,
         error_message: str = "",
     ) -> ConversationTurn:
+        """Convert one captured model Turn into the Conversation Manager protobuf contract.
+
+        Args:
+            turn_number: One-based order within the Round.
+            captured: Neutral model/Tool evidence collected by the runtime.
+            agent: Agent identity and model settings to persist.
+            status: Terminal Turn status.
+            error_message: Failure or cancellation detail, if any.
+
+        Returns:
+            Nested Turn protobuf including LLM request/response and Tool evidence.
+        """
         tool_definitions = [
             ProtoToolDefinition(
                 source_type=ToolSourceType[definition.source_type.name],
@@ -610,6 +659,15 @@ class RuntimeOrchestrator:
         )
 
     def _captured_message_to_proto(self, message: dict) -> LlmConversationMessage:
+        """Convert one neutral capture message into a typed protobuf message.
+
+        Args:
+            message: Provider-neutral role/content dictionary. Content is scalar text or a
+                non-empty list of stable parts, never both.
+
+        Returns:
+            Message satisfying Conversation Manager's mutually exclusive content contract.
+        """
         role = MessageRole[message["role"].upper()]
         tool_calls = [self._captured_tool_call_to_proto_dict(call) for call in message.get("tool_calls", [])]
         content = message.get("content")
@@ -623,6 +681,14 @@ class RuntimeOrchestrator:
         )
 
     def _captured_content_parts_to_proto(self, content: list[dict]) -> list[ContentPart]:
+        """Convert neutral text/image/file parts into stable AgentBreaker content parts.
+
+        Args:
+            content: Provider-neutral list captured from model input.
+
+        Returns:
+            Stable text parts and ``agentbreaker-file://`` references suitable for persistence.
+        """
         parts: list[ContentPart] = []
         for item in content:
             part_type = item.get("type") or ""
@@ -643,6 +709,14 @@ class RuntimeOrchestrator:
         return parts
 
     def _captured_tool_call_to_proto_dict(self, call: dict) -> ToolCall:
+        """Convert a dictionary Tool call snapshot into a typed protobuf call.
+
+        Args:
+            call: Neutral call dictionary containing ID, type, and function arguments.
+
+        Returns:
+            Typed Tool call preserving model-emitted arguments.
+        """
         function = call.get("function") or {}
         return ToolCall(
             id=call.get("id") or "",
@@ -654,6 +728,14 @@ class RuntimeOrchestrator:
         )
 
     def _captured_tool_call_to_proto(self, call) -> ToolCall:
+        """Convert one SDK Tool call evidence object into the persistence protobuf type.
+
+        Args:
+            call: Captured call with stable ID, tool name, and serialized arguments.
+
+        Returns:
+            Typed persistence Tool call.
+        """
         return ToolCall(
             id=call.tool_call_id,
             type="function",
@@ -672,6 +754,18 @@ class RuntimeOrchestrator:
         agent=None,
         capture: AgentRunCapture | None = None,
     ) -> None:
+        """Persist a failed/cancelled Round exactly once when execution ends prematurely.
+
+        Args:
+            user_id: Trusted owner identity.
+            chat_request: Original request whose visible content must remain in history.
+            round_number: Number reserved during preflight.
+            round_start: Epoch-millisecond start time.
+            status: FAILED or CANCELLED terminal state.
+            error_message: Audit-safe failure reason.
+            agent: Partially resolved agent, if available.
+            capture: Partial model/Tool evidence, if available.
+        """
         if getattr(self, "_terminal_round_persisted", False):
             return
         turns = []
@@ -705,6 +799,15 @@ class RuntimeOrchestrator:
             logger.exception("Failed to persist terminal round")
 
     def _to_context_messages(self, messages) -> list[Message]:
+        """Convert replay protobuf messages into provider-neutral runtime context.
+
+        Args:
+            messages: Conversation Manager replay messages in durable order.
+
+        Returns:
+            Runtime messages with Tool metadata and stable attachment parts preserved for the model
+            adapter and the next persistence capture.
+        """
         role_names = {
             MessageRole.USER: "user",
             MessageRole.ASSISTANT: "assistant",
@@ -746,7 +849,17 @@ class RuntimeOrchestrator:
         conversation_id: str,
         request_id: str,
     ) -> None:
-        """Rehydrate historical image references into short-lived model URLs for this run only."""
+        """Rehydrate historical image references into short-lived model URLs for this run only.
+
+        Args:
+            messages: Mutable replay context whose stable image references are resolved in place.
+            user_id: Trusted owner used for Conversation Manager authorization.
+            conversation_id: Conversation owning the historical references.
+            request_id: Correlation ID for preparation/reservation cleanup.
+
+        Raises:
+            RuntimeError: If an image reference cannot be authorized or signed.
+        """
         image_file_ids: list[str] = []
         for message in messages:
             for part in message.metadata.get("capture_content", []):
@@ -799,6 +912,14 @@ class RuntimeOrchestrator:
         Image resources become signed vision inputs for this request. Text resources become inline
         extracted evidence. Persisted capture data uses stable file IDs so replay can obtain fresh
         signed URLs instead of retaining expired credentials.
+
+        Args:
+            chat_request: Visible text, locale, and stable file IDs selected by the browser.
+            prepared_files: Conversation Manager's ownership/state-checked file metadata.
+
+        Returns:
+            One object containing provider-neutral model parts, durable capture parts, searchable
+            text, and the attachment-only language instruction.
         """
         if not prepared_files:
             return AttachmentInput(chat_request.message, [], [])
@@ -850,7 +971,14 @@ class RuntimeOrchestrator:
         )
 
     def _build_user_request(self, chat_request: ChatRequest) -> UserRequest:
-        """Persist text plus stable file identities; OSS URLs are intentionally excluded from history."""
+        """Persist visible text plus stable file identities without expiring OSS URLs.
+
+        Args:
+            chat_request: Public request containing text and selected file IDs.
+
+        Returns:
+            Scalar text for ordinary messages, or mutually exclusive content parts for attachments.
+        """
         if not chat_request.file_ids:
             return UserRequest(content=chat_request.message)
         parts: list[ContentPart] = []
@@ -864,6 +992,14 @@ class RuntimeOrchestrator:
         return UserRequest(content_parts=parts)
 
     def _proto_content_part_to_dict(self, part: ContentPart) -> dict[str, object]:
+        """Convert one persisted protobuf part into the neutral runtime representation.
+
+        Args:
+            part: Stored text or stable file part.
+
+        Returns:
+            Dictionary consumed by replay image resolution and provider adapters.
+        """
         if part.type == "text":
             return {"type": "text", "text": part.text}
         file_url = part.file_url
@@ -876,10 +1012,26 @@ class RuntimeOrchestrator:
         }
 
     def _stable_file_id(self, url: str) -> str | None:
+        """Extract a file ID only from an AgentBreaker-owned stable reference URL.
+
+        Args:
+            url: Persisted URL-like file reference.
+
+        Returns:
+            Stable ID when the trusted prefix is present; otherwise ``None``.
+        """
         prefix = "agentbreaker-file://"
         return url[len(prefix):] if url.startswith(prefix) else None
 
     def _file_preparation_error(self, files: list[PreparedConversationFile]) -> str:
+        """Select the first actionable file failure for the SSE response.
+
+        Args:
+            files: Per-file preparation states returned by Conversation Manager.
+
+        Returns:
+            Filename-qualified diagnostic suitable for the browser.
+        """
         for file in files:
             if file.status in {
                 ConversationFileStatus.FAILED,
@@ -893,6 +1045,14 @@ class RuntimeOrchestrator:
         return "One or more files could not be prepared."
 
     def _file_poll_delay(self, elapsed_seconds: float) -> float:
+        """Choose an adaptive readiness delay so slow parsing does not create an RPC hot loop.
+
+        Args:
+            elapsed_seconds: Seconds spent waiting for the current file set.
+
+        Returns:
+            Poll delay in seconds.
+        """
         if elapsed_seconds < 5:
             return 1.0
         if elapsed_seconds < 30:
@@ -900,6 +1060,14 @@ class RuntimeOrchestrator:
         return 5.0
 
     def _to_llm_message(self, message: Message) -> LlmConversationMessage:
+        """Map a runtime message into the legacy normalized LLM protobuf.
+
+        Args:
+            message: Runtime message with user, assistant, or Tool role.
+
+        Returns:
+            Minimal protobuf message used by compatibility paths.
+        """
         roles = {
             "user": MessageRole.USER,
             "assistant": MessageRole.ASSISTANT,
@@ -908,20 +1076,13 @@ class RuntimeOrchestrator:
         return LlmConversationMessage(role=roles[message.role], content=message.content)
 
     def _convert_event(self, event: dict) -> StreamEvent:
-        """
-        Convert raw runtime event dictionary to structured StreamEvent object.
+        """Translate runtime dictionaries into the public typed SSE event vocabulary.
 
         Args:
-            event: Raw event dictionary from OpenAI Agents SDK runtime.
+            event: Provider/runtime event dictionary.
 
         Returns:
-            StreamEvent: Structured event object based on event type:
-                - TokenDeltaEvent for "token_delta" events
-                - ToolStartEvent for "tool_start" events
-                - ToolResultEvent for "tool_result" events
-                - UsageEvent for "usage" events
-                - ErrorEvent for "error" events
-                - TokenDeltaEvent (fallback) for unknown event types
+            Typed event serialized by the HTTP streaming route.
         """
         event_type = event.get("type")
 
@@ -962,15 +1123,20 @@ class RuntimeOrchestrator:
             return TokenDeltaEvent(content=event.get("content", ""))
 
     async def _cleanup(self, cancellation_token):
-        """
-        Clean up resources after request cancellation or completion.
+        """Release request-scoped cancellation state after every terminal path.
 
         Args:
-            cancellation_token: The cancellation token to clean up.
+            cancellation_token: Token registered for this request; removing it prevents a later
+                cancel command from targeting an already-finished generation.
         """
         await self.cancellation_manager.cleanup(cancellation_token)
 
     async def close(self):
+        """Close request-scoped clients and the distributed lease client.
+
+        The HTTP route calls this from its generator ``finally`` block so sockets, config watchers,
+        and Redis leases cannot survive a browser disconnect.
+        """
         await self.config_loader.close()
         await self.openai_runtime.close()
         await self.conversation_client.close()
@@ -978,4 +1144,9 @@ class RuntimeOrchestrator:
 
 
 def _epoch_millis() -> int:
+    """Return UTC epoch milliseconds used for durable Round/Turn timing boundaries.
+
+    Returns:
+        Current epoch timestamp in milliseconds.
+    """
     return time_ns() // 1_000_000

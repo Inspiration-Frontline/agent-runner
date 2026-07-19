@@ -40,6 +40,7 @@ async def calculate_expression(expression: str) -> dict[str, str | int | float]:
 
 
 def _evaluate(node: ast.AST, depth: int) -> int | float:
+    """Evaluate the restricted arithmetic AST without executing arbitrary Python code."""
     if depth > 64:
         raise ValueError("Expression nesting is too deep.")
     if isinstance(node, ast.Constant) and type(node.value) in (int, float):
