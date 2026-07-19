@@ -213,12 +213,31 @@ class OpenAIAgentsRuntime:
         return tools
 
     def _build_input(self, context: AgentContext) -> list[dict[str, Any]]:
-        """Convert provider-neutral replay messages into Responses API input item shapes.
+        """Convert provider-neutral messages into this SDK's Responses API input shapes.
 
         Conversation Manager stores assistant Tool Calls and Tool results as neutral messages.
         Responses input represents them as separate ``function_call`` and
         ``function_call_output`` items, so this conversion remains at the SDK boundary.
         """
+        def sdk_content(message: Message) -> Any:
+            parts = message.metadata.get("model_content")
+            if parts is None:
+                # Compatibility for contexts created by older callers during rolling deploys.
+                parts = message.metadata.get("sdk_content")
+            if parts is None:
+                return message.content
+            converted: list[dict[str, Any]] = []
+            for part in parts:
+                if part.get("type") == "text":
+                    converted.append({"type": "input_text", "text": part.get("text", "")})
+                elif part.get("type") == "image":
+                    converted.append({
+                        "type": "input_image",
+                        "image_url": part.get("url", ""),
+                        "detail": part.get("detail") or "auto",
+                    })
+            return converted
+
         input_items: list[dict[str, Any]] = []
         for message in context.conversation_history:
             tool_calls = message.metadata.get("tool_calls") or []
@@ -242,14 +261,12 @@ class OpenAIAgentsRuntime:
             else:
                 input_items.append({
                     "role": message.role,
-                    "content": message.metadata.get("sdk_content", message.content),
+                    "content": sdk_content(message),
                 })
 
         input_items.append({
             "role": "user",
-            "content": context.current_message.metadata.get(
-                "sdk_content", context.current_message.content
-            ),
+            "content": sdk_content(context.current_message),
         })
         return input_items
 

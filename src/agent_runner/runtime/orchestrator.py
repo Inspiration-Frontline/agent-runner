@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import suppress
+from dataclasses import dataclass
 from time import monotonic, time_ns
 from uuid import uuid4
 
@@ -73,6 +74,44 @@ from agent_runner.runtime.tool_loop import AgentRunCapture, CapturedModelTurn
 from agent_runner.tools.internal.catalog import build_internal_tool_registry
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AttachmentInput:
+    """Normalized attachment input shared by runtimes and persistence.
+
+    ``model_content`` is provider-neutral: adapters decide whether a text/image part becomes an
+    OpenAI Responses item, a LiteLLM message, or another vendor's request shape. ``capture_content``
+    is durable replay evidence and therefore contains stable ``agentbreaker-file://`` references,
+    never expiring signed URLs.
+    """
+
+    current_message: str
+    model_content: list[dict[str, object]]
+    capture_content: list[dict[str, object]]
+    additional_instruction: str = ""
+
+    def as_metadata(self) -> dict[str, object]:
+        return {
+            "model_content": self.model_content,
+            "capture_content": self.capture_content,
+        }
+
+    def __iter__(self):
+        """Keep tuple unpacking source-compatible for integrations during the contract migration."""
+        yield self.current_message
+        legacy_model_content = []
+        for part in self.model_content:
+            if part.get("type") == "text":
+                legacy_model_content.append({"type": "input_text", "text": part.get("text", "")})
+            elif part.get("type") == "image":
+                legacy_model_content.append({
+                    "type": "input_image",
+                    "image_url": part.get("url", ""),
+                    "detail": part.get("detail") or "auto",
+                })
+        yield {"sdk_content": legacy_model_content, "capture_content": self.capture_content}
+        yield self.additional_instruction
 
 
 class RuntimeOrchestrator:
@@ -280,19 +319,17 @@ class RuntimeOrchestrator:
                 chat_request.conversation_id,
                 attachment_request_id,
             )
-            current_message, current_metadata, additional_instruction = self._build_attachment_input(
-                chat_request, prepared_files
-            )
+            attachment_input = self._build_attachment_input(chat_request, prepared_files)
             agent_config = await self.config_loader.load(settings.default_agent_id)
 
             context = await self.context_builder.build(
                 agent_config=agent_config,
                 conversation_id=chat_request.conversation_id,
                 user_id=user_id,
-                current_message=current_message,
+                current_message=attachment_input.current_message,
                 conversation_history=conversation_history,
-                current_message_metadata=current_metadata,
-                additional_system_instruction=additional_instruction,
+                current_message_metadata=attachment_input.as_metadata(),
+                additional_system_instruction=attachment_input.additional_instruction,
             )
 
             agent = await self.agent_factory.create(agent_config)
@@ -709,6 +746,7 @@ class RuntimeOrchestrator:
         conversation_id: str,
         request_id: str,
     ) -> None:
+        """Rehydrate historical image references into short-lived model URLs for this run only."""
         image_file_ids: list[str] = []
         for message in messages:
             for part in message.metadata.get("capture_content", []):
@@ -717,9 +755,6 @@ class RuntimeOrchestrator:
                 file_id = self._stable_file_id(part.get("file_url", {}).get("url", ""))
                 if file_id and file_id not in image_file_ids:
                     image_file_ids.append(file_id)
-        if not image_file_ids:
-            return
-
         signed_urls: dict[str, str] = {}
         for offset in range(0, len(image_file_ids), 5):
             batch = image_file_ids[offset:offset + 5]
@@ -738,26 +773,27 @@ class RuntimeOrchestrator:
             stable_parts = message.metadata.get("capture_content")
             if not stable_parts:
                 continue
-            sdk_parts: list[dict[str, object]] = []
+            model_parts: list[dict[str, object]] = []
             for part in stable_parts:
                 if part.get("type") == "text":
-                    sdk_parts.append({"type": "input_text", "text": part.get("text", "")})
+                    model_parts.append({"type": "text", "text": part.get("text", "")})
                     continue
                 file_value = part.get("file_url", {})
                 file_id = self._stable_file_id(file_value.get("url", ""))
                 if part.get("type") == "image_url" and file_id in signed_urls:
-                    sdk_parts.append({
-                        "type": "input_image",
-                        "image_url": signed_urls[file_id],
+                    model_parts.append({
+                        "type": "image",
+                        "file_id": file_id,
+                        "url": signed_urls[file_id],
                         "detail": file_value.get("detail") or "auto",
                     })
-            message.metadata["sdk_content"] = sdk_parts
+            message.metadata["model_content"] = model_parts
 
     def _build_attachment_input(
         self,
         chat_request: ChatRequest,
         prepared_files: list[PreparedConversationFile],
-    ) -> tuple[str, dict[str, object], str]:
+    ) -> AttachmentInput:
         """Convert authorized resources into provider-neutral model content and stable capture data.
 
         Image resources become signed vision inputs for this request. Text resources become inline
@@ -765,21 +801,22 @@ class RuntimeOrchestrator:
         signed URLs instead of retaining expired credentials.
         """
         if not prepared_files:
-            return chat_request.message, {}, ""
+            return AttachmentInput(chat_request.message, [], [])
 
-        sdk_parts: list[dict[str, object]] = []
+        model_parts: list[dict[str, object]] = []
         capture_parts: list[dict[str, object]] = []
         if chat_request.message:
-            sdk_parts.append({"type": "input_text", "text": chat_request.message})
+            model_parts.append({"type": "text", "text": chat_request.message})
             capture_parts.append({"type": "text", "text": chat_request.message})
 
         search_texts: list[str] = [chat_request.message] if chat_request.message else []
         for file in prepared_files:
             stable_url = f"agentbreaker-file://{file.file_id}"
             if file.kind == ConversationFileKind.IMAGE:
-                sdk_parts.append({
-                    "type": "input_image",
-                    "image_url": file.download_url,
+                model_parts.append({
+                    "type": "image",
+                    "file_id": file.file_id,
+                    "url": file.download_url,
                     "detail": "auto",
                 })
                 capture_parts.append({
@@ -793,7 +830,7 @@ class RuntimeOrchestrator:
                 f"[Attachment: {file.original_filename}; file_id={file.file_id}; mime_type={file.mime_type}]\n"
                 f"{file.extracted_text}"
             )
-            sdk_parts.append({"type": "input_text", "text": file_text})
+            model_parts.append({"type": "text", "text": file_text})
             capture_parts.append({"type": "text", "text": file_text})
             search_texts.append(file_text)
 
@@ -805,9 +842,15 @@ class RuntimeOrchestrator:
                 else "The user sent attachments without visible text. Analyze the supplied files and respond in English."
             )
         current_message = "\n\n".join(text for text in search_texts if text)
-        return current_message, {"sdk_content": sdk_parts, "capture_content": capture_parts}, instruction
+        return AttachmentInput(
+            current_message=current_message,
+            model_content=model_parts,
+            capture_content=capture_parts,
+            additional_instruction=instruction,
+        )
 
     def _build_user_request(self, chat_request: ChatRequest) -> UserRequest:
+        """Persist text plus stable file identities; OSS URLs are intentionally excluded from history."""
         if not chat_request.file_ids:
             return UserRequest(content=chat_request.message)
         parts: list[ContentPart] = []
