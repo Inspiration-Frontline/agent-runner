@@ -302,7 +302,7 @@ class OpenAIAgentsRuntime:
             if parts is None:
                 # Compatibility for contexts created by older callers during rolling deploys.
                 parts = message.metadata.get("sdk_content")
-            if parts is None:
+            if not parts:
                 return message.content
             converted: list[dict[str, Any]] = []
             for part in parts:

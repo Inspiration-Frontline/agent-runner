@@ -107,3 +107,16 @@ def test_plain_text_capture_does_not_persist_an_empty_content_parts_list() -> No
     ))
 
     assert captured == {"role": "user", "content": "Question"}
+
+
+def test_plain_text_attachment_input_omits_empty_model_metadata() -> None:
+    orchestrator = object.__new__(RuntimeOrchestrator)
+    request = ChatRequest(
+        conversation_id="conv_plain_text",
+        message="Continue from the previous answer",
+    )
+
+    attachment_input = orchestrator._build_attachment_input(request, [])
+
+    assert attachment_input.current_message == "Continue from the previous answer"
+    assert attachment_input.as_metadata() == {}

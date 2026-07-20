@@ -38,6 +38,28 @@ def test_build_input_preserves_history_and_current_message():
     ]
 
 
+def test_build_input_preserves_plain_text_when_attachment_metadata_is_empty():
+    runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
+    context = AgentContext(
+        agent_config=_agent(),
+        system_prompt="system",
+        conversation_history=[Message(role="assistant", content="Previous answer")],
+        user_profile={},
+        rag_chunks=[],
+        current_message=Message(
+            role="user",
+            content="Expand on that answer",
+            metadata={"model_content": [], "capture_content": []},
+        ),
+        tool_specs=[],
+    )
+
+    assert runtime._build_input(context)[-1] == {
+        "role": "user",
+        "content": "Expand on that answer",
+    }
+
+
 def test_build_input_converts_provider_neutral_tool_history_to_responses_items():
     runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
     context = AgentContext(

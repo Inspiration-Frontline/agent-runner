@@ -100,10 +100,12 @@ class AttachmentInput:
         Returns:
             Metadata consumed by ``ContextBuilder`` and the runtime capture layer.
         """
-        return {
-            "model_content": self.model_content,
-            "capture_content": self.capture_content,
-        }
+        metadata: dict[str, object] = {}
+        if self.model_content:
+            metadata["model_content"] = self.model_content
+        if self.capture_content:
+            metadata["capture_content"] = self.capture_content
+        return metadata
 
     def __iter__(self):
         """Expose the former tuple shape during the AttachmentInput contract migration.
@@ -122,7 +124,12 @@ class AttachmentInput:
                     "image_url": part.get("url", ""),
                     "detail": part.get("detail") or "auto",
                 })
-        yield {"sdk_content": legacy_model_content, "capture_content": self.capture_content}
+        metadata: dict[str, object] = {}
+        if legacy_model_content:
+            metadata["sdk_content"] = legacy_model_content
+        if self.capture_content:
+            metadata["capture_content"] = self.capture_content
+        yield metadata
         yield self.additional_instruction
 
 
