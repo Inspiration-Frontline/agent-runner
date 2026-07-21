@@ -37,9 +37,7 @@ class ConversationManagerClient:
         self._runtime = start_client(config=config)
         self._service: Any = self._runtime.service(ConversationRpcServiceClient)
 
-    async def get_round_history(
-        self, user_id: int, conversation_id: str
-    ) -> GetConversationRoundHistoryResponse:
+    async def get_round_history(self, user_id: int, conversation_id: str) -> GetConversationRoundHistoryResponse:
         """Fetch caller-owned compact history before allocating the next Round number.
 
         Args:

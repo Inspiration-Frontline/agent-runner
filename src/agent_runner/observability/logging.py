@@ -28,9 +28,11 @@ def setup_logging(level: int = logging.INFO, json_format: bool = False):
     if json_format:
         processors.append(structlog.processors.JSONRenderer())
     else:
-        processors.extend([
-            structlog.dev.ConsoleRenderer(colors=True),
-        ])
+        processors.extend(
+            [
+                structlog.dev.ConsoleRenderer(colors=True),
+            ]
+        )
 
     structlog.configure(
         processors=processors,

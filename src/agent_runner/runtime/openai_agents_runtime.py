@@ -15,7 +15,13 @@ from openai.types.responses.response_text_delta_event import ResponseTextDeltaEv
 
 from agent_runner.agent_definitions.config_models import AgentDefinition
 from agent_runner.config import get_settings
-from agent_runner.context.builder import AgentContext, Message
+from agent_runner.context.builder import (
+    AgentContext,
+    Message,
+    ModelImagePart,
+    ModelTextPart,
+    message_to_capture_dict,
+)
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.runtime.tool_loop import (
@@ -107,11 +113,13 @@ class OpenAIAgentsRuntime:
                 if isinstance(event, RawResponsesStreamEvent) and isinstance(event.data, ResponseCompletedEvent):
                     model_completed_times.append(epoch_millis())
                     usage = getattr(event.data.response, "usage", None)
-                    model_completed_usages.append((
-                        getattr(usage, "input_tokens", 0) if usage is not None else 0,
-                        getattr(usage, "output_tokens", 0) if usage is not None else 0,
-                        getattr(usage, "total_tokens", 0) if usage is not None else 0,
-                    ))
+                    model_completed_usages.append(
+                        (
+                            getattr(usage, "input_tokens", 0) if usage is not None else 0,
+                            getattr(usage, "output_tokens", 0) if usage is not None else 0,
+                            getattr(usage, "total_tokens", 0) if usage is not None else 0,
+                        )
+                    )
                 if converted is not None:
                     yield converted
 
@@ -201,9 +209,7 @@ class OpenAIAgentsRuntime:
             tools=tools or [],
         )
 
-    def _resolve_tool_definitions(
-        self, agent: AgentDefinition, registry: ToolRegistry
-    ) -> list[ToolDefinition]:
+    def _resolve_tool_definitions(self, agent: AgentDefinition, registry: ToolRegistry) -> list[ToolDefinition]:
         """Resolve configured Tool keys before model invocation.
 
         Args:
@@ -284,93 +290,86 @@ class OpenAIAgentsRuntime:
         ``function_call_output`` items, so this conversion remains at the SDK boundary.
 
         Args:
-            context: Neutral history/current message including Tool metadata and model-only parts.
+            context: Neutral typed history/current message including Tool Calls and model-only parts.
 
         Returns:
             Responses API input items with transient signed URLs confined to the current run.
         """
-        def sdk_content(message: Message) -> Any:
+
+        def provider_content(message: Message) -> Any:
             """Translate one neutral content list into provider-bound Responses parts.
 
             Args:
-                message: Neutral runtime message with optional model-only content metadata.
+                message: Neutral runtime message with optional typed model-only content.
 
             Returns:
                 Scalar text or Responses-compatible text/image parts.
             """
-            parts = message.metadata.get("model_content")
-            if parts is None:
-                # Compatibility for contexts created by older callers during rolling deploys.
-                parts = message.metadata.get("sdk_content")
-            if not parts:
+            if not message.model_content:
                 return message.content
+
             converted: list[dict[str, Any]] = []
-            for part in parts:
-                if part.get("type") == "text":
-                    converted.append({"type": "input_text", "text": part.get("text", "")})
-                elif part.get("type") == "image":
-                    converted.append({
-                        "type": "input_image",
-                        "image_url": part.get("url", ""),
-                        "detail": part.get("detail") or "auto",
-                    })
+            for part in message.model_content:
+                if isinstance(part, ModelTextPart):
+                    converted.append({"type": "input_text", "text": part.text})
+                elif isinstance(part, ModelImagePart):
+                    converted.append(
+                        {
+                            "type": "input_image",
+                            "image_url": part.url,
+                            "detail": part.detail,
+                        }
+                    )
             return converted
 
         input_items: list[dict[str, Any]] = []
         for message in context.conversation_history:
-            tool_calls = message.metadata.get("tool_calls") or []
-            if message.role == "assistant" and tool_calls:
+            if message.role == "assistant" and message.tool_calls:
                 if message.content:
                     input_items.append({"role": "assistant", "content": message.content})
-                for tool_call in tool_calls:
-                    function = tool_call.get("function") or {}
-                    input_items.append({
-                        "type": "function_call",
-                        "call_id": tool_call.get("id") or "",
-                        "name": function.get("name") or "",
-                        "arguments": function.get("arguments") or "{}",
-                    })
+                for tool_call in message.tool_calls:
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": tool_call.call_id,
+                            "name": tool_call.function_name,
+                            "arguments": tool_call.arguments,
+                        }
+                    )
             elif message.role == "tool":
-                input_items.append({
-                    "type": "function_call_output",
-                    "call_id": message.metadata.get("tool_call_id") or "",
-                    "output": message.content,
-                })
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": message.tool_call_id or "",
+                        "output": message.content,
+                    }
+                )
             else:
-                input_items.append({
-                    "role": message.role,
-                    "content": sdk_content(message),
-                })
+                input_items.append(
+                    {
+                        "role": message.role,
+                        "content": provider_content(message),
+                    }
+                )
 
-        input_items.append({
-            "role": "user",
-            "content": sdk_content(context.current_message),
-        })
+        input_items.append(
+            {
+                "role": "user",
+                "content": provider_content(context.current_message),
+            }
+        )
         return input_items
 
     def _to_capture_message(self, message: Message) -> dict[str, Any]:
         """Keep stable provider-neutral content while excluding transient signed SDK URLs.
 
         Args:
-            message: Runtime message whose metadata may contain model and capture representations.
+            message: Runtime message with typed model and capture representations.
 
         Returns:
             Durable role/content dictionary using scalar text or non-empty stable parts.
         """
-        # ``capture_content`` is present in the context metadata for every attachment-aware
-        # request, including plain-text requests where it is an empty list.  An empty list is not
-        # a valid persisted content representation: Conversation Manager requires either scalar
-        # text or at least one content part.  Fall back to the scalar message in that case so a
-        # normal text-only Round remains persistable.
-        capture_content = message.metadata.get("capture_content")
-        captured: dict[str, Any] = {
-            "role": message.role,
-            "content": capture_content if capture_content else message.content,
-        }
-        for key in ("tool_calls", "tool_call_id"):
-            if key in message.metadata:
-                captured[key] = message.metadata[key]
-        return captured
+        return message_to_capture_dict(message)
 
     def _convert_stream_event(
         self,
@@ -520,10 +519,7 @@ class OpenAIAgentsRuntime:
             if not tool_calls and index == len(raw_responses) - 1:
                 # The SDK may clear a cancelled response's output after already publishing
                 # tool_called events. Those events remain authoritative audit evidence.
-                tool_calls = [
-                    call for call in collector.calls()
-                    if call.tool_call_id not in assigned_tool_call_ids
-                ]
+                tool_calls = [call for call in collector.calls() if call.tool_call_id not in assigned_tool_call_ids]
             assigned_tool_call_ids.update(call.tool_call_id for call in tool_calls)
             executions = self._complete_execution_audit(
                 tool_calls=tool_calls,
@@ -567,28 +563,28 @@ class OpenAIAgentsRuntime:
                 sort_keys=True,
                 default=str,
             )
-            turns.append(CapturedModelTurn(
-                request_messages=request_messages,
-                message_storage_mode="FULL_SNAPSHOT" if index == 0 else "APPEND_DELTA",
-                tools=definitions,
-                response_content=response_content,
-                response_tool_calls=tool_calls,
-                tool_executions=executions,
-                request_id=(
-                    getattr(response, "request_id", None)
-                    or getattr(response, "response_id", None)
-                    or str(uuid4())
-                ),
-                trace_id=trace_id,
-                start_time=previous_turn_end,
-                llm_end_time=llm_end,
-                end_time=turn_end,
-                prompt_tokens=response.usage.input_tokens,
-                completion_tokens=response.usage.output_tokens,
-                total_tokens=response.usage.total_tokens,
-                raw_request=raw_request,
-                raw_response=raw_response,
-            ))
+            turns.append(
+                CapturedModelTurn(
+                    request_messages=request_messages,
+                    message_storage_mode="FULL_SNAPSHOT" if index == 0 else "APPEND_DELTA",
+                    tools=definitions,
+                    response_content=response_content,
+                    response_tool_calls=tool_calls,
+                    tool_executions=executions,
+                    request_id=(
+                        getattr(response, "request_id", None) or getattr(response, "response_id", None) or str(uuid4())
+                    ),
+                    trace_id=trace_id,
+                    start_time=previous_turn_end,
+                    llm_end_time=llm_end,
+                    end_time=turn_end,
+                    prompt_tokens=response.usage.input_tokens,
+                    completion_tokens=response.usage.output_tokens,
+                    total_tokens=response.usage.total_tokens,
+                    raw_request=raw_request,
+                    raw_response=raw_response,
+                )
+            )
             # Only Tool-producing responses have a following LLM request. Persist precisely the
             # assistant call plus ordered execution outputs required for that next request.
             request_messages = self._next_turn_delta(response_content, tool_calls, executions)
@@ -721,24 +717,30 @@ class OpenAIAgentsRuntime:
                 if cancelled
                 else "Tool execution did not produce an auditable result."
             )
-            result_content = "" if cancelled else json.dumps(
-                {"status": "error", "error": error_message},
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
+            result_content = (
+                ""
+                if cancelled
+                else json.dumps(
+                    {"status": "error", "error": error_message},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
             )
-            executions.append(CapturedToolExecution(
-                tool_call_id=tool_call.tool_call_id,
-                tool_key=definition.tool_key if definition is not None else "unknown",
-                tool_name=tool_call.tool_name,
-                arguments=tool_call.arguments,
-                status=status,
-                result_content=result_content,
-                raw_result=result_content,
-                error_message=error_message,
-                start_time=fallback_time,
-                end_time=fallback_time,
-            ))
+            executions.append(
+                CapturedToolExecution(
+                    tool_call_id=tool_call.tool_call_id,
+                    tool_key=definition.tool_key if definition is not None else "unknown",
+                    tool_name=tool_call.tool_name,
+                    arguments=tool_call.arguments,
+                    status=status,
+                    result_content=result_content,
+                    raw_result=result_content,
+                    error_message=error_message,
+                    start_time=fallback_time,
+                    end_time=fallback_time,
+                )
+            )
         return executions
 
     def _normalize_response_output(self, outputs: list[Any]) -> tuple[str, list[CapturedToolCall]]:
@@ -760,11 +762,13 @@ class OpenAIAgentsRuntime:
                     if text is not None:
                         text_parts.append(str(text))
             elif item_type == "function_call":
-                tool_calls.append(CapturedToolCall(
-                    tool_call_id=str(getattr(item, "call_id", "")),
-                    tool_name=str(getattr(item, "name", "")),
-                    arguments=str(getattr(item, "arguments", "{}")),
-                ))
+                tool_calls.append(
+                    CapturedToolCall(
+                        tool_call_id=str(getattr(item, "call_id", "")),
+                        tool_name=str(getattr(item, "name", "")),
+                        arguments=str(getattr(item, "arguments", "{}")),
+                    )
+                )
         return "".join(text_parts), tool_calls
 
     def _next_turn_delta(
@@ -785,26 +789,30 @@ class OpenAIAgentsRuntime:
         """
         if not tool_calls:
             return []
-        messages: list[dict[str, Any]] = [{
-            "role": "assistant",
-            "content": response_content,
-            "tool_calls": [
-                {
-                    "id": call.tool_call_id,
-                    "type": "function",
-                    "function": {"name": call.tool_name, "arguments": call.arguments},
-                }
-                for call in tool_calls
-            ],
-        }]
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "assistant",
+                "content": response_content,
+                "tool_calls": [
+                    {
+                        "id": call.tool_call_id,
+                        "type": "function",
+                        "function": {"name": call.tool_name, "arguments": call.arguments},
+                    }
+                    for call in tool_calls
+                ],
+            }
+        ]
         executions_by_id = {execution.tool_call_id: execution for execution in executions}
         for call in tool_calls:
             execution = executions_by_id.get(call.tool_call_id)
-            messages.append({
-                "role": "tool",
-                "content": execution.result_content if execution is not None else "",
-                "tool_call_id": call.tool_call_id,
-            })
+            messages.append(
+                {
+                    "role": "tool",
+                    "content": execution.result_content if execution is not None else "",
+                    "tool_call_id": call.tool_call_id,
+                }
+            )
         return messages
 
     def _definition_dict(self, definition: ToolDefinition) -> dict[str, Any]:

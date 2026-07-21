@@ -113,6 +113,7 @@ class ToolExecutor:
         Returns:
             list[dict[str, Any]]: List of execution results with status.
         """
+
         async def execute_call(call: dict[str, Any]) -> dict[str, Any]:
             """Execute one batch item and convert exceptions into an item-level error result."""
             tool_key = call.get("tool_key") or call.get("name")

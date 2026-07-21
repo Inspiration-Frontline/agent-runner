@@ -14,22 +14,111 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class Message:
-    """
-    A single message in a conversation.
+class ModelTextPart:
+    """Text supplied to the model as one multipart input item."""
 
-    Represents a message exchanged between the user and the agent,
-    including role, content, and optional metadata.
+    text: str
+
+
+@dataclass
+class ModelImagePart:
+    """Transient image input whose signed URL exists only for the current model call."""
+
+    file_id: str
+    url: str
+    detail: str = "auto"
+
+
+ModelContentPart = ModelTextPart | ModelImagePart
+
+
+@dataclass
+class CaptureTextPart:
+    """Durable text captured for replay and persistence."""
+
+    text: str
+
+
+@dataclass
+class CaptureFilePart:
+    """Durable AgentBreaker file reference that can be re-signed during replay."""
+
+    file_id: str
+    detail: str = "auto"
+
+
+CaptureContentPart = CaptureTextPart | CaptureFilePart
+
+
+@dataclass
+class RuntimeToolCall:
+    """Provider-neutral Tool Call preserved across replay and SDK adapters."""
+
+    call_id: str
+    call_type: str
+    function_name: str
+    arguments: str
+
+
+@dataclass
+class Message:
+    """A strongly typed provider-neutral message.
+
+    Scalar text remains in ``content``. Multipart model input, durable capture data, and Tool
+    linkage use separate fields so an empty multipart value cannot alter scalar message semantics.
 
     Attributes:
         role: The role of the message sender: 'user', 'assistant', or 'system'.
         content: The text content of the message.
-        metadata: Optional metadata associated with this message.
+        model_content: Transient provider-neutral parts used for the current model call.
+        capture_content: Stable parts written to persistence and used for later replay.
+        tool_calls: Assistant Tool Calls emitted with this message.
+        tool_call_id: Tool Call ID associated with a Tool result message.
     """
 
     role: str
     content: str
-    metadata: dict[str, Any] = field(default_factory=dict)
+    model_content: tuple[ModelContentPart, ...] = ()
+    capture_content: tuple[CaptureContentPart, ...] = ()
+    tool_calls: tuple[RuntimeToolCall, ...] = ()
+    tool_call_id: str | None = None
+
+
+def message_to_capture_dict(message: Message) -> dict[str, Any]:
+    """Serialize one typed runtime message at the persistence boundary."""
+    content: str | list[dict[str, object]] = message.content
+    if message.capture_content:
+        content = []
+        for part in message.capture_content:
+            if isinstance(part, CaptureTextPart):
+                content.append({"type": "text", "text": part.text})
+            else:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "file_url": {
+                            "url": f"agentbreaker-file://{part.file_id}",
+                            "detail": part.detail,
+                        },
+                    }
+                )
+
+    captured: dict[str, Any] = {"role": message.role, "content": content}
+    if message.tool_calls:
+        captured["tool_calls"] = [
+            {
+                "id": tool_call.call_id,
+                "type": tool_call.call_type,
+                "function": {
+                    "name": tool_call.function_name,
+                    "arguments": tool_call.arguments,
+                },
+            }
+            for tool_call in message.tool_calls
+        ]
+    if message.tool_call_id:
+        captured["tool_call_id"] = message.tool_call_id
+    return captured
 
 
 @dataclass
@@ -109,9 +198,8 @@ class ContextBuilder:
         agent_config: AgentConfig,
         conversation_id: str | None,
         user_id: int,
-        current_message: str,
+        current_message: Message,
         conversation_history: list[Message] | None = None,
-        current_message_metadata: dict[str, Any] | None = None,
         additional_system_instruction: str = "",
     ) -> AgentContext:
         """
@@ -121,9 +209,8 @@ class ContextBuilder:
             agent_config: Configuration for the agent to execute.
             conversation_id: Optional ID of the conversation to continue.
             user_id: Trusted user ID used for profile/RAG authorization.
-            current_message: Searchable text representation of the current request.
+            current_message: Strongly typed current request and its attachment representations.
             conversation_history: Already loaded replay messages, when the orchestrator has them.
-            current_message_metadata: Provider-neutral model/capture parts for the current request.
             additional_system_instruction: Internal attachment/locale instruction not shown as user text.
 
         Returns:
@@ -139,7 +226,7 @@ class ContextBuilder:
         rag_chunks = []
         if agent_config.memory_policy.rag:
             rag_chunks = await self.rag_adapter.retrieve(
-                query=current_message,
+                query=current_message.content,
                 agent_id=agent_config.agent_id,
                 user_id=user_id,
             )
@@ -160,11 +247,7 @@ class ContextBuilder:
             conversation_history=conversation_history,
             user_profile=user_profile,
             rag_chunks=rag_chunks,
-            current_message=Message(
-                role="user",
-                content=current_message,
-                metadata=current_message_metadata or {},
-            ),
+            current_message=current_message,
             tool_specs=tool_specs,
         )
 

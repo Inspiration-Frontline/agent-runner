@@ -76,17 +76,13 @@ class Settings(BaseSettings):
     # LiteLLM gateway configuration
     lite_llm_base_url: str = "http://localhost:4000"
     lite_llm_api_key: str = "sk-agent-breaker-local"
-    lite_llm_request_timeout_seconds: float = Field(
-        default=120.0, validation_alias="LITE_LLM_REQUEST_TIMEOUT_SECONDS"
-    )
+    lite_llm_request_timeout_seconds: float = Field(default=120.0, validation_alias="LITE_LLM_REQUEST_TIMEOUT_SECONDS")
     lite_llm_max_retries: int = Field(default=0, validation_alias="LITE_LLM_MAX_RETRIES")
 
     # Service URLs for downstream dependencies
     agent_config_center_url: str = "http://localhost:8081"
     conversation_service_url: str = "http://localhost:8082"
-    conversation_rpc_url: str = Field(
-        default="tri://127.0.0.1:20880", validation_alias="CONVERSATION_RPC_URL"
-    )
+    conversation_rpc_url: str = Field(default="tri://127.0.0.1:20880", validation_alias="CONVERSATION_RPC_URL")
     default_agent_id: int = Field(default=1, validation_alias="DEFAULT_AGENT_ID")
     user_profiler_url: str = "http://localhost:8083"
     knowledge_service_url: str = "http://localhost:8084"
@@ -98,9 +94,7 @@ class Settings(BaseSettings):
     # Context and output token limits
     max_context_tokens: int = 128000
     max_output_tokens: int = 4096
-    file_preparation_timeout_seconds: float = Field(
-        default=120.0, validation_alias="FILE_PREPARATION_TIMEOUT_SECONDS"
-    )
+    file_preparation_timeout_seconds: float = Field(default=120.0, validation_alias="FILE_PREPARATION_TIMEOUT_SECONDS")
 
     # Redis configuration for caching
     redis_host: str = Field(default="localhost", validation_alias="REDIS_HOST")
@@ -112,9 +106,7 @@ class Settings(BaseSettings):
     )
     redis_socket_timeout_seconds: float = Field(default=1.0, validation_alias="REDIS_SOCKET_TIMEOUT_SECONDS")
     agent_config_cache_enabled: bool = Field(default=False, validation_alias="AGENT_CONFIG_CACHE_ENABLED")
-    agent_config_cache_ttl_seconds: int = Field(
-        default=300, validation_alias="AGENT_CONFIG_CACHE_TTL_SECONDS"
-    )
+    agent_config_cache_ttl_seconds: int = Field(default=300, validation_alias="AGENT_CONFIG_CACHE_TTL_SECONDS")
 
     # Nacos configuration center settings
     nacos_enabled: bool = Field(default=False, validation_alias="NACOS_ENABLED")

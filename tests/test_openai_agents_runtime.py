@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from agent_runner.api.streaming import UsageEvent
-from agent_runner.context.builder import AgentContext, Message
+from agent_runner.context.builder import AgentContext, Message, RuntimeToolCall
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
@@ -38,7 +38,7 @@ def test_build_input_preserves_history_and_current_message():
     ]
 
 
-def test_build_input_preserves_plain_text_when_attachment_metadata_is_empty():
+def test_build_input_preserves_plain_text_when_multipart_content_is_empty():
     runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
     context = AgentContext(
         agent_config=_agent(),
@@ -46,11 +46,7 @@ def test_build_input_preserves_plain_text_when_attachment_metadata_is_empty():
         conversation_history=[Message(role="assistant", content="Previous answer")],
         user_profile={},
         rag_chunks=[],
-        current_message=Message(
-            role="user",
-            content="Expand on that answer",
-            metadata={"model_content": [], "capture_content": []},
-        ),
+        current_message=Message(role="user", content="Expand on that answer"),
         tool_specs=[],
     )
 
@@ -66,14 +62,19 @@ def test_build_input_converts_provider_neutral_tool_history_to_responses_items()
         agent_config=_agent(),
         system_prompt="system",
         conversation_history=[
-            Message(role="assistant", content="", metadata={
-                "tool_calls": [{
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "calculate_expression", "arguments": '{"expression":"6*7"}'},
-                }]
-            }),
-            Message(role="tool", content='{"result":42}', metadata={"tool_call_id": "call-1"}),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    RuntimeToolCall(
+                        call_id="call-1",
+                        call_type="function",
+                        function_name="calculate_expression",
+                        arguments='{"expression":"6*7"}',
+                    ),
+                ),
+            ),
+            Message(role="tool", content='{"result":42}', tool_call_id="call-1"),
             Message(role="assistant", content="The result was 42."),
         ],
         user_profile={},
@@ -115,9 +116,7 @@ def test_response_completed_event_usage_is_passed_through():
     runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
     event = SimpleNamespace(
         data=SimpleNamespace(
-            response=SimpleNamespace(
-                usage=SimpleNamespace(input_tokens=12, output_tokens=5, total_tokens=17)
-            )
+            response=SimpleNamespace(usage=SimpleNamespace(input_tokens=12, output_tokens=5, total_tokens=17))
         )
     )
 
@@ -138,12 +137,14 @@ def test_response_completed_event_without_usage_is_ignored():
 
 def test_orchestrator_converts_usage_event_without_estimation():
     orchestrator = object.__new__(RuntimeOrchestrator)
-    event = orchestrator._convert_event({
-        "type": "usage",
-        "prompt_tokens": 12,
-        "completion_tokens": 5,
-        "total_tokens": 17,
-    })
+    event = orchestrator._convert_event(
+        {
+            "type": "usage",
+            "prompt_tokens": 12,
+            "completion_tokens": 5,
+            "total_tokens": 17,
+        }
+    )
 
     assert isinstance(event, UsageEvent)
     assert event.prompt_tokens == 12

@@ -78,9 +78,7 @@ return 0
             await asyncio.sleep(self._RENEW_INTERVAL_SECONDS)
             if self._key is None or self._token is None:
                 return
-            renewed = await self._redis.eval(
-                self._RENEW_SCRIPT, 1, self._key, self._token, self._LEASE_MS
-            )
+            renewed = await self._redis.eval(self._RENEW_SCRIPT, 1, self._key, self._token, self._LEASE_MS)
             if renewed != 1:
                 return
 

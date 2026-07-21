@@ -99,21 +99,27 @@ def test_builtin_definitions_are_derived_from_sdk_function_tools() -> None:
 
 async def test_weather_uses_geocoding_and_current_weather(monkeypatch) -> None:
     responses = [
-        _JsonResponse({
-            "results": [{
-                "name": "Shanghai",
-                "admin1": "Shanghai",
-                "country": "China",
-                "latitude": 31.22,
-                "longitude": 121.46,
-            }]
-        }),
-        _JsonResponse({
-            "timezone": "Asia/Shanghai",
-            "timezone_abbreviation": "GMT+8",
-            "current": {"temperature_2m": 30.2},
-            "current_units": {"temperature_2m": "C"},
-        }),
+        _JsonResponse(
+            {
+                "results": [
+                    {
+                        "name": "Shanghai",
+                        "admin1": "Shanghai",
+                        "country": "China",
+                        "latitude": 31.22,
+                        "longitude": 121.46,
+                    }
+                ]
+            }
+        ),
+        _JsonResponse(
+            {
+                "timezone": "Asia/Shanghai",
+                "timezone_abbreviation": "GMT+8",
+                "current": {"temperature_2m": 30.2},
+                "current_units": {"temperature_2m": "C"},
+            }
+        ),
     ]
     client = _GetOnlyClient(responses)
     monkeypatch.setattr("agent_runner.tools.internal.weather.httpx.AsyncClient", lambda **_: client)
@@ -170,10 +176,12 @@ async def test_batch_execution_is_parallel_and_partial_failure_does_not_cancel_s
     executor = ToolExecutor(registry)
     started = asyncio.get_running_loop().time()
 
-    results = await executor.execute_batch([
-        {"tool_key": "test.success", "arguments": {"value": 1}},
-        {"tool_key": "test.failure", "arguments": {"value": 2}},
-    ])
+    results = await executor.execute_batch(
+        [
+            {"tool_key": "test.success", "arguments": {"value": 1}},
+            {"tool_key": "test.failure", "arguments": {"value": 2}},
+        ]
+    )
 
     elapsed = asyncio.get_running_loop().time() - started
     assert elapsed < 0.09
@@ -188,10 +196,15 @@ async def test_batch_cancellation_cancels_every_in_flight_tool() -> None:
     registry.register(_delay_definition("test.first", 10))
     registry.register(_delay_definition("test.second", 10))
     token = CancellationToken()
-    task = asyncio.create_task(ToolExecutor(registry).execute_batch([
-        {"tool_key": "test.first", "arguments": {"value": 1}},
-        {"tool_key": "test.second", "arguments": {"value": 2}},
-    ], token))
+    task = asyncio.create_task(
+        ToolExecutor(registry).execute_batch(
+            [
+                {"tool_key": "test.first", "arguments": {"value": 1}},
+                {"tool_key": "test.second", "arguments": {"value": 2}},
+            ],
+            token,
+        )
+    )
     await asyncio.sleep(0)
 
     token.cancel()
@@ -221,19 +234,23 @@ async def test_collector_returns_structured_failure_for_model_and_audit() -> Non
 async def test_cancelled_observed_call_builds_partial_turn_when_sdk_removes_raw_response() -> None:
     definition = _delay_definition("test.cancel", 10)
     collector = ToolExecutionCollector()
-    collector.record_call(CapturedToolCall(
-        tool_call_id="call-cancel",
-        tool_name=definition.tool_name,
-        arguments='{"value":1}',
-    ))
+    collector.record_call(
+        CapturedToolCall(
+            tool_call_id="call-cancel",
+            tool_name=definition.tool_name,
+            arguments='{"value":1}',
+        )
+    )
     token = CancellationToken()
-    task = asyncio.create_task(collector.execute(
-        tool_call_id="call-cancel",
-        definition=definition,
-        arguments_json='{"value":1}',
-        tool_context=_tool_context(definition.tool_name, "call-cancel", '{"value":1}'),
-        cancellation_token=token,
-    ))
+    task = asyncio.create_task(
+        collector.execute(
+            tool_call_id="call-cancel",
+            definition=definition,
+            arguments_json='{"value":1}',
+            tool_context=_tool_context(definition.tool_name, "call-cancel", '{"value":1}'),
+            cancellation_token=token,
+        )
+    )
     await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -285,11 +302,13 @@ def test_tool_stream_events_keep_call_identity_and_status() -> None:
         "tool_result": '{"status":"error"}',
         "tool_status": "FAILED",
     }
-    assert collector.calls() == [CapturedToolCall(
-        tool_call_id="call-1",
-        tool_name="test_success",
-        arguments='{"value":1}',
-    )]
+    assert collector.calls() == [
+        CapturedToolCall(
+            tool_call_id="call-1",
+            tool_name="test_success",
+            arguments='{"value":1}',
+        )
+    ]
 
 
 class _JsonResponse:

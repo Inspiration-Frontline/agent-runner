@@ -18,12 +18,8 @@ def create_definition(
 
 
 def test_definition_hash_is_stable_for_equivalent_json_schema():
-    first = create_definition(
-        parameters={"type": "object", "properties": {"query": {"type": "string"}}}
-    )
-    second = create_definition(
-        parameters={"properties": {"query": {"type": "string"}}, "type": "object"}
-    )
+    first = create_definition(parameters={"type": "object", "properties": {"query": {"type": "string"}}})
+    second = create_definition(parameters={"properties": {"query": {"type": "string"}}, "type": "object"})
 
     assert first.definition_hash == second.definition_hash
     assert len(first.definition_hash) == 64

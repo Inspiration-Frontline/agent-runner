@@ -25,7 +25,9 @@ def trusted_user_id(x_user_id: str | None) -> int:
     try:
         user_id = int(x_user_id)
     except ValueError as error:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is invalid.") from error
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is invalid."
+        ) from error
     if user_id <= 0:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is invalid.")
     return user_id
@@ -91,10 +93,13 @@ async def chat_stream(
         await orchestrator.acquire_conversation(chat_request.conversation_id)
     except ConversationBusyError as error:
         await orchestrator.close()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={
-            "code": "CONVERSATION_BUSY",
-            "message": str(error),
-        }) from error
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CONVERSATION_BUSY",
+                "message": str(error),
+            },
+        ) from error
 
     async def event_generator():
         """Yield orchestrator events as SSE frames while preserving disconnect cleanup."""

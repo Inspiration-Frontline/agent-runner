@@ -62,7 +62,18 @@ from agent_runner.api.streaming import (
     UsageEvent,
 )
 from agent_runner.config import ChatRequest, get_settings
-from agent_runner.context.builder import ContextBuilder, Message
+from agent_runner.context.builder import (
+    CaptureContentPart,
+    CaptureFilePart,
+    CaptureTextPart,
+    ContextBuilder,
+    Message,
+    ModelContentPart,
+    ModelImagePart,
+    ModelTextPart,
+    RuntimeToolCall,
+    message_to_capture_dict,
+)
 from agent_runner.conversation import (
     ConversationBusyError,
     ConversationExecutionLock,
@@ -87,50 +98,18 @@ class AttachmentInput:
     """
 
     current_message: str
-    model_content: list[dict[str, object]]
-    capture_content: list[dict[str, object]]
+    model_content: tuple[ModelContentPart, ...]
+    capture_content: tuple[CaptureContentPart, ...]
     additional_instruction: str = ""
 
-    def as_metadata(self) -> dict[str, object]:
-        """Expose model parts and durable capture parts to the context builder.
-
-        The representations intentionally differ: provider adapters may need signed URLs, while
-        persisted history must contain stable file IDs that remain valid after URL expiry.
-
-        Returns:
-            Metadata consumed by ``ContextBuilder`` and the runtime capture layer.
-        """
-        metadata: dict[str, object] = {}
-        if self.model_content:
-            metadata["model_content"] = self.model_content
-        if self.capture_content:
-            metadata["capture_content"] = self.capture_content
-        return metadata
-
-    def __iter__(self):
-        """Expose the former tuple shape during the AttachmentInput contract migration.
-
-        Returns:
-            Current text, legacy SDK metadata, and the internal language instruction in order.
-        """
-        yield self.current_message
-        legacy_model_content = []
-        for part in self.model_content:
-            if part.get("type") == "text":
-                legacy_model_content.append({"type": "input_text", "text": part.get("text", "")})
-            elif part.get("type") == "image":
-                legacy_model_content.append({
-                    "type": "input_image",
-                    "image_url": part.get("url", ""),
-                    "detail": part.get("detail") or "auto",
-                })
-        metadata: dict[str, object] = {}
-        if legacy_model_content:
-            metadata["sdk_content"] = legacy_model_content
-        if self.capture_content:
-            metadata["capture_content"] = self.capture_content
-        yield metadata
-        yield self.additional_instruction
+    def to_message(self) -> Message:
+        """Build the strongly typed current user message consumed by the context builder."""
+        return Message(
+            role="user",
+            content=self.current_message,
+            model_content=self.model_content,
+            capture_content=self.capture_content,
+        )
 
 
 class RuntimeOrchestrator:
@@ -190,9 +169,7 @@ class RuntimeOrchestrator:
         await self.execution_lock.acquire(conversation_id)
         self._lock_acquired = True
 
-    async def run(
-        self, chat_request: ChatRequest, user_id: int, http_request: Request
-    ) -> AsyncGenerator[StreamEvent]:
+    async def run(self, chat_request: ChatRequest, user_id: int, http_request: Request) -> AsyncGenerator[StreamEvent]:
         """
         Execute an agent chat request and stream responses.
 
@@ -232,9 +209,7 @@ class RuntimeOrchestrator:
         try:
             if not getattr(self, "_lock_acquired", False):
                 await self.acquire_conversation(chat_request.conversation_id)
-            conversation_cancellation_registry.register(
-                user_id, chat_request.conversation_id, cancellation_token
-            )
+            conversation_cancellation_registry.register(user_id, chat_request.conversation_id, cancellation_token)
 
             history = await self.conversation_client.get_round_history(user_id, chat_request.conversation_id)
             if history.base is None or not history.base.success:
@@ -334,9 +309,7 @@ class RuntimeOrchestrator:
                         yield ErrorEvent(message, error_code="FILE_PREPARATION_TIMEOUT", phase="attachment_preparation")
                         return
                     if not processing_event_emitted:
-                        pending_files = sum(
-                            file.status != ConversationFileStatus.READY for file in prepared_files
-                        )
+                        pending_files = sum(file.status != ConversationFileStatus.READY for file in prepared_files)
                         yield AttachmentProcessingEvent(pending_files)
                         processing_event_emitted = True
                     await asyncio.sleep(self._file_poll_delay(elapsed))
@@ -354,9 +327,8 @@ class RuntimeOrchestrator:
                 agent_config=agent_config,
                 conversation_id=chat_request.conversation_id,
                 user_id=user_id,
-                current_message=attachment_input.current_message,
+                current_message=attachment_input.to_message(),
                 conversation_history=conversation_history,
-                current_message_metadata=attachment_input.as_metadata(),
                 additional_system_instruction=attachment_input.additional_instruction,
             )
 
@@ -408,49 +380,54 @@ class RuntimeOrchestrator:
                 terminal_status = terminal_status or RoundStatus.CANCELLED
                 terminal_error = terminal_error or "Generation cancelled."
                 await self._persist_terminal_round(
-                    user_id, chat_request, next_round_number, round_start,
-                    terminal_status, terminal_error, agent=agent, capture=capture
+                    user_id,
+                    chat_request,
+                    next_round_number,
+                    round_start,
+                    terminal_status,
+                    terminal_error,
+                    agent=agent,
+                    capture=capture,
                 )
                 return
             if not capture.turns and terminal_status is None:
                 legacy_end = _epoch_millis()
                 capture = AgentRunCapture(
-                    turns=[CapturedModelTurn(
-                        request_messages=[{"role": "system", "content": context.system_prompt}]
-                        + [
-                            {"role": message.role, "content": message.content, **message.metadata}
-                            for message in conversation_history
-                        ]
-                        + [{
-                            "role": "user",
-                            "content": context.current_message.metadata.get(
-                                "capture_content", context.current_message.content
-                            ),
-                        }],
-                        message_storage_mode="FULL_SNAPSHOT",
-                        tools=[],
-                        response_content=response_text,
-                        response_tool_calls=[],
-                        tool_executions=[],
-                        request_id=str(uuid4()),
-                        trace_id=str(uuid4()),
-                        start_time=call_start,
-                        llm_end_time=legacy_end,
-                        end_time=legacy_end,
-                        prompt_tokens=usage.prompt_tokens if usage else 0,
-                        completion_tokens=usage.completion_tokens if usage else 0,
-                        total_tokens=usage.total_tokens if usage else 0,
-                        raw_request="",
-                        raw_response="",
-                    )],
+                    turns=[
+                        CapturedModelTurn(
+                            request_messages=[{"role": "system", "content": context.system_prompt}]
+                            + [message_to_capture_dict(message) for message in conversation_history]
+                            + [message_to_capture_dict(context.current_message)],
+                            message_storage_mode="FULL_SNAPSHOT",
+                            tools=[],
+                            response_content=response_text,
+                            response_tool_calls=[],
+                            tool_executions=[],
+                            request_id=str(uuid4()),
+                            trace_id=str(uuid4()),
+                            start_time=call_start,
+                            llm_end_time=legacy_end,
+                            end_time=legacy_end,
+                            prompt_tokens=usage.prompt_tokens if usage else 0,
+                            completion_tokens=usage.completion_tokens if usage else 0,
+                            total_tokens=usage.total_tokens if usage else 0,
+                            raw_request="",
+                            raw_response="",
+                        )
+                    ],
                     final_output=response_text,
                 )
             call_end = capture.turns[-1].end_time if capture.turns else _epoch_millis()
             if not response_text.strip():
                 await self._persist_terminal_round(
-                    user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.FAILED, "The model returned an empty response.",
-                    agent=agent, capture=capture
+                    user_id,
+                    chat_request,
+                    next_round_number,
+                    round_start,
+                    RoundStatus.FAILED,
+                    "The model returned an empty response.",
+                    agent=agent,
+                    capture=capture,
                 )
                 yield ErrorEvent(
                     "The model returned an empty response.",
@@ -489,9 +466,14 @@ class RuntimeOrchestrator:
             logger.info("Request cancelled")
             if user_request_validated and next_round_number is not None:
                 await self._persist_terminal_round(
-                    user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.CANCELLED, "Generation cancelled.",
-                    agent=agent, capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture())
+                    user_id,
+                    chat_request,
+                    next_round_number,
+                    round_start,
+                    RoundStatus.CANCELLED,
+                    "Generation cancelled.",
+                    agent=agent,
+                    capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture()),
                 )
             await self._cleanup(cancellation_token)
             raise
@@ -499,9 +481,14 @@ class RuntimeOrchestrator:
         except GeneratorExit:
             if user_request_validated and next_round_number is not None:
                 await self._persist_terminal_round(
-                    user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.CANCELLED, "Generation cancelled.",
-                    agent=agent, capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture())
+                    user_id,
+                    chat_request,
+                    next_round_number,
+                    round_start,
+                    RoundStatus.CANCELLED,
+                    "Generation cancelled.",
+                    agent=agent,
+                    capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture()),
                 )
             raise
 
@@ -512,15 +499,18 @@ class RuntimeOrchestrator:
             logger.exception("Error during agent execution")
             if user_request_validated and next_round_number is not None:
                 await self._persist_terminal_round(
-                    user_id, chat_request, next_round_number, round_start,
-                    RoundStatus.FAILED, str(e) or "Agent execution failed.",
-                    agent=agent, capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture())
+                    user_id,
+                    chat_request,
+                    next_round_number,
+                    round_start,
+                    RoundStatus.FAILED,
+                    str(e) or "Agent execution failed.",
+                    agent=agent,
+                    capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture()),
                 )
             yield ErrorEvent(error_message=str(e), error_code="EXECUTION_FAILED", phase="execution")
         finally:
-            conversation_cancellation_registry.unregister(
-                user_id, chat_request.conversation_id, cancellation_token
-            )
+            conversation_cancellation_registry.unregister(user_id, chat_request.conversation_id, cancellation_token)
             await self._cleanup(cancellation_token)
             if getattr(self, "_lock_acquired", False):
                 await self.execution_lock.release()
@@ -706,13 +696,15 @@ class RuntimeOrchestrator:
             if isinstance(file_value, str):
                 file_value = {"url": file_value}
             normalized_type = "image_url" if part_type in {"image_url", "input_image"} else "file_url"
-            parts.append(ContentPart(
-                type=normalized_type,
-                file_url=FileUrl(
-                    url=file_value.get("url") or "",
-                    detail=file_value.get("detail") or item.get("detail") or "",
-                ),
-            ))
+            parts.append(
+                ContentPart(
+                    type=normalized_type,
+                    file_url=FileUrl(
+                        url=file_value.get("url") or "",
+                        detail=file_value.get("detail") or item.get("detail") or "",
+                    ),
+                )
+            )
         return parts
 
     def _captured_tool_call_to_proto_dict(self, call: dict) -> ToolCall:
@@ -812,7 +804,7 @@ class RuntimeOrchestrator:
             messages: Conversation Manager replay messages in durable order.
 
         Returns:
-            Runtime messages with Tool metadata and stable attachment parts preserved for the model
+            Runtime messages with typed Tool Calls and stable attachment parts preserved for the model
             adapter and the next persistence capture.
         """
         role_names = {
@@ -824,29 +816,33 @@ class RuntimeOrchestrator:
         for message in messages:
             if message.role not in role_names:
                 continue
-            metadata: dict = {}
-            if message.tool_call_id:
-                metadata["tool_call_id"] = message.tool_call_id
-            if message.tool_calls:
-                metadata["tool_calls"] = [
-                    {
-                        "id": tool_call.id,
-                        "type": tool_call.type,
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                    for tool_call in message.tool_calls
-                ]
-            content = message.content
-            if message.content_parts:
-                stable_parts = [self._proto_content_part_to_dict(part) for part in message.content_parts]
-                metadata["capture_content"] = stable_parts
-                content = "\n".join(
-                    part.get("text", "") for part in stable_parts if part.get("type") == "text"
+
+            tool_calls = tuple(
+                RuntimeToolCall(
+                    call_id=tool_call.id,
+                    call_type=tool_call.type,
+                    function_name=tool_call.function.name,
+                    arguments=tool_call.function.arguments,
                 )
-            context_messages.append(Message(role=role_names[message.role], content=content, metadata=metadata))
+                for tool_call in message.tool_calls
+            )
+            content = message.content
+            capture_content: tuple[CaptureContentPart, ...] = ()
+            if message.content_parts:
+                capture_content = tuple(
+                    self._proto_content_part_to_capture_part(part) for part in message.content_parts
+                )
+                content = "\n".join(part.text for part in capture_content if isinstance(part, CaptureTextPart))
+
+            context_messages.append(
+                Message(
+                    role=role_names[message.role],
+                    content=content,
+                    capture_content=capture_content,
+                    tool_calls=tool_calls,
+                    tool_call_id=message.tool_call_id or None,
+                )
+            )
         return context_messages
 
     async def _resolve_replay_images(
@@ -869,45 +865,51 @@ class RuntimeOrchestrator:
         """
         image_file_ids: list[str] = []
         for message in messages:
-            for part in message.metadata.get("capture_content", []):
-                if part.get("type") != "image_url":
+            for part in message.capture_content:
+                if not isinstance(part, CaptureFilePart):
                     continue
-                file_id = self._stable_file_id(part.get("file_url", {}).get("url", ""))
-                if file_id and file_id not in image_file_ids:
-                    image_file_ids.append(file_id)
+
+                if part.file_id not in image_file_ids:
+                    image_file_ids.append(part.file_id)
+
         signed_urls: dict[str, str] = {}
         for offset in range(0, len(image_file_ids), 5):
-            batch = image_file_ids[offset:offset + 5]
+            batch = image_file_ids[offset : offset + 5]
             response = await self.conversation_client.prepare_files(
                 user_id,
                 conversation_id,
                 f"{request_id}-replay-{offset // 5}",
                 batch,
             )
-            if response.base is None or not response.base.success or response.data is None or not response.data.all_ready:
+            if (
+                response.base is None
+                or not response.base.success
+                or response.data is None
+                or not response.data.all_ready
+            ):
                 raise RuntimeError("A historical image attachment could not be resolved for replay.")
             for file in response.data.files:
                 signed_urls[file.file_id] = file.download_url
 
         for message in messages:
-            stable_parts = message.metadata.get("capture_content")
-            if not stable_parts:
+            if not message.capture_content:
                 continue
-            model_parts: list[dict[str, object]] = []
-            for part in stable_parts:
-                if part.get("type") == "text":
-                    model_parts.append({"type": "text", "text": part.get("text", "")})
+
+            model_parts: list[ModelContentPart] = []
+            for part in message.capture_content:
+                if isinstance(part, CaptureTextPart):
+                    model_parts.append(ModelTextPart(text=part.text))
                     continue
-                file_value = part.get("file_url", {})
-                file_id = self._stable_file_id(file_value.get("url", ""))
-                if part.get("type") == "image_url" and file_id in signed_urls:
-                    model_parts.append({
-                        "type": "image",
-                        "file_id": file_id,
-                        "url": signed_urls[file_id],
-                        "detail": file_value.get("detail") or "auto",
-                    })
-            message.metadata["model_content"] = model_parts
+
+                if part.file_id in signed_urls:
+                    model_parts.append(
+                        ModelImagePart(
+                            file_id=part.file_id,
+                            url=signed_urls[part.file_id],
+                            detail=part.detail,
+                        )
+                    )
+            message.model_content = tuple(model_parts)
 
     def _build_attachment_input(
         self,
@@ -929,28 +931,24 @@ class RuntimeOrchestrator:
             text, and the attachment-only language instruction.
         """
         if not prepared_files:
-            return AttachmentInput(chat_request.message, [], [])
+            return AttachmentInput(chat_request.message, (), ())
 
-        model_parts: list[dict[str, object]] = []
-        capture_parts: list[dict[str, object]] = []
+        model_parts: list[ModelContentPart] = []
+        capture_parts: list[CaptureContentPart] = []
         if chat_request.message:
-            model_parts.append({"type": "text", "text": chat_request.message})
-            capture_parts.append({"type": "text", "text": chat_request.message})
+            model_parts.append(ModelTextPart(text=chat_request.message))
+            capture_parts.append(CaptureTextPart(text=chat_request.message))
 
         search_texts: list[str] = [chat_request.message] if chat_request.message else []
         for file in prepared_files:
-            stable_url = f"agentbreaker-file://{file.file_id}"
             if file.kind == ConversationFileKind.IMAGE:
-                model_parts.append({
-                    "type": "image",
-                    "file_id": file.file_id,
-                    "url": file.download_url,
-                    "detail": "auto",
-                })
-                capture_parts.append({
-                    "type": "image_url",
-                    "file_url": {"url": stable_url, "detail": "auto"},
-                })
+                model_parts.append(
+                    ModelImagePart(
+                        file_id=file.file_id,
+                        url=file.download_url,
+                    )
+                )
+                capture_parts.append(CaptureFilePart(file_id=file.file_id))
                 search_texts.append(file.original_filename)
                 continue
 
@@ -958,8 +956,8 @@ class RuntimeOrchestrator:
                 f"[Attachment: {file.original_filename}; file_id={file.file_id}; mime_type={file.mime_type}]\n"
                 f"{file.extracted_text}"
             )
-            model_parts.append({"type": "text", "text": file_text})
-            capture_parts.append({"type": "text", "text": file_text})
+            model_parts.append(ModelTextPart(text=file_text))
+            capture_parts.append(CaptureTextPart(text=file_text))
             search_texts.append(file_text)
 
         instruction = ""
@@ -972,8 +970,8 @@ class RuntimeOrchestrator:
         current_message = "\n\n".join(text for text in search_texts if text)
         return AttachmentInput(
             current_message=current_message,
-            model_content=model_parts,
-            capture_content=capture_parts,
+            model_content=tuple(model_parts),
+            capture_content=tuple(capture_parts),
             additional_instruction=instruction,
         )
 
@@ -992,31 +990,35 @@ class RuntimeOrchestrator:
         if chat_request.message:
             parts.append(ContentPart(type="text", text=chat_request.message))
         for file_id in chat_request.file_ids:
-            parts.append(ContentPart(
-                type="file_url",
-                file_url=FileUrl(url=f"agentbreaker-file://{file_id}"),
-            ))
+            parts.append(
+                ContentPart(
+                    type="file_url",
+                    file_url=FileUrl(url=f"agentbreaker-file://{file_id}"),
+                )
+            )
         return UserRequest(content_parts=parts)
 
-    def _proto_content_part_to_dict(self, part: ContentPart) -> dict[str, object]:
+    def _proto_content_part_to_capture_part(self, part: ContentPart) -> CaptureContentPart:
         """Convert one persisted protobuf part into the neutral runtime representation.
 
         Args:
             part: Stored text or stable file part.
 
         Returns:
-            Dictionary consumed by replay image resolution and provider adapters.
+            Strongly typed durable content consumed by replay image resolution.
         """
         if part.type == "text":
-            return {"type": "text", "text": part.text}
+            return CaptureTextPart(text=part.text)
+
         file_url = part.file_url
-        return {
-            "type": part.type,
-            "file_url": {
-                "url": file_url.url if file_url is not None else "",
-                "detail": file_url.detail if file_url is not None else "",
-            },
-        }
+        stable_url = file_url.url if file_url is not None else ""
+        file_id = self._stable_file_id(stable_url)
+        if not file_id:
+            raise ValueError("Persisted file content must use an AgentBreaker stable reference.")
+        return CaptureFilePart(
+            file_id=file_id,
+            detail=file_url.detail if file_url is not None and file_url.detail else "auto",
+        )
 
     def _stable_file_id(self, url: str) -> str | None:
         """Extract a file ID only from an AgentBreaker-owned stable reference URL.
@@ -1028,7 +1030,7 @@ class RuntimeOrchestrator:
             Stable ID when the trusted prefix is present; otherwise ``None``.
         """
         prefix = "agentbreaker-file://"
-        return url[len(prefix):] if url.startswith(prefix) else None
+        return url[len(prefix) :] if url.startswith(prefix) else None
 
     def _file_preparation_error(self, files: list[PreparedConversationFile]) -> str:
         """Select the first actionable file failure for the SSE response.

@@ -64,12 +64,14 @@ async def publish_config(loader: NacosConfigLoader, content: str):
     if not loader.config_client:
         raise RuntimeError("Nacos client not initialized")
 
-    published = await loader.config_client.publish_config(ConfigParam(
-        data_id=loader.data_id,
-        group=loader.group,
-        content=content,
-        type="yaml",
-    ))
+    published = await loader.config_client.publish_config(
+        ConfigParam(
+            data_id=loader.data_id,
+            group=loader.group,
+            content=content,
+            type="yaml",
+        )
+    )
     if not published:
         raise RuntimeError(f"Failed to publish config to Nacos: data_id={loader.data_id}, group={loader.group}")
     print(f"Published config to Nacos: data_id={loader.data_id}, group={loader.group}")
@@ -110,14 +112,16 @@ async def test_config_priority(loader: NacosConfigLoader):
     print(f"Config from API: {config}")
 
     # Verify Nacos values override local defaults
-    assert config["lite_llm_base_url"] == "http://nacos-test-v1:5000", \
+    assert config["lite_llm_base_url"] == "http://nacos-test-v1:5000", (
         f"Expected Nacos value, got {config['lite_llm_base_url']}"
-    assert config["agent_config_center_url"] == "http://nacos-test-v1:9081", \
+    )
+    assert config["agent_config_center_url"] == "http://nacos-test-v1:9081", (
         f"Expected Nacos value, got {config['agent_config_center_url']}"
-    assert config["redis_host"] == "nacos-redis-v1", \
-        f"Expected Nacos value, got {config['redis_host']}"
-    assert config["agent_config_cache_ttl_seconds"] == 600, \
+    )
+    assert config["redis_host"] == "nacos-redis-v1", f"Expected Nacos value, got {config['redis_host']}"
+    assert config["agent_config_cache_ttl_seconds"] == 600, (
         f"Expected Nacos value, got {config['agent_config_cache_ttl_seconds']}"
+    )
 
     print("OK TEST 1 PASSED: Nacos config overrides local defaults")
 
@@ -141,14 +145,16 @@ async def test_dynamic_refresh(loader: NacosConfigLoader):
     print(f"Config from API: {config}")
 
     # Verify updated values
-    assert config["lite_llm_base_url"] == "http://nacos-test-v2:6000", \
+    assert config["lite_llm_base_url"] == "http://nacos-test-v2:6000", (
         f"Expected updated Nacos value, got {config['lite_llm_base_url']}"
-    assert config["agent_config_center_url"] == "http://nacos-test-v2:10081", \
+    )
+    assert config["agent_config_center_url"] == "http://nacos-test-v2:10081", (
         f"Expected updated Nacos value, got {config['agent_config_center_url']}"
-    assert config["redis_host"] == "nacos-redis-v2", \
-        f"Expected updated Nacos value, got {config['redis_host']}"
-    assert config["agent_config_cache_ttl_seconds"] == 900, \
+    )
+    assert config["redis_host"] == "nacos-redis-v2", f"Expected updated Nacos value, got {config['redis_host']}"
+    assert config["agent_config_cache_ttl_seconds"] == 900, (
         f"Expected updated Nacos value, got {config['agent_config_cache_ttl_seconds']}"
+    )
 
     print("OK TEST 2 PASSED: Dynamic refresh works correctly")
 
@@ -157,10 +163,12 @@ async def cleanup(loader: NacosConfigLoader):
     """Remove test config from Nacos."""
     print("\n=== CLEANUP ===")
     if loader.config_client:
-        await loader.config_client.remove_config(ConfigParam(
-            data_id=loader.data_id,
-            group=loader.group,
-        ))
+        await loader.config_client.remove_config(
+            ConfigParam(
+                data_id=loader.data_id,
+                group=loader.group,
+            )
+        )
         print("Removed test config from Nacos")
     await loader.close()
 

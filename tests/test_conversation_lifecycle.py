@@ -18,7 +18,7 @@ from agent_runner.agent_definitions.config_models import AgentDefinition, Memory
 from agent_runner.api import routes
 from agent_runner.api.streaming import StreamEventType
 from agent_runner.config import AgentConfig, ChatRequest
-from agent_runner.context.builder import AgentContext, Message
+from agent_runner.context.builder import AgentContext
 from agent_runner.conversation import ConversationBusyError
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
@@ -100,7 +100,7 @@ class CapturingContextBuilder:
             conversation_history=self.history,
             user_profile={},
             rag_chunks=[],
-            current_message=Message(role="user", content=kwargs["current_message"]),
+            current_message=kwargs["current_message"],
             tool_specs=[],
         )
 
@@ -151,9 +151,12 @@ class FakeCancellationManager:
 async def test_second_round_uses_replay_and_persists_full_snapshot():
     orchestrator, client, context_builder = _orchestrator(SuccessRuntime())
 
-    events = [event async for event in orchestrator.run(
-        ChatRequest(conversation_id="conv_multi", message="What is my name?"), 1, FakeRequest()
-    )]
+    events = [
+        event
+        async for event in orchestrator.run(
+            ChatRequest(conversation_id="conv_multi", message="What is my name?"), 1, FakeRequest()
+        )
+    ]
 
     assert events[-1].type == StreamEventType.DONE
     assert [(message.role, message.content) for message in context_builder.history] == [
@@ -174,9 +177,12 @@ async def test_second_round_uses_replay_and_persists_full_snapshot():
 async def test_model_failure_is_persisted_as_new_failed_round():
     orchestrator, client, _ = _orchestrator(FailureRuntime())
 
-    events = [event async for event in orchestrator.run(
-        ChatRequest(conversation_id="conv_multi", message="Try this"), 1, FakeRequest()
-    )]
+    events = [
+        event
+        async for event in orchestrator.run(
+            ChatRequest(conversation_id="conv_multi", message="Try this"), 1, FakeRequest()
+        )
+    ]
 
     assert events[-1].type == StreamEventType.ERROR
     saved = client.saved_requests[0]
@@ -189,9 +195,12 @@ async def test_model_failure_is_persisted_as_new_failed_round():
 async def test_disconnect_is_persisted_as_cancelled_round():
     orchestrator, client, _ = _orchestrator(SuccessRuntime())
 
-    events = [event async for event in orchestrator.run(
-        ChatRequest(conversation_id="conv_multi", message="Stop this"), 1, DisconnectedRequest()
-    )]
+    events = [
+        event
+        async for event in orchestrator.run(
+            ChatRequest(conversation_id="conv_multi", message="Stop this"), 1, DisconnectedRequest()
+        )
+    ]
 
     assert events == []
     saved = client.saved_requests[0]
@@ -211,9 +220,7 @@ async def test_busy_conversation_returns_http_409_before_stream(monkeypatch):
     monkeypatch.setattr(routes, "RuntimeOrchestrator", BusyOrchestrator)
 
     with pytest.raises(HTTPException) as raised:
-        await routes.chat_stream(
-            FakeRequest(), ChatRequest(conversation_id="conv_busy", message="hello"), "1"
-        )
+        await routes.chat_stream(FakeRequest(), ChatRequest(conversation_id="conv_busy", message="hello"), "1")
 
     assert raised.value.status_code == 409
     assert raised.value.detail["code"] == "CONVERSATION_BUSY"

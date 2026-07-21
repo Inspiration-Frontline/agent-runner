@@ -181,9 +181,7 @@ class AgentConfigLoader:
                 "max_output_tokens": config.max_output_tokens,
                 "temperature": config.temperature,
             }
-            await self.redis_client.setex(
-                cache_key, self.cache_ttl_seconds, json.dumps(config_data)
-            )
+            await self.redis_client.setex(cache_key, self.cache_ttl_seconds, json.dumps(config_data))
         except Exception as e:
             logger.warning(f"Failed to set config in Redis cache: {e}")
 

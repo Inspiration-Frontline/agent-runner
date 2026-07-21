@@ -5,7 +5,9 @@ from agent_runner.context.builder import ContextBuilder
 
 
 def test_context_builder_reads_current_context_budget(monkeypatch):
-    monkeypatch.setattr("agent_runner.context.builder.get_settings", lambda: type("S", (), {"max_context_tokens": 2048})())
+    monkeypatch.setattr(
+        "agent_runner.context.builder.get_settings", lambda: type("S", (), {"max_context_tokens": 2048})()
+    )
 
     builder = ContextBuilder()
 

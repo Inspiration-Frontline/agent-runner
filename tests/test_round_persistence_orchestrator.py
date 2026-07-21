@@ -10,7 +10,7 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
 from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from agent_runner.api.streaming import StreamEvent, StreamEventType
 from agent_runner.config import AgentConfig, ChatRequest
-from agent_runner.context.builder import AgentContext, Message
+from agent_runner.context.builder import AgentContext
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -75,7 +75,7 @@ class FakeContextBuilder:
             conversation_history=[],
             user_profile={},
             rag_chunks=[],
-            current_message=Message(role="user", content=kwargs["current_message"]),
+            current_message=kwargs["current_message"],
             tool_specs=[],
         )
 
@@ -123,9 +123,12 @@ class FakeCancellationManager:
 async def test_success_reports_done_only_after_persistence():
     orchestrator, client, lock = _orchestrator(save_success=True)
 
-    events = [event async for event in orchestrator.run(
-        ChatRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
-    )]
+    events = [
+        event
+        async for event in orchestrator.run(
+            ChatRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
+        )
+    ]
 
     assert [event.type for event in events] == [
         StreamEventType.TOKEN_DELTA,
@@ -144,9 +147,12 @@ async def test_success_reports_done_only_after_persistence():
 async def test_persistence_failure_never_reports_persisted_or_done():
     orchestrator, _, lock = _orchestrator(save_success=False)
 
-    events: list[StreamEvent] = [event async for event in orchestrator.run(
-        ChatRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
-    )]
+    events: list[StreamEvent] = [
+        event
+        async for event in orchestrator.run(
+            ChatRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
+        )
+    ]
 
     assert events[-2].type == StreamEventType.SAVING
     assert events[-1].type == StreamEventType.ERROR

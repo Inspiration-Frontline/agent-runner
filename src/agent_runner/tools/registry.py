@@ -183,13 +183,15 @@ class ToolRegistry:
         for tool_key in tool_keys:
             tool = self.get(tool_key)
             if tool:
-                specs.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.tool_name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                        "strict": tool.strict,
-                    },
-                })
+                specs.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.tool_name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                            "strict": tool.strict,
+                        },
+                    }
+                )
         return specs
