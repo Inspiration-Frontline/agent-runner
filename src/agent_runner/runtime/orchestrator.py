@@ -65,8 +65,9 @@ from agent_runner.api.streaming import (
     ToolStartEvent,
     UsageEvent,
 )
-from agent_runner.config import ChatRequest, get_settings
+from agent_runner.config import AgentConfig, ChatRequest, get_settings
 from agent_runner.context.builder import (
+    AgentContext,
     CaptureContentPart,
     CaptureFilePart,
     CaptureTextPart,
@@ -83,7 +84,11 @@ from agent_runner.conversation import (
     ConversationExecutionLock,
     ConversationManagerClient,
 )
-from agent_runner.runtime.cancellation import CancellationManager, conversation_cancellation_registry
+from agent_runner.runtime.cancellation import (
+    CancellationManager,
+    CancellationToken,
+    conversation_cancellation_registry,
+)
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.runtime.tool_loop import AgentRunCapture, CapturedModelTurn
 from agent_runner.tools.internal.catalog import build_internal_tool_registry
@@ -114,6 +119,40 @@ class AttachmentInput:
             model_content=self.model_content,
             capture_content=self.capture_content,
         )
+
+
+@dataclass(frozen=True)
+class ConversationPreflight:
+    """Authorized Round number and replay context loaded before request preparation."""
+
+    next_round_number: int
+    conversation_history: tuple[Message, ...]
+
+
+@dataclass(frozen=True)
+class FilePreparationComplete:
+    """Terminal result emitted by the attachment preparation phase."""
+
+    files: tuple[PreparedConversationFile, ...]
+
+
+@dataclass(frozen=True)
+class ModelStreamComplete:
+    """Captured terminal model state returned after all public stream events."""
+
+    response_text: str
+    capture: AgentRunCapture
+    call_end: int
+    terminal_status: RoundStatus | None = None
+    terminal_error: str = ""
+
+
+class FilePreparationError(RuntimeError):
+    """Typed attachment preparation failure with a stable public error code."""
+
+    def __init__(self, message: str, error_code: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
 
 
 class RuntimeOrchestrator:
@@ -215,275 +254,123 @@ class RuntimeOrchestrator:
                 await self.acquire_conversation(chat_request.conversation_id)
             conversation_cancellation_registry.register(user_id, chat_request.conversation_id, cancellation_token)
 
-            history = await self.conversation_client.get_round_history(user_id, chat_request.conversation_id)
-            if history.base is None or not history.base.success:
-                message = history.base.message if history.base is not None else "Conversation history RPC failed."
-                yield ErrorEvent(message, error_code="CONVERSATION_ACCESS_DENIED", phase="preflight")
+            preflight, preflight_error = await self._load_conversation_preflight(chat_request, user_id)
+            if preflight_error is not None:
+                yield preflight_error
                 return
-            if history.data is None:
-                yield ErrorEvent(
-                    "Conversation history RPC returned no data.",
-                    error_code="INVALID_HISTORY_RESPONSE",
-                    phase="preflight",
-                )
-                return
-            next_round_number = history.data.latest_round_number + 1
-            user_request_validated = True
 
-            conversation_history: list[Message] = []
-            if history.data.latest_round_number > 0:
-                replay = await self.conversation_client.get_model_context(
-                    user_id, chat_request.conversation_id, history.data.latest_round_number
-                )
-                if replay.base is None or not replay.base.success:
-                    message = replay.base.message if replay.base is not None else "Conversation replay RPC failed."
-                    yield ErrorEvent(message, error_code="REPLAY_FAILED", phase="preflight")
-                    return
-                if replay.data is None:
-                    yield ErrorEvent(
-                        "Conversation replay RPC returned no data.",
-                        error_code="INVALID_REPLAY_RESPONSE",
-                        phase="preflight",
-                    )
-                    return
-                conversation_history = self._to_context_messages(replay.data.context_messages)
+            if preflight is None:
+                raise RuntimeError("Conversation preflight completed without a result.")
+
+            next_round_number = preflight.next_round_number
+            user_request_validated = True
+            conversation_history = list(preflight.conversation_history)
 
             if chat_request.references:
-                reference_response = await self.conversation_client.prepare_references(
-                    user_id,
-                    chat_request.conversation_id,
-                    self._to_proto_references(chat_request),
+                reference_context, reference_error = await self._prepare_reference_context(
+                    chat_request, user_id
                 )
-                if (reference_response.base is None
-                    or not reference_response.base.success
-                    or reference_response.data is None):
-                    message = (reference_response.base.message
-                               if reference_response.base is not None
-                               else "Conversation reference preparation failed.")
+                if reference_error is not None:
                     await self._persist_terminal_round(
                         user_id,
                         chat_request.model_copy(update={"references": []}),
                         next_round_number,
                         round_start,
                         RoundStatus.FAILED,
-                        message,
+                        reference_error.error_message or "Conversation reference preparation failed.",
                         agent=None,
                         capture=AgentRunCapture(),
                     )
-                    yield ErrorEvent(
-                        message,
-                        error_code="CONVERSATION_REFERENCE_FAILED",
-                        phase="reference_preparation",
-                    )
+                    yield reference_error
                     return
-                conversation_history.extend(
-                    self._build_reference_context(list(reference_response.data.references))
-                )
 
-            settings = get_settings()
+                conversation_history.extend(reference_context)
+
             prepared_files: list[PreparedConversationFile] = []
             if chat_request.file_ids:
-                # File IDs are a frozen selection, not downloadable content. Conversation Manager
-                # re-authorizes them in one RPC, reserves them for this request, and reports durable
-                # processing state. The Agent is deliberately not invoked until all files are READY.
-                preparation_started = monotonic()
-                processing_event_emitted = False
-                while True:
-                    if await http_request.is_disconnected() or cancellation_token.is_cancelled():
-                        cancellation_token.cancel()
-                        raise asyncio.CancelledError("Attachment preparation cancelled.")
-                    prepared = await self.conversation_client.prepare_files(
+                try:
+                    async for preparation_result in self._prepare_files(
+                        chat_request,
                         user_id,
-                        chat_request.conversation_id,
                         attachment_request_id,
-                        chat_request.file_ids,
+                        http_request,
+                        cancellation_token,
+                    ):
+                        if isinstance(preparation_result, FilePreparationComplete):
+                            prepared_files = list(preparation_result.files)
+                        else:
+                            yield preparation_result
+                except FilePreparationError as error:
+                    await self._persist_terminal_round(
+                        user_id,
+                        chat_request,
+                        next_round_number,
+                        round_start,
+                        RoundStatus.FAILED,
+                        str(error),
+                        agent=agent,
+                        capture=AgentRunCapture(),
                     )
-                    if prepared.base is None or not prepared.base.success or prepared.data is None:
-                        message = prepared.base.message if prepared.base is not None else "File preparation RPC failed."
-                        await self._persist_terminal_round(
-                            user_id,
-                            chat_request,
-                            next_round_number,
-                            round_start,
-                            RoundStatus.FAILED,
-                            message,
-                            agent=agent,
-                            capture=AgentRunCapture(),
-                        )
-                        yield ErrorEvent(message, error_code="FILE_PREPARATION_FAILED", phase="attachment_preparation")
-                        return
-                    prepared_files = list(prepared.data.files)
-                    if prepared.data.any_failed:
-                        message = self._file_preparation_error(prepared_files)
-                        await self._persist_terminal_round(
-                            user_id,
-                            chat_request,
-                            next_round_number,
-                            round_start,
-                            RoundStatus.FAILED,
-                            message,
-                            agent=agent,
-                            capture=AgentRunCapture(),
-                        )
-                        yield ErrorEvent(message, error_code="FILE_PREPARATION_FAILED", phase="attachment_preparation")
-                        return
-                    if prepared.data.all_ready:
-                        break
-                    elapsed = monotonic() - preparation_started
-                    if elapsed >= settings.file_preparation_timeout_seconds:
-                        message = "File preparation timed out. The files may still finish processing; retry the request later."
-                        await self._persist_terminal_round(
-                            user_id,
-                            chat_request,
-                            next_round_number,
-                            round_start,
-                            RoundStatus.FAILED,
-                            message,
-                            agent=agent,
-                            capture=AgentRunCapture(),
-                        )
-                        yield ErrorEvent(message, error_code="FILE_PREPARATION_TIMEOUT", phase="attachment_preparation")
-                        return
-                    if not processing_event_emitted:
-                        pending_files = sum(file.status != ConversationFileStatus.READY for file in prepared_files)
-                        yield AttachmentProcessingEvent(pending_files)
-                        processing_event_emitted = True
-                    await asyncio.sleep(self._file_poll_delay(elapsed))
+                    yield ErrorEvent(
+                        str(error),
+                        error_code=error.error_code,
+                        phase="attachment_preparation",
+                    )
+                    return
 
-            await self._resolve_replay_images(
-                conversation_history,
+            agent_config, context, context_error = await self._build_agent_context(
+                chat_request,
                 user_id,
-                chat_request.conversation_id,
+                prepared_files,
+                conversation_history,
                 attachment_request_id,
             )
-            attachment_input = self._build_attachment_input(chat_request, prepared_files)
-            agent_config = await self.config_loader.load(settings.default_agent_id)
-
-            context = await self.context_builder.build(
-                agent_config=agent_config,
-                conversation_id=chat_request.conversation_id,
-                user_id=user_id,
-                current_message=attachment_input.to_message(),
-                conversation_history=conversation_history,
-                additional_system_instruction=attachment_input.additional_instruction,
-            )
-
-            context_text = "\n".join([
-                context.system_prompt,
-                *[message.content for message in context.conversation_history],
-                context.current_message.content,
-            ])
-            maximum_input_tokens = max(1, settings.max_context_tokens - settings.max_output_tokens)
-            estimated_input_tokens = len(context_text) // 4
-            if estimated_input_tokens > maximum_input_tokens:
-                message = (
-                    "The selected Conversation history exceeds the model context window. "
-                    "Select fewer Conversations and try again."
-                )
+            if context_error is not None:
                 await self._persist_terminal_round(
                     user_id,
                     chat_request,
                     next_round_number,
                     round_start,
                     RoundStatus.FAILED,
-                    message,
+                    context_error.error_message or "Context preparation failed.",
                     agent=None,
                     capture=AgentRunCapture(),
                 )
-                yield ErrorEvent(
-                    message,
-                    error_code="CONVERSATION_REFERENCE_CONTEXT_TOO_LARGE",
-                    phase="reference_preparation",
-                )
+                yield context_error
                 return
+            if agent_config is None or context is None:
+                raise RuntimeError("Context preparation completed without a result.")
 
             agent = await self.agent_factory.create(agent_config)
-            response_text = ""
-            usage: UsageEvent | None = None
-            call_start = _epoch_millis()
-            if isinstance(self.openai_runtime, OpenAIAgentsRuntime):
-                runtime_stream = self.openai_runtime.run_streamed(
-                    agent, context, cancellation_token, getattr(self, "tool_registry", None)
-                )
-            else:
-                runtime_stream = self.openai_runtime.run_streamed(agent, context, cancellation_token)
-            terminal_status: RoundStatus | None = None
-            terminal_error = ""
-            async for event in runtime_stream:
-                if await http_request.is_disconnected():
-                    logger.info("Client disconnected, cancelling request")
-                    cancellation_token.cancel()
-                    terminal_status = RoundStatus.CANCELLED
-                    terminal_error = "Generation cancelled."
-                    break
+            model_result: ModelStreamComplete | None = None
+            async for model_event in self._stream_model(
+                agent,
+                context,
+                conversation_history,
+                http_request,
+                cancellation_token,
+            ):
+                if isinstance(model_event, ModelStreamComplete):
+                    model_result = model_event
+                else:
+                    yield model_event
 
-                if cancellation_token.is_cancelled():
-                    terminal_status = RoundStatus.CANCELLED
-                    terminal_error = "Generation cancelled."
-                    break
+            if model_result is None:
+                raise RuntimeError("Model stream completed without a terminal result.")
 
-                converted = self._convert_event(event)
-                if isinstance(converted, ErrorEvent):
-                    terminal_status = RoundStatus.FAILED
-                    terminal_error = converted.error_message or "Model execution failed."
-                    yield converted
-                    break
-                if isinstance(converted, TokenDeltaEvent):
-                    response_text += converted.content or ""
-                elif isinstance(converted, UsageEvent):
-                    usage = converted
-                yield converted
-
-                if await http_request.is_disconnected():
-                    cancellation_token.cancel()
-
-            await runtime_stream.aclose()
-
-            capture = getattr(self.openai_runtime, "last_capture", AgentRunCapture())
-            disconnected = await http_request.is_disconnected()
-            if terminal_status is not None or cancellation_token.is_cancelled() or disconnected:
-                terminal_status = terminal_status or RoundStatus.CANCELLED
-                terminal_error = terminal_error or "Generation cancelled."
+            if model_result.terminal_status is not None:
                 await self._persist_terminal_round(
                     user_id,
                     chat_request,
                     next_round_number,
                     round_start,
-                    terminal_status,
-                    terminal_error,
+                    model_result.terminal_status,
+                    model_result.terminal_error,
                     agent=agent,
-                    capture=capture,
+                    capture=model_result.capture,
                 )
                 return
-            if not capture.turns and terminal_status is None:
-                legacy_end = _epoch_millis()
-                capture = AgentRunCapture(
-                    turns=[
-                        CapturedModelTurn(
-                            request_messages=[{"role": "system", "content": context.system_prompt}]
-                            + [message_to_capture_dict(message) for message in conversation_history]
-                            + [message_to_capture_dict(context.current_message)],
-                            message_storage_mode="FULL_SNAPSHOT",
-                            tools=[],
-                            response_content=response_text,
-                            response_tool_calls=[],
-                            tool_executions=[],
-                            request_id=str(uuid4()),
-                            trace_id=str(uuid4()),
-                            start_time=call_start,
-                            llm_end_time=legacy_end,
-                            end_time=legacy_end,
-                            prompt_tokens=usage.prompt_tokens if usage else 0,
-                            completion_tokens=usage.completion_tokens if usage else 0,
-                            total_tokens=usage.total_tokens if usage else 0,
-                            raw_request="",
-                            raw_response="",
-                        )
-                    ],
-                    final_output=response_text,
-                )
-            call_end = capture.turns[-1].end_time if capture.turns else _epoch_millis()
-            if not response_text.strip():
+            if not model_result.response_text.strip():
                 await self._persist_terminal_round(
                     user_id,
                     chat_request,
@@ -492,7 +379,7 @@ class RuntimeOrchestrator:
                     RoundStatus.FAILED,
                     "The model returned an empty response.",
                     agent=agent,
-                    capture=capture,
+                    capture=model_result.capture,
                 )
                 yield ErrorEvent(
                     "The model returned an empty response.",
@@ -505,11 +392,11 @@ class RuntimeOrchestrator:
                 user_id=user_id,
                 conversation_id=chat_request.conversation_id,
                 chat_request=chat_request,
-                response_text=response_text,
+                response_text=model_result.response_text,
                 agent=agent,
-                capture=capture,
+                capture=model_result.capture,
                 round_start=round_start,
-                call_end=call_end,
+                call_end=model_result.call_end,
                 round_number=next_round_number,
             )
             yield SavingEvent()
@@ -580,6 +467,277 @@ class RuntimeOrchestrator:
             if getattr(self, "_lock_acquired", False):
                 await self.execution_lock.release()
                 self._lock_acquired = False
+
+    async def _stream_model(
+        self,
+        agent,
+        context: AgentContext,
+        conversation_history: list[Message],
+        http_request: Request,
+        cancellation_token: CancellationToken,
+    ) -> AsyncGenerator[StreamEvent | ModelStreamComplete]:
+        """Stream public model events while retaining one typed terminal capture."""
+        response_text = ""
+        usage: UsageEvent | None = None
+        call_start = _epoch_millis()
+        terminal_status: RoundStatus | None = None
+        terminal_error = ""
+
+        if isinstance(self.openai_runtime, OpenAIAgentsRuntime):
+            runtime_stream = self.openai_runtime.run_streamed(
+                agent,
+                context,
+                cancellation_token,
+                getattr(self, "tool_registry", None),
+            )
+        else:
+            runtime_stream = self.openai_runtime.run_streamed(agent, context, cancellation_token)
+
+        try:
+            async for event in runtime_stream:
+                if await http_request.is_disconnected():
+                    logger.info("Client disconnected, cancelling request")
+                    cancellation_token.cancel()
+                    terminal_status = RoundStatus.CANCELLED
+                    terminal_error = "Generation cancelled."
+                    break
+                if cancellation_token.is_cancelled():
+                    terminal_status = RoundStatus.CANCELLED
+                    terminal_error = "Generation cancelled."
+                    break
+
+                converted = self._convert_event(event)
+                if isinstance(converted, ErrorEvent):
+                    terminal_status = RoundStatus.FAILED
+                    terminal_error = converted.error_message or "Model execution failed."
+                    yield converted
+                    break
+                if isinstance(converted, TokenDeltaEvent):
+                    response_text += converted.content or ""
+                elif isinstance(converted, UsageEvent):
+                    usage = converted
+
+                yield converted
+
+                if await http_request.is_disconnected():
+                    cancellation_token.cancel()
+        finally:
+            await runtime_stream.aclose()
+
+        capture = getattr(self.openai_runtime, "last_capture", AgentRunCapture())
+        disconnected = await http_request.is_disconnected()
+        if terminal_status is not None or cancellation_token.is_cancelled() or disconnected:
+            yield ModelStreamComplete(
+                response_text=response_text,
+                capture=capture,
+                call_end=capture.turns[-1].end_time if capture.turns else _epoch_millis(),
+                terminal_status=terminal_status or RoundStatus.CANCELLED,
+                terminal_error=terminal_error or "Generation cancelled.",
+            )
+            return
+
+        if not capture.turns:
+            legacy_end = _epoch_millis()
+            capture = AgentRunCapture(
+                turns=[
+                    CapturedModelTurn(
+                        request_messages=[{"role": "system", "content": context.system_prompt}]
+                        + [message_to_capture_dict(message) for message in conversation_history]
+                        + [message_to_capture_dict(context.current_message)],
+                        message_storage_mode="FULL_SNAPSHOT",
+                        tools=[],
+                        response_content=response_text,
+                        response_tool_calls=[],
+                        tool_executions=[],
+                        request_id=str(uuid4()),
+                        trace_id=str(uuid4()),
+                        start_time=call_start,
+                        llm_end_time=legacy_end,
+                        end_time=legacy_end,
+                        prompt_tokens=usage.prompt_tokens or 0 if usage else 0,
+                        completion_tokens=usage.completion_tokens or 0 if usage else 0,
+                        total_tokens=usage.total_tokens or 0 if usage else 0,
+                        raw_request="",
+                        raw_response="",
+                    )
+                ],
+                final_output=response_text,
+            )
+
+        yield ModelStreamComplete(
+            response_text=response_text,
+            capture=capture,
+            call_end=capture.turns[-1].end_time if capture.turns else _epoch_millis(),
+        )
+
+    async def _prepare_files(
+        self,
+        chat_request: ChatRequest,
+        user_id: int,
+        attachment_request_id: str,
+        http_request: Request,
+        cancellation_token: CancellationToken,
+    ) -> AsyncGenerator[AttachmentProcessingEvent | FilePreparationComplete]:
+        """Poll one frozen file selection until it is ready, failed, timed out, or cancelled."""
+        settings = get_settings()
+        preparation_started = monotonic()
+        processing_event_emitted = False
+
+        while True:
+            if await http_request.is_disconnected() or cancellation_token.is_cancelled():
+                cancellation_token.cancel()
+                raise asyncio.CancelledError("Attachment preparation cancelled.")
+
+            prepared = await self.conversation_client.prepare_files(
+                user_id,
+                chat_request.conversation_id,
+                attachment_request_id,
+                chat_request.file_ids,
+            )
+            if prepared.base is None or not prepared.base.success or prepared.data is None:
+                message = prepared.base.message if prepared.base is not None else "File preparation RPC failed."
+                raise FilePreparationError(message, "FILE_PREPARATION_FAILED")
+
+            prepared_files = list(prepared.data.files)
+            if prepared.data.any_failed:
+                raise FilePreparationError(
+                    self._file_preparation_error(prepared_files),
+                    "FILE_PREPARATION_FAILED",
+                )
+            if prepared.data.all_ready:
+                yield FilePreparationComplete(tuple(prepared_files))
+                return
+
+            elapsed = monotonic() - preparation_started
+            if elapsed >= settings.file_preparation_timeout_seconds:
+                raise FilePreparationError(
+                    "File preparation timed out. The files may still finish processing; retry the request later.",
+                    "FILE_PREPARATION_TIMEOUT",
+                )
+            if not processing_event_emitted:
+                pending_files = sum(
+                    file.status != ConversationFileStatus.READY for file in prepared_files
+                )
+                yield AttachmentProcessingEvent(pending_files)
+                processing_event_emitted = True
+
+            await asyncio.sleep(self._file_poll_delay(elapsed))
+
+    async def _build_agent_context(
+        self,
+        chat_request: ChatRequest,
+        user_id: int,
+        prepared_files: list[PreparedConversationFile],
+        conversation_history: list[Message],
+        attachment_request_id: str,
+    ) -> tuple[AgentConfig | None, AgentContext | None, ErrorEvent | None]:
+        """Build the bounded provider-neutral context after files and references are ready."""
+        await self._resolve_replay_images(
+            conversation_history,
+            user_id,
+            chat_request.conversation_id,
+            attachment_request_id,
+        )
+        settings = get_settings()
+        attachment_input = self._build_attachment_input(chat_request, prepared_files)
+        agent_config = await self.config_loader.load(settings.default_agent_id)
+
+        context = await self.context_builder.build(
+            agent_config=agent_config,
+            conversation_id=chat_request.conversation_id,
+            user_id=user_id,
+            current_message=attachment_input.to_message(),
+            conversation_history=conversation_history,
+            additional_system_instruction=attachment_input.additional_instruction,
+        )
+
+        context_text = "\n".join([
+            context.system_prompt,
+            *[message.content for message in context.conversation_history],
+            context.current_message.content,
+        ])
+        maximum_input_tokens = max(1, settings.max_context_tokens - settings.max_output_tokens)
+        estimated_input_tokens = len(context_text) // 4
+        if estimated_input_tokens > maximum_input_tokens:
+            return None, None, ErrorEvent(
+                "The selected Conversation history exceeds the model context window. "
+                "Select fewer Conversations and try again.",
+                error_code="CONVERSATION_REFERENCE_CONTEXT_TOO_LARGE",
+                phase="reference_preparation",
+            )
+
+        return agent_config, context, None
+
+    async def _load_conversation_preflight(
+        self,
+        chat_request: ChatRequest,
+        user_id: int,
+    ) -> tuple[ConversationPreflight | None, ErrorEvent | None]:
+        """Authorize the destination and load its provider-neutral replay context."""
+        history = await self.conversation_client.get_round_history(
+            user_id, chat_request.conversation_id
+        )
+        if history.base is None or not history.base.success:
+            message = history.base.message if history.base is not None else "Conversation history RPC failed."
+            return None, ErrorEvent(
+                message,
+                error_code="CONVERSATION_ACCESS_DENIED",
+                phase="preflight",
+            )
+        if history.data is None:
+            return None, ErrorEvent(
+                "Conversation history RPC returned no data.",
+                error_code="INVALID_HISTORY_RESPONSE",
+                phase="preflight",
+            )
+
+        conversation_history: list[Message] = []
+        if history.data.latest_round_number > 0:
+            replay = await self.conversation_client.get_model_context(
+                user_id,
+                chat_request.conversation_id,
+                history.data.latest_round_number,
+            )
+            if replay.base is None or not replay.base.success:
+                message = replay.base.message if replay.base is not None else "Conversation replay RPC failed."
+                return None, ErrorEvent(message, error_code="REPLAY_FAILED", phase="preflight")
+            if replay.data is None:
+                return None, ErrorEvent(
+                    "Conversation replay RPC returned no data.",
+                    error_code="INVALID_REPLAY_RESPONSE",
+                    phase="preflight",
+                )
+            conversation_history = self._to_context_messages(replay.data.context_messages)
+
+        return ConversationPreflight(
+            next_round_number=history.data.latest_round_number + 1,
+            conversation_history=tuple(conversation_history),
+        ), None
+
+    async def _prepare_reference_context(
+        self,
+        chat_request: ChatRequest,
+        user_id: int,
+    ) -> tuple[list[Message], ErrorEvent | None]:
+        """Authorize frozen references and convert them into labelled untrusted evidence."""
+        response = await self.conversation_client.prepare_references(
+            user_id,
+            chat_request.conversation_id,
+            self._to_proto_references(chat_request),
+        )
+        if response.base is None or not response.base.success:
+            message = (
+                response.base.message
+                if response.base is not None
+                else "Conversation reference preparation failed."
+            )
+            return [], ErrorEvent(
+                message,
+                error_code="CONVERSATION_REFERENCE_FAILED",
+                phase="reference_preparation",
+            )
+
+        return self._build_reference_context(list(response.data)), None
 
     def _build_save_request(
         self,

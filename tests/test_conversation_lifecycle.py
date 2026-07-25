@@ -11,7 +11,6 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     LlmConversationMessage,
     MessageRole,
     PrepareConversationReferencesResponse,
-    PrepareConversationReferencesResult,
     PreparedConversationReference,
     RoundStatus,
     SaveConversationRoundResponse,
@@ -86,18 +85,16 @@ class FakeConversationClient:
         ]
         return PrepareConversationReferencesResponse(
             base=ResponseBase(code=0, success=True),
-            data=PrepareConversationReferencesResult(
-                references=[
-                    PreparedConversationReference(
-                        reference=references[0],
-                        source_title="Source notes",
-                        context_messages=[
-                            LlmConversationMessage(role=MessageRole.USER, content="Source question"),
-                            LlmConversationMessage(role=MessageRole.ASSISTANT, content="Source answer"),
-                        ],
-                    )
-                ]
-            ),
+            data=[
+                PreparedConversationReference(
+                    reference=references[0],
+                    source_title="Source notes",
+                    context_messages=[
+                        LlmConversationMessage(role=MessageRole.USER, content="Source question"),
+                        LlmConversationMessage(role=MessageRole.ASSISTANT, content="Source answer"),
+                    ],
+                )
+            ],
         )
 
 
