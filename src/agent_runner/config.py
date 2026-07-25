@@ -301,6 +301,15 @@ class MemoryPolicy(BaseModel):
     rag: bool = True
 
 
+class ConversationReferenceRequest(BaseModel):
+    """Frozen source Conversation boundary selected by the browser."""
+
+    model_config = {"extra": "forbid"}
+
+    source_conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
+    source_end_round_number: int = Field(gt=0)
+
+
 class ChatRequest(BaseModel):
     """
     Chat request model for agent interactions.
@@ -324,6 +333,7 @@ class ChatRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
     message: str = Field(default="", max_length=100_000)
     file_ids: list[str] = Field(default_factory=list, max_length=5)
+    references: list[ConversationReferenceRequest] = Field(default_factory=list, max_length=10)
     ui_locale: Literal["zh-CN", "en-US"] = "zh-CN"
 
     @field_validator("message")
@@ -343,11 +353,24 @@ class ChatRequest(BaseModel):
             raise ValueError("file_ids must be unique")
         return normalized
 
+    @field_validator("references")
+    @classmethod
+    def validate_references(
+        cls, value: list[ConversationReferenceRequest]
+    ) -> list[ConversationReferenceRequest]:
+        """Reject duplicate source Conversations before any downstream RPC."""
+        source_ids = [reference.source_conversation_id for reference in value]
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError("referenced Conversations must be unique")
+        return value
+
     @model_validator(mode="after")
     def require_message_or_files(self) -> "ChatRequest":
         """Require visible text unless the request contains at least one attachment."""
         if not self.message and not self.file_ids:
             raise ValueError("message or file_ids is required")
+        if any(reference.source_conversation_id == self.conversation_id for reference in self.references):
+            raise ValueError("a Conversation cannot reference itself")
         return self
 
 

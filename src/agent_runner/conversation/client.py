@@ -7,6 +7,8 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     GetConversationRoundHistoryResponse,
     PrepareConversationFilesRequest,
     PrepareConversationFilesResponse,
+    PrepareConversationReferencesRequest,
+    PrepareConversationReferencesResponse,
     ReplayDetailLevel,
     SaveConversationRoundRequest,
     SaveConversationRoundResponse,
@@ -113,6 +115,22 @@ class ConversationManagerClient:
                 end_round_number=end_round_number,
                 detail_level=ReplayDetailLevel.MODEL_CONTEXT,
             )
+        )
+
+    async def prepare_references(
+        self,
+        user_id: int,
+        destination_conversation_id: str,
+        references,
+    ) -> PrepareConversationReferencesResponse:
+        """Authorize and resolve frozen same-Group Conversation evidence in one RPC."""
+        return await self._service.prepare_conversation_references(
+            PrepareConversationReferencesRequest(
+                user_id=user_id,
+                destination_conversation_id=destination_conversation_id,
+                references=references,
+            ),
+            timeout=10.0,
         )
 
     async def close(self) -> None:
