@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -10,6 +12,24 @@ from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ToolCallRequest:
+    """Typed batch Tool request used by non-SDK callers."""
+
+    tool_key: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ToolExecutionResult:
+    """Typed per-call batch outcome; the Tool result remains provider-defined data."""
+
+    tool_key: str
+    status: str
+    result: object = None
+    error: str = ""
 
 
 class ToolExecutor:
@@ -100,39 +120,32 @@ class ToolExecutor:
 
     async def execute_batch(
         self,
-        tool_calls: list[dict[str, Any]],
+        tool_calls: Sequence[ToolCallRequest | Mapping[str, object]],
         cancellation_token: CancellationToken | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[ToolExecutionResult]:
         """
         Execute multiple tool calls in batch.
 
         Args:
-            tool_calls: List of tool call specifications.
+            tool_calls: Typed requests. Mapping values are accepted only as a compatibility ingress
+                for older callers and are normalized immediately.
             cancellation_token: Optional token for batch cancellation.
 
         Returns:
-            list[dict[str, Any]]: List of execution results with status.
+            list[ToolExecutionResult]: Results in model-emitted order.
         """
 
-        async def execute_call(call: dict[str, Any]) -> dict[str, Any]:
-            """Execute one batch item and convert exceptions into an item-level error result."""
-            tool_key = call.get("tool_key") or call.get("name")
-            arguments = call.get("arguments", {})
-            try:
-                result = await self.execute(tool_key, arguments, cancellation_token)
-                return {
-                    "tool_key": tool_key,
-                    "status": "success",
-                    "result": result,
-                }
-            except Exception as e:
-                return {
-                    "tool_key": tool_key,
-                    "status": "error",
-                    "error": str(e),
-                }
+        requests = [self._normalize_batch_request(call) for call in tool_calls]
 
-        tasks = [asyncio.create_task(execute_call(call)) for call in tool_calls]
+        async def execute_call(call: ToolCallRequest) -> ToolExecutionResult:
+            """Execute one batch item and convert exceptions into an item-level error result."""
+            try:
+                result = await self.execute(call.tool_key, call.arguments, cancellation_token)
+                return ToolExecutionResult(tool_key=call.tool_key, status="success", result=result)
+            except Exception as e:
+                return ToolExecutionResult(tool_key=call.tool_key, status="error", error=str(e))
+
+        tasks = [asyncio.create_task(execute_call(call)) for call in requests]
 
         def cancel_tasks() -> None:
             """Cancel every concurrently scheduled batch item."""
@@ -147,3 +160,18 @@ class ToolExecutor:
         finally:
             if cancellation_token is not None:
                 cancellation_token.remove_callback(cancel_tasks)
+
+    @staticmethod
+    def _normalize_batch_request(
+        call: ToolCallRequest | Mapping[str, object],
+    ) -> ToolCallRequest:
+        """Normalize a legacy mapping before it enters the batch execution workflow."""
+        if isinstance(call, ToolCallRequest):
+            return call
+        tool_key = call.get("tool_key") or call.get("name")
+        if not isinstance(tool_key, str) or not tool_key:
+            raise ValueError("A batch Tool call requires a non-empty tool_key.")
+        arguments = call.get("arguments", {})
+        if not isinstance(arguments, dict):
+            raise ValueError("Batch Tool arguments must be an object.")
+        return ToolCallRequest(tool_key=tool_key, arguments=arguments)

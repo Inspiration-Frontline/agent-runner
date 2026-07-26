@@ -1,9 +1,10 @@
 import logging
-from typing import Any
+from collections.abc import Mapping
 
 import httpx
 
 from agent_runner.config import get_settings
+from agent_runner.context.models import UserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class ProfileAdapter:
         self.base_url = current_settings.user_profiler_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
-    async def retrieve(self, user_id: str) -> dict[str, Any]:
+    async def retrieve(self, user_id: str | int) -> UserProfile:
         """
         Retrieve user profile data from the service.
 
@@ -36,25 +37,29 @@ class ProfileAdapter:
             user_id: The unique identifier of the user.
 
         Returns:
-            dict[str, Any]: User profile data, or empty dict if retrieval fails.
+            UserProfile: Normalized profile data, or an empty profile if retrieval fails.
         """
         try:
             response = await self.client.get(f"{self.base_url}/api/v1/profile/{user_id}")
             if response.status_code == 200:
-                return response.json()
+                payload = response.json()
+                if isinstance(payload, Mapping):
+                    return UserProfile.from_mapping(payload)
+                logger.warning("Profile service returned a non-object payload for user %s", user_id)
+                return UserProfile()
             logger.warning(f"Failed to retrieve profile for user {user_id}: {response.status_code}")
-            return {}
+            return UserProfile()
         except Exception:
             logger.exception(f"Error retrieving profile for user {user_id}")
-            return {}
+            return UserProfile()
 
-    async def update(self, user_id: str, profile_data: dict[str, Any]) -> bool:
+    async def update(self, user_id: str | int, profile_data: UserProfile) -> bool:
         """
         Update user profile data in the service.
 
         Args:
             user_id: The unique identifier of the user.
-            profile_data: The profile data to update.
+            profile_data: Typed profile projection to update.
 
         Returns:
             bool: True if update succeeded, False otherwise.
@@ -62,7 +67,7 @@ class ProfileAdapter:
         try:
             response = await self.client.patch(
                 f"{self.base_url}/api/v1/profile/{user_id}",
-                json=profile_data,
+                json={attribute.name: attribute.value for attribute in profile_data.attributes},
             )
             return response.status_code == 200
         except Exception:

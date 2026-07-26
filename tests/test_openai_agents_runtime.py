@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from agent_runner.api.streaming import UsageEvent
 from agent_runner.context.builder import AgentContext, Message, RuntimeToolCall
+from agent_runner.context.models import UserProfile
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
@@ -25,7 +26,7 @@ def test_build_input_preserves_history_and_current_message():
             Message(role="user", content="previous user"),
             Message(role="assistant", content="previous assistant"),
         ],
-        user_profile={},
+        user_profile=UserProfile(),
         rag_chunks=[],
         current_message=Message(role="user", content="current user"),
         tool_specs=[],
@@ -44,7 +45,7 @@ def test_build_input_preserves_plain_text_when_multipart_content_is_empty():
         agent_config=_agent(),
         system_prompt="system",
         conversation_history=[Message(role="assistant", content="Previous answer")],
-        user_profile={},
+        user_profile=UserProfile(),
         rag_chunks=[],
         current_message=Message(role="user", content="Expand on that answer"),
         tool_specs=[],
@@ -77,7 +78,7 @@ def test_build_input_converts_provider_neutral_tool_history_to_responses_items()
             Message(role="tool", content='{"result":42}', tool_call_id="call-1"),
             Message(role="assistant", content="The result was 42."),
         ],
-        user_profile={},
+        user_profile=UserProfile(),
         rag_chunks=[],
         current_message=Message(role="user", content="What was it?"),
         tool_specs=[],
@@ -120,12 +121,11 @@ def test_response_completed_event_usage_is_passed_through():
         )
     )
 
-    assert runtime._convert_response_completed_usage(event.data) == {
-        "type": "usage",
-        "prompt_tokens": 12,
-        "completion_tokens": 5,
-        "total_tokens": 17,
-    }
+    usage = runtime._convert_response_completed_usage(event.data)
+    assert usage is not None
+    assert usage.prompt_tokens == 12
+    assert usage.completion_tokens == 5
+    assert usage.total_tokens == 17
 
 
 def test_response_completed_event_without_usage_is_ignored():

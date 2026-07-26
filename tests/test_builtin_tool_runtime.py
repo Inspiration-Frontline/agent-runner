@@ -7,10 +7,12 @@ from agents import function_tool
 from agents.stream_events import RunItemStreamEvent
 from agents.tool_context import ToolContext
 
+from agent_runner.context.builder import CapturedMessage
 from agent_runner.runtime.cancellation import CancellationToken
+from agent_runner.runtime.model_events import ModelToolCompleted, ModelToolStarted
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.runtime.tool_loop import CapturedToolCall, ToolExecutionCollector
-from agent_runner.tools.executor import ToolExecutor
+from agent_runner.tools.executor import ToolCallRequest, ToolExecutionResult, ToolExecutor
 from agent_runner.tools.internal.catalog import build_internal_tool_registry
 from agent_runner.tools.internal.web_search import (
     _DuckDuckGoResultParser,
@@ -178,16 +180,16 @@ async def test_batch_execution_is_parallel_and_partial_failure_does_not_cancel_s
 
     results = await executor.execute_batch(
         [
-            {"tool_key": "test.success", "arguments": {"value": 1}},
-            {"tool_key": "test.failure", "arguments": {"value": 2}},
+            ToolCallRequest(tool_key="test.success", arguments={"value": 1}),
+            ToolCallRequest(tool_key="test.failure", arguments={"value": 2}),
         ]
     )
 
     elapsed = asyncio.get_running_loop().time() - started
     assert elapsed < 0.09
     assert results == [
-        {"tool_key": "test.success", "status": "success", "result": {"value": 1}},
-        {"tool_key": "test.failure", "status": "error", "error": "failed:2"},
+        ToolExecutionResult(tool_key="test.success", status="success", result={"value": 1}),
+        ToolExecutionResult(tool_key="test.failure", status="error", error="failed:2"),
     ]
 
 
@@ -199,8 +201,8 @@ async def test_batch_cancellation_cancels_every_in_flight_tool() -> None:
     task = asyncio.create_task(
         ToolExecutor(registry).execute_batch(
             [
-                {"tool_key": "test.first", "arguments": {"value": 1}},
-                {"tool_key": "test.second", "arguments": {"value": 2}},
+                ToolCallRequest(tool_key="test.first", arguments={"value": 1}),
+                ToolCallRequest(tool_key="test.second", arguments={"value": 2}),
             ],
             token,
         )
@@ -257,7 +259,7 @@ async def test_cancelled_observed_call_builds_partial_turn_when_sdk_removes_raw_
         await task
 
     capture = OpenAIAgentsRuntime(model_factory=SimpleNamespace())._build_observed_partial_capture(
-        initial_messages=[{"role": "user", "content": "cancel"}],
+        initial_messages=[CapturedMessage(role="user", content="cancel")],
         definitions=[definition],
         collector=collector,
         run_start=1_700_000_000_000,
@@ -289,19 +291,15 @@ def test_tool_stream_events_keep_call_identity_and_status() -> None:
         item=SimpleNamespace(call_id="call-1", output='{"status":"error"}'),
     )
 
-    assert runtime._convert_stream_event(called, collector) == {
-        "type": "tool_start",
-        "tool": "test_success",
-        "tool_call_id": "call-1",
-        "args": '{"value":1}',
-    }
-    assert runtime._convert_stream_event(output, collector) == {
-        "type": "tool_result",
-        "tool": "test_success",
-        "tool_call_id": "call-1",
-        "tool_result": '{"status":"error"}',
-        "tool_status": "FAILED",
-    }
+    assert runtime._convert_stream_event(called, collector) == ModelToolStarted(
+        tool_name="test_success", tool_call_id="call-1", arguments_json='{"value":1}'
+    )
+    assert runtime._convert_stream_event(output, collector) == ModelToolCompleted(
+        tool_name="test_success",
+        tool_call_id="call-1",
+        result='{"status":"error"}',
+        status="FAILED",
+    )
     assert collector.calls() == [
         CapturedToolCall(
             tool_call_id="call-1",

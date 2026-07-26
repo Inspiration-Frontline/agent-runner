@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
 
@@ -17,13 +17,24 @@ from agent_runner.agent_definitions.config_models import AgentDefinition
 from agent_runner.config import get_settings
 from agent_runner.context.builder import (
     AgentContext,
+    CapturedMessage,
     Message,
     ModelImagePart,
     ModelTextPart,
-    message_to_capture_dict,
+    RuntimeToolCall,
+    captured_message_to_dict,
+    message_to_capture,
 )
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
 from agent_runner.runtime.cancellation import CancellationToken
+from agent_runner.runtime.model_events import (
+    ModelError,
+    ModelStreamEvent,
+    ModelTokenDelta,
+    ModelToolCompleted,
+    ModelToolStarted,
+    ModelUsage,
+)
 from agent_runner.runtime.tool_loop import (
     AgentRunCapture,
     CapturedModelTurn,
@@ -35,6 +46,22 @@ from agent_runner.runtime.tool_loop import (
 from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AssistantResponse:
+    """Compatibility response returned by the non-streaming adapter path."""
+
+    content: str
+    role: str = "assistant"
+
+
+@dataclass(frozen=True)
+class NormalizedModelOutput:
+    """Assistant text and Tool Calls extracted from one SDK response."""
+
+    content: str
+    tool_calls: tuple[CapturedToolCall, ...]
 
 
 class OpenAIAgentsRuntime:
@@ -63,7 +90,7 @@ class OpenAIAgentsRuntime:
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
         tool_registry: ToolRegistry | None = None,
-    ) -> AsyncGenerator[dict[str, Any]]:
+    ) -> AsyncGenerator[ModelStreamEvent]:
         """Run one request through the SDK Tool loop and yield AgentBreaker semantic events.
 
         The SDK owns repeated model/Tool scheduling. AgentBreaker wraps the configured decorated
@@ -77,7 +104,7 @@ class OpenAIAgentsRuntime:
             tool_registry: Registry containing the configured decorated Tools.
 
         Yields:
-            AgentBreaker stream event dictionaries consumed by the orchestrator.
+            Typed AgentBreaker runtime events consumed by the orchestrator.
         """
         # Agents SDK agents are declarative; Runner owns execution and streaming.
         self.last_capture = AgentRunCapture()
@@ -130,10 +157,10 @@ class OpenAIAgentsRuntime:
         except TimeoutError as exc:
             result.cancel()
             logger.exception("SDK streaming timed out")
-            yield {"type": "error", "content": str(exc)}
+            yield ModelError(str(exc))
         except Exception as exc:
             logger.exception("Error during SDK streaming")
-            yield {"type": "error", "content": str(exc)}
+            yield ModelError(str(exc))
         finally:
             self.last_capture = self._build_capture(
                 result=result,
@@ -152,7 +179,7 @@ class OpenAIAgentsRuntime:
         agent: AgentDefinition,
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
-    ) -> dict[str, Any]:
+    ) -> AssistantResponse:
         """Execute the non-streaming compatibility path without configured Tools.
 
         Args:
@@ -161,7 +188,7 @@ class OpenAIAgentsRuntime:
             cancellation_token: Optional token checked before invoking the model.
 
         Returns:
-            Assistant response dictionary for legacy callers.
+            Typed assistant response for legacy callers.
 
         Raises:
             asyncio.CancelledError: When cancellation was already signalled.
@@ -175,10 +202,7 @@ class OpenAIAgentsRuntime:
             input=self._build_input(context),
             max_turns=10,
         )
-        return {
-            "content": result.final_output,
-            "role": "assistant",
-        }
+        return AssistantResponse(content=str(result.final_output), role="assistant")
 
     def _build_sdk_agent(
         self, agent: AgentDefinition, system_prompt: str, tools: list[FunctionTool] | None = None
@@ -360,22 +384,22 @@ class OpenAIAgentsRuntime:
         )
         return input_items
 
-    def _to_capture_message(self, message: Message) -> dict[str, Any]:
+    def _to_capture_message(self, message: Message) -> CapturedMessage:
         """Keep stable provider-neutral content while excluding transient signed SDK URLs.
 
         Args:
             message: Runtime message with typed model and capture representations.
 
         Returns:
-            Durable role/content dictionary using scalar text or non-empty stable parts.
+            Typed durable role/content value using scalar text or non-empty stable parts.
         """
-        return message_to_capture_dict(message)
+        return message_to_capture(message)
 
     def _convert_stream_event(
         self,
         event: StreamEvent,
         collector: ToolExecutionCollector | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> ModelStreamEvent | None:
         """Map SDK raw/run-item events to the small event vocabulary exposed over SSE.
 
         Args:
@@ -383,16 +407,13 @@ class OpenAIAgentsRuntime:
             collector: Collector used to enrich Tool result events with audit status.
 
         Returns:
-            Event dictionary, or ``None`` for SDK bookkeeping events.
+            Typed runtime event, or ``None`` for SDK bookkeeping events.
         """
         if isinstance(event, RawResponsesStreamEvent):
             if isinstance(event.data, ResponseTextDeltaEvent):
                 if not event.data.delta:
                     return None
-                return {
-                    "type": "token_delta",
-                    "content": event.data.delta,
-                }
+                return ModelTokenDelta(event.data.delta)
 
             if isinstance(event.data, ResponseCompletedEvent):
                 return self._convert_response_completed_usage(event.data)
@@ -409,45 +430,42 @@ class OpenAIAgentsRuntime:
                 )
                 if collector is not None:
                     collector.record_call(captured_call)
-                return {
-                    "type": "tool_start",
-                    "tool": captured_call.tool_name,
-                    "tool_call_id": captured_call.tool_call_id,
-                    "args": captured_call.arguments,
-                }
+                return ModelToolStarted(
+                    tool_name=captured_call.tool_name,
+                    tool_call_id=captured_call.tool_call_id,
+                    arguments_json=captured_call.arguments,
+                )
 
             if event.name == "tool_output":
                 tool_call_id = str(getattr(event.item, "call_id", None) or "")
                 execution = collector.get(tool_call_id) if collector is not None else None
-                return {
-                    "type": "tool_result",
-                    "tool": execution.tool_name if execution is not None else "",
-                    "tool_call_id": tool_call_id,
-                    "tool_result": getattr(event.item, "output", None),
-                    "tool_status": execution.status if execution is not None else "COMPLETED",
-                }
+                return ModelToolCompleted(
+                    tool_name=execution.tool_name if execution is not None else "",
+                    tool_call_id=tool_call_id,
+                    result=getattr(event.item, "output", None),
+                    status=execution.status if execution is not None else "COMPLETED",
+                )
 
         return None
 
-    def _convert_response_completed_usage(self, event_data: Any) -> dict[str, Any] | None:
+    def _convert_response_completed_usage(self, event_data: Any) -> ModelUsage | None:
         """Extract provider usage when a completed response reports it.
 
         Args:
             event_data: SDK response-completed event.
 
         Returns:
-            Normalized usage dictionary, or ``None`` when usage was omitted.
+            Typed usage event, or ``None`` when usage was omitted.
         """
         usage = getattr(getattr(event_data, "response", None), "usage", None)
         if usage is None:
             return None
 
-        return {
-            "type": "usage",
-            "prompt_tokens": usage.input_tokens,
-            "completion_tokens": usage.output_tokens,
-            "total_tokens": usage.total_tokens,
-        }
+        return ModelUsage(
+            prompt_tokens=usage.input_tokens,
+            completion_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+        )
 
     def _build_capture(
         self,
@@ -484,7 +502,7 @@ class OpenAIAgentsRuntime:
         """
         # Rebuild the normalized context supplied to the first model call. System instructions are
         # stored for audit even though the SDK receives them through Agent.instructions.
-        initial_messages = [{"role": "system", "content": context.system_prompt}]
+        initial_messages = [CapturedMessage(role="system", content=context.system_prompt)]
         initial_messages.extend(self._to_capture_message(message) for message in context.conversation_history)
         initial_messages.append(self._to_capture_message(context.current_message))
 
@@ -515,7 +533,9 @@ class OpenAIAgentsRuntime:
                 if index < len(model_completed_times)
                 else max(previous_turn_end, epoch_millis())
             )
-            response_content, tool_calls = self._normalize_response_output(response.output)
+            normalized_output = self._normalize_response_output(response.output)
+            response_content = normalized_output.content
+            tool_calls = list(normalized_output.tool_calls)
             if not tool_calls and index == len(raw_responses) - 1:
                 # The SDK may clear a cancelled response's output after already publishing
                 # tool_called events. Those events remain authoritative audit evidence.
@@ -537,7 +557,7 @@ class OpenAIAgentsRuntime:
             # normalized messages above and never depends on these provider-oriented JSON strings.
             raw_request = json.dumps(
                 {
-                    "messages": full_model_input,
+                    "messages": [captured_message_to_dict(message) for message in full_model_input],
                     "tools": [self._definition_dict(definition) for definition in definitions],
                 },
                 ensure_ascii=False,
@@ -595,7 +615,7 @@ class OpenAIAgentsRuntime:
     def _build_observed_partial_capture(
         self,
         *,
-        initial_messages: list[dict[str, Any]],
+        initial_messages: list[CapturedMessage],
         definitions: list[ToolDefinition],
         collector: ToolExecutionCollector,
         run_start: int,
@@ -622,6 +642,7 @@ class OpenAIAgentsRuntime:
         Returns:
             Partial capture preserving observed Tool evidence.
         """
+        initial_messages = [self._coerce_capture_message(message) for message in initial_messages]
         tool_calls = collector.calls()
         event_llm_end = model_completed_times[-1] if model_completed_times else epoch_millis()
         executions = self._complete_execution_audit(
@@ -638,7 +659,7 @@ class OpenAIAgentsRuntime:
         )
         raw_request = json.dumps(
             {
-                "messages": initial_messages,
+                "messages": [captured_message_to_dict(message) for message in initial_messages],
                 "tools": [self._definition_dict(definition) for definition in definitions],
             },
             ensure_ascii=False,
@@ -743,14 +764,14 @@ class OpenAIAgentsRuntime:
             )
         return executions
 
-    def _normalize_response_output(self, outputs: list[Any]) -> tuple[str, list[CapturedToolCall]]:
+    def _normalize_response_output(self, outputs: list[Any]) -> NormalizedModelOutput:
         """Extract assistant text and Tool calls from heterogeneous SDK response items.
 
         Args:
             outputs: SDK response output items.
 
         Returns:
-            Assistant text plus normalized Tool calls in model order.
+            One typed value containing assistant text and Tool Calls in model order.
         """
         text_parts: list[str] = []
         tool_calls: list[CapturedToolCall] = []
@@ -769,14 +790,34 @@ class OpenAIAgentsRuntime:
                         arguments=str(getattr(item, "arguments", "{}")),
                     )
                 )
-        return "".join(text_parts), tool_calls
+        return NormalizedModelOutput(content="".join(text_parts), tool_calls=tuple(tool_calls))
+
+    def _coerce_capture_message(self, message: CapturedMessage | dict[str, Any]) -> CapturedMessage:
+        """Accept legacy test/provider snapshots at the JSON boundary before internal capture."""
+        if isinstance(message, CapturedMessage):
+            return message
+        tool_calls = tuple(
+            RuntimeToolCall(
+                call_id=str(call.get("id", "")),
+                call_type=str(call.get("type", "function")),
+                function_name=str((call.get("function") or {}).get("name", "")),
+                arguments=str((call.get("function") or {}).get("arguments", "{}")),
+            )
+            for call in message.get("tool_calls", [])
+        )
+        return CapturedMessage(
+            role=str(message.get("role", "user")),
+            content=str(message.get("content", "")) if isinstance(message.get("content"), str) else "",
+            tool_calls=tool_calls,
+            tool_call_id=str(message.get("tool_call_id", "")) or None,
+        )
 
     def _next_turn_delta(
         self,
         response_content: str,
         tool_calls: list[CapturedToolCall],
         executions,
-    ) -> list[dict[str, Any]]:
+    ) -> list[CapturedMessage]:
         """Create neutral assistant/tool continuation messages for the next model Turn.
 
         Args:
@@ -789,29 +830,30 @@ class OpenAIAgentsRuntime:
         """
         if not tool_calls:
             return []
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "assistant",
-                "content": response_content,
-                "tool_calls": [
-                    {
-                        "id": call.tool_call_id,
-                        "type": "function",
-                        "function": {"name": call.tool_name, "arguments": call.arguments},
-                    }
+        messages: list[CapturedMessage] = [
+            CapturedMessage(
+                role="assistant",
+                content=response_content,
+                tool_calls=tuple(
+                    RuntimeToolCall(
+                        call_id=call.tool_call_id,
+                        call_type="function",
+                        function_name=call.tool_name,
+                        arguments=call.arguments,
+                    )
                     for call in tool_calls
-                ],
-            }
+                ),
+            )
         ]
         executions_by_id = {execution.tool_call_id: execution for execution in executions}
         for call in tool_calls:
             execution = executions_by_id.get(call.tool_call_id)
             messages.append(
-                {
-                    "role": "tool",
-                    "content": execution.result_content if execution is not None else "",
-                    "tool_call_id": call.tool_call_id,
-                }
+                CapturedMessage(
+                    role="tool",
+                    content=execution.result_content if execution is not None else "",
+                    tool_call_id=call.tool_call_id,
+                )
             )
         return messages
 

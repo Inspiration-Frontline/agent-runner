@@ -2,10 +2,10 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from time import time_ns
-from typing import Any
 
 from agents.tool_context import ToolContext
 
+from agent_runner.context.builder import CapturedMessage
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.tools.registry import ToolDefinition
 
@@ -42,7 +42,7 @@ class CapturedToolExecution:
 
 @dataclass
 class CapturedModelTurn:
-    request_messages: list[dict[str, Any]]
+    request_messages: list[CapturedMessage]
     message_storage_mode: str
     tools: list[ToolDefinition]
     response_content: str
@@ -93,7 +93,7 @@ class ToolExecutionCollector:
         tool_call_id: str,
         definition: ToolDefinition,
         arguments_json: str,
-        tool_context: ToolContext[Any],
+        tool_context: ToolContext[object],
         cancellation_token: CancellationToken | None,
     ) -> str:
         """Execute one configured Tool and retain normalized terminal evidence.

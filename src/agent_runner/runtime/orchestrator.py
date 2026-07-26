@@ -70,6 +70,7 @@ from agent_runner.config import AgentConfig, ChatRequest, get_settings
 from agent_runner.context.builder import (
     AgentContext,
     CaptureContentPart,
+    CapturedMessage,
     CaptureFilePart,
     CaptureTextPart,
     ContextBuilder,
@@ -78,7 +79,6 @@ from agent_runner.context.builder import (
     ModelImagePart,
     ModelTextPart,
     RuntimeToolCall,
-    message_to_capture_dict,
 )
 from agent_runner.conversation import (
     ConversationBusyError,
@@ -89,6 +89,14 @@ from agent_runner.runtime.cancellation import (
     CancellationManager,
     CancellationToken,
     conversation_cancellation_registry,
+)
+from agent_runner.runtime.model_events import (
+    ModelError,
+    ModelStreamEvent,
+    ModelTokenDelta,
+    ModelToolCompleted,
+    ModelToolStarted,
+    ModelUsage,
 )
 from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
 from agent_runner.runtime.tool_loop import AgentRunCapture, CapturedModelTurn
@@ -153,6 +161,50 @@ class ModelStreamComplete:
     call_end: int
     terminal_status: RoundStatus | None = None
     terminal_error: str = ""
+
+
+@dataclass(frozen=True)
+class PreparationFailure:
+    """One typed failure returned by a request preparation phase."""
+
+    event: ErrorEvent
+
+
+@dataclass(frozen=True)
+class ConversationContextReady:
+    """Authorized destination history plus frozen Conversation reference evidence."""
+
+    messages: tuple[Message, ...]
+
+
+@dataclass(frozen=True)
+class ReferenceContextReady:
+    """Authorized, labelled context derived from referenced Conversations."""
+
+    messages: tuple[Message, ...]
+
+
+@dataclass(frozen=True)
+class AgentContextBuildReady:
+    """Resolved Agent configuration and its bounded provider-neutral context."""
+
+    agent_config: AgentConfig
+    context: AgentContext
+
+
+@dataclass(frozen=True)
+class AgentContextReady:
+    """Request context ready for model execution."""
+
+    context: AgentContext
+
+
+@dataclass(frozen=True)
+class ModelTerminalDecision:
+    """Decision made after the model stream reaches a terminal state."""
+
+    should_stop: bool
+    error_event: ErrorEvent | None = None
 
 
 @dataclass
@@ -278,12 +330,11 @@ class RuntimeOrchestrator:
         """Execute the successful lifecycle as explicit preparation, model, and save phases."""
 
         # Step 1: Prepare conversation references.
-        conversation_history, preparation_error = await self._prepare_conversation_context(chat_request, user_id, state)
-        if preparation_error is not None:
-            yield preparation_error
+        conversation_result = await self._prepare_conversation_context(chat_request, user_id, state)
+        if isinstance(conversation_result, PreparationFailure):
+            yield conversation_result.event
             return
-        if conversation_history is None:
-            raise RuntimeError("Conversation preparation completed without context.")
+        conversation_history = list(conversation_result.messages)
 
         # Step 2: Prepare uploaded files.
         prepared_files: list[PreparedConversationFile] = []
@@ -306,14 +357,15 @@ class RuntimeOrchestrator:
                 return
 
         # Step 3: Prepare agent context (with referenced conversations, uploaded files, ...).
-        context, context_error = await self._create_agent_context(
+        context_result = await self._create_agent_context(
             chat_request, user_id, state, prepared_files, conversation_history
         )
-        if context_error is not None:
-            yield context_error
+        if isinstance(context_result, PreparationFailure):
+            yield context_result.event
             return
-        if context is None or state.agent is None:
-            raise RuntimeError("Agent context preparation completed without a result.")
+        if state.agent is None:
+            raise RuntimeError("Agent context preparation completed without a resolved Agent.")
+        context = context_result.context
 
         model_result: ModelStreamComplete | None = None
         async for model_event in self._stream_model(
@@ -330,10 +382,10 @@ class RuntimeOrchestrator:
         if model_result is None:
             raise RuntimeError("Model stream completed without a terminal result.")
 
-        request_ended, terminal_error = await self._handle_model_terminal(chat_request, user_id, state, model_result)
-        if terminal_error is not None:
-            yield terminal_error
-        if request_ended:
+        terminal_decision = await self._handle_model_terminal(chat_request, user_id, state, model_result)
+        if terminal_decision.error_event is not None:
+            yield terminal_decision.error_event
+        if terminal_decision.should_stop:
             return
 
         async for persistence_event in self._persist_completed_response(chat_request, user_id, state, model_result):
@@ -344,7 +396,7 @@ class RuntimeOrchestrator:
         chat_request: ChatRequest,
         user_id: int,
         state: RuntimeRequestState,
-    ) -> tuple[list[Message] | None, ErrorEvent | None]:
+    ) -> ConversationContextReady | PreparationFailure:
         """Acquire request ownership, run preflight, then append authorized reference evidence."""
         if not getattr(self, "_lock_acquired", False):
             await self.acquire_conversation(chat_request.conversation_id)
@@ -352,31 +404,30 @@ class RuntimeOrchestrator:
 
         # Preflight happens before billable model/Tool work. Conversation Manager authorizes the
         # destination and returns the durable high-water/replay boundary used for this entire run.
-        preflight, preflight_error = await self._load_conversation_preflight(chat_request, user_id)
-        if preflight_error is not None:
-            return None, preflight_error
-        if preflight is None:
-            raise RuntimeError("Conversation preflight completed without a result.")
+        preflight_result = await self._load_conversation_preflight(chat_request, user_id)
+        if isinstance(preflight_result, PreparationFailure):
+            return preflight_result
+        preflight = preflight_result
 
         state.next_round_number = preflight.next_round_number
         state.preflight_completed = True
         conversation_history = list(preflight.conversation_history)
         if not chat_request.references:
-            return conversation_history, None
+            return ConversationContextReady(tuple(conversation_history))
 
-        reference_context, reference_error = await self._prepare_reference_context(chat_request, user_id)
-        if reference_error is None:
-            conversation_history.extend(reference_context)
-            return conversation_history, None
+        reference_result = await self._prepare_reference_context(chat_request, user_id)
+        if isinstance(reference_result, ReferenceContextReady):
+            conversation_history.extend(reference_result.messages)
+            return ConversationContextReady(tuple(conversation_history))
 
         request_without_references = chat_request.model_copy(update={"references": []})
         await self._persist_known_failure(
             request_without_references,
             user_id,
             state,
-            reference_error.error_message or "Conversation reference preparation failed.",
+            reference_result.event.error_message or "Conversation reference preparation failed.",
         )
-        return None, reference_error
+        return reference_result
 
     async def _create_agent_context(
         self,
@@ -385,28 +436,26 @@ class RuntimeOrchestrator:
         state: RuntimeRequestState,
         prepared_files: list[PreparedConversationFile],
         conversation_history: list[Message],
-    ) -> tuple[AgentContext | None, ErrorEvent | None]:
+    ) -> AgentContextReady | PreparationFailure:
         """Build bounded context and instantiate the resolved Agent for this request only."""
-        agent_config, context, context_error = await self._build_agent_context(
+        build_result = await self._build_agent_context(
             chat_request,
             user_id,
             prepared_files,
             conversation_history,
             state.attachment_request_id,
         )
-        if context_error is not None:
+        if isinstance(build_result, PreparationFailure):
             await self._persist_known_failure(
                 chat_request,
                 user_id,
                 state,
-                context_error.error_message or "Context preparation failed.",
+                build_result.event.error_message or "Context preparation failed.",
             )
-            return None, context_error
-        if agent_config is None or context is None:
-            raise RuntimeError("Context preparation completed without a result.")
+            return build_result
 
-        state.agent = await self.agent_factory.create(agent_config)
-        return context, None
+        state.agent = await self.agent_factory.create(build_result.agent_config)
+        return AgentContextReady(build_result.context)
 
     async def _handle_model_terminal(
         self,
@@ -414,7 +463,7 @@ class RuntimeOrchestrator:
         user_id: int,
         state: RuntimeRequestState,
         model_result: ModelStreamComplete,
-    ) -> tuple[bool, ErrorEvent | None]:
+    ) -> ModelTerminalDecision:
         """Persist cancelled/failed/empty model outcomes before deciding whether saving may continue."""
         if model_result.terminal_status is not None:
             await self._persist_terminal_round(
@@ -427,14 +476,17 @@ class RuntimeOrchestrator:
                 agent=state.agent,
                 capture=model_result.capture,
             )
-            return True, None
+            return ModelTerminalDecision(should_stop=True)
 
         if model_result.response_text.strip():
-            return False, None
+            return ModelTerminalDecision(should_stop=False)
 
         message = "The model returned an empty response."
         await self._persist_known_failure(chat_request, user_id, state, message, model_result.capture)
-        return True, ErrorEvent(message, error_code="EMPTY_MODEL_RESPONSE", phase="model")
+        return ModelTerminalDecision(
+            should_stop=True,
+            error_event=ErrorEvent(message, error_code="EMPTY_MODEL_RESPONSE", phase="model"),
+        )
 
     async def _persist_completed_response(
         self,
@@ -607,9 +659,9 @@ class RuntimeOrchestrator:
             capture = AgentRunCapture(
                 turns=[
                     CapturedModelTurn(
-                        request_messages=[{"role": "system", "content": context.system_prompt}]
-                        + [message_to_capture_dict(message) for message in conversation_history]
-                        + [message_to_capture_dict(context.current_message)],
+                        request_messages=[CapturedMessage(role="system", content=context.system_prompt)]
+                        + [self._to_captured_message(message) for message in conversation_history]
+                        + [self._to_captured_message(context.current_message)],
                         message_storage_mode="FULL_SNAPSHOT",
                         tools=[],
                         response_content=response_text,
@@ -694,7 +746,7 @@ class RuntimeOrchestrator:
         prepared_files: list[PreparedConversationFile],
         conversation_history: list[Message],
         attachment_request_id: str,
-    ) -> tuple[AgentConfig | None, AgentContext | None, ErrorEvent | None]:
+    ) -> AgentContextBuildReady | PreparationFailure:
         """Build the bounded provider-neutral context after files and references are ready."""
         await self._resolve_replay_images(
             conversation_history,
@@ -725,24 +777,22 @@ class RuntimeOrchestrator:
         maximum_input_tokens = max(1, settings.max_context_tokens - settings.max_output_tokens)
         estimated_input_tokens = len(context_text) // 4
         if estimated_input_tokens > maximum_input_tokens:
-            return (
-                None,
-                None,
+            return PreparationFailure(
                 ErrorEvent(
                     "The selected Conversation history exceeds the model context window. "
                     "Select fewer Conversations and try again.",
                     error_code="CONVERSATION_REFERENCE_CONTEXT_TOO_LARGE",
                     phase="reference_preparation",
-                ),
+                )
             )
 
-        return agent_config, context, None
+        return AgentContextBuildReady(agent_config=agent_config, context=context)
 
     async def _load_conversation_preflight(
         self,
         chat_request: ChatRequest,
         user_id: int,
-    ) -> tuple[ConversationPreflight | None, ErrorEvent | None]:
+    ) -> ConversationPreflight | PreparationFailure:
         """Load the read-only state required before a request may execute.
 
         The first Conversation Manager RPC is owner-scoped. Besides authorizing the destination,
@@ -757,16 +807,16 @@ class RuntimeOrchestrator:
         history = await self.conversation_client.get_round_history(user_id, chat_request.conversation_id)
         if history.base is None or not history.base.success:
             message = history.base.message if history.base is not None else "Conversation history RPC failed."
-            return None, ErrorEvent(
-                message,
-                error_code="CONVERSATION_ACCESS_DENIED",
-                phase="preflight",
+            return PreparationFailure(
+                ErrorEvent(message, error_code="CONVERSATION_ACCESS_DENIED", phase="preflight")
             )
         if history.data is None:
-            return None, ErrorEvent(
-                "Conversation history RPC returned no data.",
-                error_code="INVALID_HISTORY_RESPONSE",
-                phase="preflight",
+            return PreparationFailure(
+                ErrorEvent(
+                    "Conversation history RPC returned no data.",
+                    error_code="INVALID_HISTORY_RESPONSE",
+                    phase="preflight",
+                )
             )
 
         conversation_history: list[Message] = []
@@ -780,25 +830,27 @@ class RuntimeOrchestrator:
             )
             if replay.base is None or not replay.base.success:
                 message = replay.base.message if replay.base is not None else "Conversation replay RPC failed."
-                return None, ErrorEvent(message, error_code="REPLAY_FAILED", phase="preflight")
+                return PreparationFailure(ErrorEvent(message, error_code="REPLAY_FAILED", phase="preflight"))
             if replay.data is None:
-                return None, ErrorEvent(
-                    "Conversation replay RPC returned no data.",
-                    error_code="INVALID_REPLAY_RESPONSE",
-                    phase="preflight",
+                return PreparationFailure(
+                    ErrorEvent(
+                        "Conversation replay RPC returned no data.",
+                        error_code="INVALID_REPLAY_RESPONSE",
+                        phase="preflight",
+                    )
                 )
             conversation_history = self._to_context_messages(replay.data.context_messages)
 
         return ConversationPreflight(
             next_round_number=history.data.latest_round_number + 1,
             conversation_history=tuple(conversation_history),
-        ), None
+        )
 
     async def _prepare_reference_context(
         self,
         chat_request: ChatRequest,
         user_id: int,
-    ) -> tuple[list[Message], ErrorEvent | None]:
+    ) -> ReferenceContextReady | PreparationFailure:
         """Authorize frozen references and convert them into labelled untrusted evidence."""
         response = await self.conversation_client.prepare_references(
             user_id,
@@ -809,13 +861,15 @@ class RuntimeOrchestrator:
             message = (
                 response.base.message if response.base is not None else "Conversation reference preparation failed."
             )
-            return [], ErrorEvent(
-                message,
-                error_code="CONVERSATION_REFERENCE_FAILED",
-                phase="reference_preparation",
+            return PreparationFailure(
+                ErrorEvent(
+                    message,
+                    error_code="CONVERSATION_REFERENCE_FAILED",
+                    phase="reference_preparation",
+                )
             )
 
-        return self._build_reference_context(list(response.data)), None
+        return ReferenceContextReady(tuple(self._build_reference_context(list(response.data))))
 
     def _build_save_request(
         self,
@@ -957,76 +1011,60 @@ class RuntimeOrchestrator:
             ),
         )
 
-    def _captured_message_to_proto(self, message: dict) -> LlmConversationMessage:
+    def _to_captured_message(self, message: Message) -> CapturedMessage:
+        """Create a typed capture message for the compatibility fallback path."""
+        return CapturedMessage(
+            role=message.role,
+            content=message.content,
+            capture_content=message.capture_content,
+            tool_calls=message.tool_calls,
+            tool_call_id=message.tool_call_id,
+        )
+
+    def _captured_message_to_proto(self, message: CapturedMessage) -> LlmConversationMessage:
         """Convert one neutral capture message into a typed protobuf message.
 
         Args:
-            message: Provider-neutral role/content dictionary. Content is scalar text or a
-                non-empty list of stable parts, never both.
+            message: Typed provider-neutral capture. Content is scalar text or stable parts.
 
         Returns:
             Message satisfying Conversation Manager's mutually exclusive content contract.
         """
-        role = MessageRole[message["role"].upper()]
-        tool_calls = [self._captured_tool_call_to_proto_dict(call) for call in message.get("tool_calls", [])]
-        content = message.get("content")
-        content_parts = self._captured_content_parts_to_proto(content) if isinstance(content, list) else []
+        role = MessageRole[message.role.upper()]
+        tool_calls = [self._captured_tool_call_to_proto(call) for call in message.tool_calls]
+        content_parts = self._captured_content_parts_to_proto(message.capture_content)
         return LlmConversationMessage(
             role=role,
-            content=content if isinstance(content, str) else "",
+            content="" if content_parts else message.content,
             content_parts=content_parts,
             tool_calls=tool_calls,
-            tool_call_id=message.get("tool_call_id") or "",
+            tool_call_id=message.tool_call_id or "",
         )
 
-    def _captured_content_parts_to_proto(self, content: list[dict]) -> list[ContentPart]:
+    def _captured_content_parts_to_proto(self, content: tuple[CaptureContentPart, ...]) -> list[ContentPart]:
         """Convert neutral text/image/file parts into stable AgentBreaker content parts.
 
         Args:
-            content: Provider-neutral list captured from model input.
+            content: Typed stable parts captured from model input.
 
         Returns:
             Stable text parts and ``agentbreaker-file://`` references suitable for persistence.
         """
         parts: list[ContentPart] = []
         for item in content:
-            part_type = item.get("type") or ""
-            if part_type in {"text", "input_text"}:
-                parts.append(ContentPart(type="text", text=item.get("text") or ""))
+            if isinstance(item, CaptureTextPart):
+                parts.append(ContentPart(type="text", text=item.text))
                 continue
-            file_value = item.get("file_url") or item.get("image_url") or {}
-            if isinstance(file_value, str):
-                file_value = {"url": file_value}
-            normalized_type = "image_url" if part_type in {"image_url", "input_image"} else "file_url"
             parts.append(
                 ContentPart(
-                    type=normalized_type,
+                    type="image_url",
                     file_url=FileUrl(
-                        url=file_value.get("url") or "",
-                        detail=file_value.get("detail") or item.get("detail") or "",
+                        url=f"agentbreaker-file://{item.file_id}",
+                        detail=item.detail,
                     ),
                 )
             )
         return parts
-
-    def _captured_tool_call_to_proto_dict(self, call: dict) -> ToolCall:
-        """Convert a dictionary Tool call snapshot into a typed protobuf call.
-
-        Args:
-            call: Neutral call dictionary containing ID, type, and function arguments.
-
-        Returns:
-            Typed Tool call preserving model-emitted arguments.
-        """
-        function = call.get("function") or {}
-        return ToolCall(
-            id=call.get("id") or "",
-            type=call.get("type") or "function",
-            function=FunctionCall(
-                name=function.get("name") or "",
-                arguments=function.get("arguments") or "{}",
-            ),
-        )
 
     def _captured_tool_call_to_proto(self, call) -> ToolCall:
         """Convert one SDK Tool call evidence object into the persistence protobuf type.
@@ -1430,52 +1468,81 @@ class RuntimeOrchestrator:
         }
         return LlmConversationMessage(role=roles[message.role], content=message.content)
 
-    def _convert_event(self, event: dict) -> StreamEvent:
-        """Translate runtime dictionaries into the public typed SSE event vocabulary.
+    def _convert_event(self, event: ModelStreamEvent | dict[str, object]) -> StreamEvent:
+        """Translate typed SDK-adapter events into the public typed SSE event vocabulary.
 
         Args:
-            event: Provider/runtime event dictionary.
+            event: Typed event emitted by the OpenAI Agents SDK adapter.
 
         Returns:
             Typed event serialized by the HTTP streaming route.
         """
-        event_type = event.get("type")
+        if isinstance(event, dict):
+            event = self._coerce_legacy_model_event(event)
 
-        if event_type == "token_delta":
-            return TokenDeltaEvent(content=event.get("content", ""))
-        elif event_type == "tool_start":
-            arguments = event.get("args")
+        if isinstance(event, ModelTokenDelta):
+            return TokenDeltaEvent(content=event.content)
+        if isinstance(event, ModelToolStarted):
+            arguments = event.arguments_json
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
                     arguments = {"raw_arguments": arguments}
             return ToolStartEvent(
-                tool=event.get("tool", ""),
-                tool_call_id=event.get("tool_call_id", ""),
+                tool=event.tool_name,
+                tool_call_id=event.tool_call_id,
                 tool_args=arguments,
             )
-        elif event_type == "tool_result":
-            result = event["tool_result"] if "tool_result" in event else event.get("result")
+        if isinstance(event, ModelToolCompleted):
+            result = event.result
             if isinstance(result, str):
                 with suppress(json.JSONDecodeError):
                     result = json.loads(result)
             return ToolResultEvent(
-                tool=event.get("tool", ""),
-                tool_call_id=event.get("tool_call_id", ""),
+                tool=event.tool_name,
+                tool_call_id=event.tool_call_id,
                 tool_result=result,
-                tool_status=event.get("tool_status", "COMPLETED"),
+                tool_status=event.status,
             )
-        elif event_type == "usage":
+        if isinstance(event, ModelUsage):
             return UsageEvent(
-                prompt_tokens=event["prompt_tokens"],
-                completion_tokens=event["completion_tokens"],
-                total_tokens=event["total_tokens"],
+                prompt_tokens=event.prompt_tokens,
+                completion_tokens=event.completion_tokens,
+                total_tokens=event.total_tokens,
             )
-        elif event_type == "error":
-            return ErrorEvent(error_message=event.get("error_message") or event.get("content", ""))
-        else:
-            return TokenDeltaEvent(content=event.get("content", ""))
+        if isinstance(event, ModelError):
+            return ErrorEvent(error_message=event.message)
+        raise TypeError(f"Unsupported model stream event: {type(event).__name__}")
+
+    @staticmethod
+    def _coerce_legacy_model_event(event: dict[str, object]) -> ModelStreamEvent:
+        """Convert legacy runtime dictionaries at the adapter boundary for older test doubles."""
+        event_type = event.get("type")
+        if event_type == "token_delta":
+            return ModelTokenDelta(str(event.get("content", "")))
+        if event_type == "tool_start":
+            return ModelToolStarted(
+                tool_name=str(event.get("tool", "")),
+                tool_call_id=str(event.get("tool_call_id", "")),
+                arguments_json=str(event.get("args", "{}")),
+            )
+        if event_type == "tool_result":
+            return ModelToolCompleted(
+                tool_name=str(event.get("tool", "")),
+                tool_call_id=str(event.get("tool_call_id", "")),
+                result=event.get("tool_result", event.get("result")),
+                status=str(event.get("tool_status", "COMPLETED")),
+            )
+        if event_type == "usage":
+            return ModelUsage(
+                prompt_tokens=int(event.get("prompt_tokens", 0)),
+                completion_tokens=int(event.get("completion_tokens", 0)),
+                total_tokens=int(event.get("total_tokens", 0)),
+            )
+        if event_type == "error":
+            return ModelError(str(event.get("error_message", event.get("content", ""))))
+        raise TypeError(f"Unsupported legacy model event type: {event_type!r}")
 
     async def _cleanup(self, cancellation_token):
         """Release request-scoped cancellation state after every terminal path.

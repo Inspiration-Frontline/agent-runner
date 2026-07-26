@@ -102,7 +102,9 @@ def test_plain_text_capture_uses_scalar_content() -> None:
     runtime = OpenAIAgentsRuntime()
     captured = runtime._to_capture_message(Message(role="user", content="Question"))
 
-    assert captured == {"role": "user", "content": "Question"}
+    assert captured.role == "user"
+    assert captured.content == "Question"
+    assert captured.capture_content == ()
 
 
 def test_plain_text_attachment_input_uses_empty_typed_parts() -> None:

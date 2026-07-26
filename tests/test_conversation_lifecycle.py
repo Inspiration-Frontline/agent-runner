@@ -22,6 +22,7 @@ from agent_runner.api import routes
 from agent_runner.api.streaming import StreamEventType
 from agent_runner.config import AgentConfig, ChatRequest, ConversationReferenceRequest
 from agent_runner.context.builder import AgentContext
+from agent_runner.context.models import UserProfile
 from agent_runner.conversation import ConversationBusyError
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
@@ -123,7 +124,7 @@ class CapturingContextBuilder:
             agent_config=kwargs["agent_config"],
             system_prompt="latest instructions",
             conversation_history=self.history,
-            user_profile={},
+            user_profile=UserProfile(),
             rag_chunks=[],
             current_message=kwargs["current_message"],
             tool_specs=[],

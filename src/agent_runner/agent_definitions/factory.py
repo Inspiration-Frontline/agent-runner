@@ -1,5 +1,4 @@
 import logging
-from typing import Any
 
 from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from agent_runner.config import AgentConfig
@@ -24,7 +23,7 @@ class AgentFactory:
         """
         Initialize the agent factory with an empty registry.
         """
-        self._agent_registry: dict[int, Any] = {}
+        self._agent_registry: dict[int, AgentDefinition] = {}
 
     async def create(self, config: AgentConfig) -> AgentDefinition:
         """

@@ -13,7 +13,7 @@ async def test_failing_handler_is_logged_and_does_not_stop_other_handlers(caplog
     async def succeeding_handler(event: RuntimeEvent) -> None:
         called.append(event.event_id)
 
-    event = RuntimeEvent.create(RuntimeEventType.REQUEST_START, {}, "request-1")
+    event = RuntimeEvent.create(RuntimeEventType.REQUEST_START, "request-1")
     event_bus.subscribe(RuntimeEventType.REQUEST_START, failing_handler)
     event_bus.subscribe(RuntimeEventType.REQUEST_START, succeeding_handler)
 

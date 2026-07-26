@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -304,7 +304,7 @@ class MemoryPolicy(BaseModel):
 class ConversationReferenceRequest(BaseModel):
     """Frozen source Conversation boundary selected by the browser."""
 
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra="forbid")
 
     source_conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
     source_end_round_number: int = Field(gt=0)
@@ -328,7 +328,7 @@ class ChatRequest(BaseModel):
         message: The user's message content to process.
     """
 
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra="forbid")
 
     conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
     message: str = Field(default="", max_length=100_000)
@@ -375,7 +375,7 @@ class ChatRequest(BaseModel):
 
 
 class CancelChatRequest(BaseModel):
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra="forbid")
 
     conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
 

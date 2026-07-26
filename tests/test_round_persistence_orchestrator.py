@@ -11,6 +11,7 @@ from agent_runner.agent_definitions.config_models import AgentDefinition, Memory
 from agent_runner.api.streaming import StreamEvent, StreamEventType
 from agent_runner.config import AgentConfig, ChatRequest
 from agent_runner.context.builder import AgentContext
+from agent_runner.context.models import UserProfile
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -73,7 +74,7 @@ class FakeContextBuilder:
             agent_config=kwargs["agent_config"],
             system_prompt="system prompt",
             conversation_history=[],
-            user_profile={},
+            user_profile=UserProfile(),
             rag_chunks=[],
             current_message=kwargs["current_message"],
             tool_specs=[],

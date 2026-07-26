@@ -1,7 +1,18 @@
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Protocol, TypeVar
 
 logger = logging.getLogger(__name__)
+
+
+class TruncatableMessage(Protocol):
+    """Minimal typed message contract required by truncation strategies."""
+
+    content: str
+
+
+MessageValue = TypeVar("MessageValue", bound=TruncatableMessage)
 
 
 @dataclass
@@ -42,7 +53,7 @@ class TokenBudget:
         """
         return self.used_tokens + tokens <= self.max_tokens
 
-    def use(self, tokens: int):
+    def use(self, tokens: int) -> None:
         """
         Consume tokens from the budget.
 
@@ -98,10 +109,10 @@ class TokenBudgetManager:
 
     def truncate_messages(
         self,
-        messages: list[dict],
+        messages: Sequence[MessageValue],
         budget: TokenBudget,
         truncation_strategy: str = "sliding_window",
-    ) -> list[dict]:
+    ) -> list[MessageValue]:
         """
         Truncate messages to fit within a token budget.
 
@@ -111,7 +122,7 @@ class TokenBudgetManager:
             truncation_strategy: Strategy to use: 'sliding_window' or 'importance'.
 
         Returns:
-            list[dict]: Truncated list of messages that fit within the budget.
+            Messages that fit within the budget, preserving their concrete type.
         """
         if truncation_strategy == "sliding_window":
             return self._sliding_window_truncation(messages, budget)
@@ -120,7 +131,9 @@ class TokenBudgetManager:
         else:
             return self._sliding_window_truncation(messages, budget)
 
-    def _sliding_window_truncation(self, messages: list[dict], budget: TokenBudget) -> list[dict]:
+    def _sliding_window_truncation(
+        self, messages: Sequence[MessageValue], budget: TokenBudget
+    ) -> list[MessageValue]:
         """
         Truncate messages using a sliding window approach.
 
@@ -132,13 +145,13 @@ class TokenBudgetManager:
             budget: Token budget to fit messages into.
 
         Returns:
-            list[dict]: Truncated list of messages.
+            Messages retained by the sliding window.
         """
-        truncated = []
+        truncated: list[MessageValue] = []
         total_tokens = 0
 
         for message in reversed(messages):
-            message_tokens = self.estimate_tokens(str(message.get("content", "")))
+            message_tokens = self.estimate_tokens(message.content)
             if total_tokens + message_tokens <= budget.remaining_tokens:
                 truncated.insert(0, message)
                 total_tokens += message_tokens
@@ -147,7 +160,9 @@ class TokenBudgetManager:
 
         return truncated
 
-    def _importance_truncation(self, messages: list[dict], budget: TokenBudget) -> list[dict]:
+    def _importance_truncation(
+        self, messages: Sequence[MessageValue], budget: TokenBudget
+    ) -> list[MessageValue]:
         """
         Truncate messages based on importance scoring.
 
@@ -159,6 +174,6 @@ class TokenBudgetManager:
             budget: Token budget to fit messages into.
 
         Returns:
-            list[dict]: Truncated list of messages.
+            Messages retained by the importance strategy.
         """
         return self._sliding_window_truncation(messages, budget)

@@ -1,10 +1,9 @@
 import inspect
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
 from uuid import uuid4
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -43,31 +42,28 @@ class RuntimeEvent:
     """
     Event representing a runtime operation.
 
-    Contains event metadata including ID, type, timestamp, data,
-    and associated request ID for tracking and logging.
+    Contains event metadata including ID, type, timestamp, and associated request ID. Event-specific
+    payloads must use dedicated typed event classes instead of adding an arbitrary data dictionary.
 
     Attributes:
         event_id: Unique identifier for this event.
         event_type: Type of this runtime event.
         timestamp: Timestamp when this event occurred.
-        data: Data associated with this event.
         request_id: ID of the request this event belongs to.
     """
 
     event_id: str
     event_type: RuntimeEventType
     timestamp: datetime
-    data: dict[str, Any]
     request_id: str
 
     @classmethod
-    def create(cls, event_type: RuntimeEventType, data: dict[str, Any], request_id: str) -> "RuntimeEvent":
+    def create(cls, event_type: RuntimeEventType, request_id: str) -> "RuntimeEvent":
         """
         Create a new runtime event with auto-generated ID and timestamp.
 
         Args:
             event_type: Type of the event to create.
-            data: Data to associate with the event.
             request_id: ID of the request for this event.
 
         Returns:
@@ -77,12 +73,11 @@ class RuntimeEvent:
             event_id=str(uuid4()),
             event_type=event_type,
             timestamp=datetime.now(UTC),
-            data=data,
             request_id=request_id,
         )
 
 
-type RuntimeEventHandler = Callable[[RuntimeEvent], Any]
+type RuntimeEventHandler = Callable[[RuntimeEvent], None | Awaitable[None]]
 
 
 class RuntimeEventBus:
@@ -136,7 +131,7 @@ class RuntimeEventBus:
         handlers: list[RuntimeEventHandler] = self._handlers.get(event.event_type, [])
         for handler in handlers:
             try:
-                result: Any = handler(event)
+                result = handler(event)
                 if inspect.isawaitable(result):
                     await result
             except Exception:

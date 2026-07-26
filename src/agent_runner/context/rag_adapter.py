@@ -1,9 +1,10 @@
 import logging
-from typing import Any
+from collections.abc import Mapping
 
 import httpx
 
 from agent_runner.config import get_settings
+from agent_runner.context.models import RagChunk
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,10 @@ class RAGAdapter:
     async def retrieve(
         self,
         query: str,
-        agent_id: str,
-        user_id: str | None = None,
+        agent_id: str | int,
+        user_id: str | int | None = None,
         top_k: int = 5,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RagChunk]:
         """
         Retrieve relevant RAG chunks from the knowledge service.
 
@@ -45,7 +46,7 @@ class RAGAdapter:
             top_k: Number of top chunks to retrieve.
 
         Returns:
-            list[dict[str, Any]]: List of relevant RAG chunks, or empty list if retrieval fails.
+            list[RagChunk]: Normalized relevant chunks, or an empty list if retrieval fails.
         """
         try:
             response = await self.client.post(
@@ -59,7 +60,19 @@ class RAGAdapter:
             )
             if response.status_code == 200:
                 data = response.json()
-                return data.get("chunks", [])
+                if not isinstance(data, Mapping):
+                    return []
+                chunks = data.get("chunks", [])
+                if not isinstance(chunks, list):
+                    return []
+                return [
+                    RagChunk(
+                        content=str(chunk.get("content", "")),
+                        source=str(chunk.get("source", "Unknown")),
+                    )
+                    for chunk in chunks
+                    if isinstance(chunk, Mapping) and chunk.get("content")
+                ]
             logger.warning(f"Failed to retrieve RAG chunks: {response.status_code}")
             return []
         except Exception:

@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import socket
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -8,6 +9,14 @@ import httpx
 from agents import function_tool
 
 from agent_runner.config import get_settings
+
+
+@dataclass(frozen=True)
+class _FetchedPage:
+    """Safe page body and final URL returned by the fetch boundary."""
+
+    body: str
+    final_url: str
 
 
 class _WebSearchClient:
@@ -53,12 +62,12 @@ class _WebSearchClient:
             "error": "",
         }
         try:
-            html, final_url = await self._safe_get(client, url)
+            fetched_page = await self._safe_get(client, url)
             parser = _VisibleTextParser()
-            parser.feed(html)
+            parser.feed(fetched_page.body)
             parser.close()
             content = parser.text()
-            item["url"] = final_url
+            item["url"] = fetched_page.final_url
             item["content"] = content or ""
             if not item["content"]:
                 item["error"] = "No readable page content was extracted."
@@ -66,7 +75,7 @@ class _WebSearchClient:
             item["error"] = str(error)
         return item
 
-    async def _safe_get(self, client: httpx.AsyncClient, url: str) -> tuple[str, str]:
+    async def _safe_get(self, client: httpx.AsyncClient, url: str) -> _FetchedPage:
         """Follow safe public redirects and enforce content, byte, and redirect limits."""
         settings = get_settings()
         current_url = url
@@ -88,7 +97,10 @@ class _WebSearchClient:
                     body.extend(chunk)
                     if len(body) > settings.web_fetch_max_bytes:
                         raise ValueError("Page exceeded the network safety byte limit.")
-                return body.decode(response.encoding or "utf-8", errors="replace"), str(response.url)
+                return _FetchedPage(
+                    body=body.decode(response.encoding or "utf-8", errors="replace"),
+                    final_url=str(response.url),
+                )
         raise ValueError("Page exceeded the redirect limit.")
 
     async def _require_public_http_url(self, url: str) -> None:

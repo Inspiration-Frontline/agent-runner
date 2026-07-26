@@ -1,5 +1,6 @@
 import logging
-from typing import Any
+
+from agent_runner.context.models import RagChunk, UserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,8 @@ class PromptAssembler:
     def assemble(
         self,
         base_prompt: str,
-        user_profile: dict[str, Any] | None = None,
-        rag_chunks: list[dict[str, Any]] | None = None,
+        user_profile: UserProfile | None = None,
+        rag_chunks: list[RagChunk] | None = None,
     ) -> str:
         """
         Assemble a complete system prompt from components.
@@ -54,7 +55,7 @@ class PromptAssembler:
 
         return assembled_prompt
 
-    def _format_profile(self, profile: dict[str, Any]) -> str:
+    def _format_profile(self, profile: UserProfile) -> str:
         """
         Format user profile data as a markdown-style string.
 
@@ -68,13 +69,12 @@ class PromptAssembler:
             return ""
 
         lines = []
-        for key, value in profile.items():
-            if value:
-                lines.append(f"- {key}: {value}")
+        for attribute in profile.attributes:
+            lines.append(f"- {attribute.name}: {attribute.value}")
 
         return "\n".join(lines)
 
-    def _format_rag_chunks(self, chunks: list[dict[str, Any]]) -> str:
+    def _format_rag_chunks(self, chunks: list[RagChunk]) -> str:
         """
         Format RAG chunks as a markdown-style string.
 
@@ -89,8 +89,6 @@ class PromptAssembler:
 
         formatted_chunks = []
         for i, chunk in enumerate(chunks, 1):
-            content = chunk.get("content", "")
-            source = chunk.get("source", "Unknown")
-            formatted_chunks.append(f"[{i}] (Source: {source})\n{content}")
+            formatted_chunks.append(f"[{i}] (Source: {chunk.source})\n{chunk.content}")
 
         return "\n\n---\n\n".join(formatted_chunks)

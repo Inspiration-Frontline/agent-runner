@@ -1,6 +1,8 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+
+CancellationCallback = Callable[[], None | Awaitable[None]]
 
 
 @dataclass
@@ -17,7 +19,7 @@ class CancellationToken:
     """
 
     _cancelled: bool = field(default=False, init=False)
-    _callbacks: list[Any] = field(default_factory=list, init=False)
+    _callbacks: list[CancellationCallback] = field(default_factory=list, init=False)
 
     def cancel(self) -> None:
         """Publish the stop signal used by every long-running operation in this request.
@@ -49,7 +51,7 @@ class CancellationToken:
         """
         return self._cancelled
 
-    def add_callback(self, callback: Any) -> None:
+    def add_callback(self, callback: CancellationCallback) -> None:
         """Attach cleanup for an SDK or tool resource that must stop with this request.
 
         A callback added after cancellation is executed immediately (or scheduled when async),
@@ -70,7 +72,7 @@ class CancellationToken:
             return
         self._callbacks.append(callback)
 
-    def remove_callback(self, callback: Any) -> None:
+    def remove_callback(self, callback: CancellationCallback) -> None:
         """Release one callback after its owning provider or tool has finished.
 
         Removing callbacks is part of request teardown: retaining closures here would keep model

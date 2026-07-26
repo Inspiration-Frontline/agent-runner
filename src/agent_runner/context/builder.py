@@ -1,10 +1,10 @@
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 from agent_runner.config import AgentConfig, get_settings
-from agent_runner.tools.registry import ToolRegistry
+from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
+from .models import RagChunk, UserProfile
 from .profile_adapter import ProfileAdapter
 from .prompt_assembler import PromptAssembler
 from .rag_adapter import RAGAdapter
@@ -84,8 +84,30 @@ class Message:
     tool_call_id: str | None = None
 
 
-def message_to_capture_dict(message: Message) -> dict[str, Any]:
-    """Serialize one typed runtime message at the persistence boundary."""
+@dataclass(frozen=True)
+class CapturedMessage:
+    """Provider-neutral message retained for replay before JSON/protobuf conversion."""
+
+    role: str
+    content: str
+    capture_content: tuple[CaptureContentPart, ...] = ()
+    tool_calls: tuple[RuntimeToolCall, ...] = ()
+    tool_call_id: str | None = None
+
+
+def message_to_capture(message: Message) -> CapturedMessage:
+    """Convert runtime input into a typed durable capture value."""
+    return CapturedMessage(
+        role=message.role,
+        content=message.content,
+        capture_content=message.capture_content,
+        tool_calls=message.tool_calls,
+        tool_call_id=message.tool_call_id,
+    )
+
+
+def captured_message_to_dict(message: CapturedMessage) -> dict[str, object]:
+    """Serialize a typed capture only at the raw JSON persistence boundary."""
     content: str | list[dict[str, object]] = message.content
     if message.capture_content:
         content = []
@@ -103,7 +125,7 @@ def message_to_capture_dict(message: Message) -> dict[str, Any]:
                     }
                 )
 
-    captured: dict[str, Any] = {"role": message.role, "content": content}
+    captured: dict[str, object] = {"role": message.role, "content": content}
     if message.tool_calls:
         captured["tool_calls"] = [
             {
@@ -119,6 +141,11 @@ def message_to_capture_dict(message: Message) -> dict[str, Any]:
     if message.tool_call_id:
         captured["tool_call_id"] = message.tool_call_id
     return captured
+
+
+def message_to_capture_dict(message: Message) -> dict[str, object]:
+    """Compatibility serializer for callers that explicitly cross a JSON boundary."""
+    return captured_message_to_dict(message_to_capture(message))
 
 
 @dataclass
@@ -154,16 +181,15 @@ class AgentContext:
         user_profile: User profile data retrieved from profile service.
         rag_chunks: RAG chunks retrieved from knowledge service.
         current_message: The current user message being processed.
-        tool_specs: Specifications of tools available to this agent.
     """
 
     agent_config: AgentConfig
     system_prompt: str
     conversation_history: list[Message]
-    user_profile: dict[str, Any]
-    rag_chunks: list[dict[str, Any]]
+    user_profile: UserProfile
+    rag_chunks: list[RagChunk]
     current_message: Message
-    tool_specs: list[dict[str, Any]]
+    tool_specs: tuple[ToolDefinition, ...] = ()
 
 
 class ContextBuilder:
@@ -219,11 +245,11 @@ class ContextBuilder:
         if conversation_history is None:
             conversation_history = await self._load_conversation_history(conversation_id)
 
-        user_profile = {}
+        user_profile = UserProfile()
         if agent_config.memory_policy.profile:
             user_profile = await self.profile_adapter.retrieve(user_id)
 
-        rag_chunks = []
+        rag_chunks: list[RagChunk] = []
         if agent_config.memory_policy.rag:
             rag_chunks = await self.rag_adapter.retrieve(
                 query=current_message.content,
@@ -239,8 +265,6 @@ class ContextBuilder:
         if additional_system_instruction:
             system_prompt += "\n\n" + additional_system_instruction
 
-        tool_specs = await self._load_tool_specs(agent_config.tools)
-
         return AgentContext(
             agent_config=agent_config,
             system_prompt=system_prompt,
@@ -248,7 +272,11 @@ class ContextBuilder:
             user_profile=user_profile,
             rag_chunks=rag_chunks,
             current_message=current_message,
-            tool_specs=tool_specs,
+            tool_specs=tuple(
+                definition
+                for tool_key in agent_config.tools
+                if (definition := self.tool_registry.get(tool_key)) is not None
+            ),
         )
 
     async def _load_conversation_history(self, conversation_id: str | None) -> list[Message]:
@@ -268,15 +296,3 @@ class ContextBuilder:
             return []
 
         return []
-
-    async def _load_tool_specs(self, tool_keys: list[str]) -> list[dict[str, Any]]:
-        """
-        Resolve configured Tool keys into schemas before model invocation.
-
-        Args:
-            tool_keys: Globally unique keys of Tools to load specifications for.
-
-        Returns:
-            list[dict[str, Any]]: Tool schemas the model is allowed to call.
-        """
-        return self.tool_registry.get_tool_specs(tool_keys)
