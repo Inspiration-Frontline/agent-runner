@@ -7,7 +7,7 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
 
 from agent_runner.config import ChatRequest
 from agent_runner.context.builder import CaptureFilePart, Message, ModelImagePart
-from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
+from agent_runner.runtime.openai_agents_sdk_adapter import OpenAIAgentsSdkAdapter
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -99,7 +99,7 @@ def test_attachment_only_instruction_uses_the_ui_locale_without_visible_fake_tex
 
 def test_plain_text_capture_uses_scalar_content() -> None:
     """A text-only typed message must remain scalar at the persistence boundary."""
-    runtime = OpenAIAgentsRuntime()
+    runtime = OpenAIAgentsSdkAdapter()
     captured = runtime._to_capture_message(Message(role="user", content="Question"))
 
     assert captured.role == "user"

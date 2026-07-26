@@ -98,7 +98,7 @@ from agent_runner.runtime.model_events import (
     ModelToolStarted,
     ModelUsage,
 )
-from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
+from agent_runner.runtime.openai_agents_sdk_adapter import OpenAIAgentsSdkAdapter
 from agent_runner.runtime.tool_loop import AgentRunCapture, CapturedModelTurn
 from agent_runner.tools.internal.catalog import build_internal_tool_registry
 
@@ -266,7 +266,7 @@ class RuntimeOrchestrator:
         self.context_builder = ContextBuilder(tool_registry)
         self.agent_factory = AgentFactory()
         self.cancellation_manager = CancellationManager()
-        self.openai_runtime = OpenAIAgentsRuntime()
+        self.openai_runtime = OpenAIAgentsSdkAdapter()
         self.conversation_client = ConversationManagerClient()
         self.execution_lock = ConversationExecutionLock()
         self._lock_acquired = False
@@ -601,7 +601,7 @@ class RuntimeOrchestrator:
         terminal_status: RoundStatus | None = None
         terminal_error = ""
 
-        if isinstance(self.openai_runtime, OpenAIAgentsRuntime):
+        if isinstance(self.openai_runtime, OpenAIAgentsSdkAdapter):
             runtime_stream = self.openai_runtime.run_streamed(
                 agent,
                 context,

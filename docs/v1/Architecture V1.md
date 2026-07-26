@@ -550,7 +550,7 @@ agent_runner/
 │   └── litellm_client.py
 
 ├── runtime/
-│   └── openai_agents_runtime.py
+│   └── openai_agents_sdk_adapter.py
 
 └── observability/
     ├── tracing.py

@@ -3,36 +3,50 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from agents import function_tool
+from agents import Agent, Runner, function_tool
+from agents.items import ModelResponse
+from agents.models.interface import Model
 from agents.stream_events import RunItemStreamEvent
 from agents.tool_context import ToolContext
+from agents.usage import Usage
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText
 
 from agent_runner.context.builder import CapturedMessage
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.runtime.model_events import ModelToolCompleted, ModelToolStarted
-from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
+from agent_runner.runtime.openai_agents_sdk_adapter import OpenAIAgentsSdkAdapter
 from agent_runner.runtime.tool_loop import CapturedToolCall, ToolExecutionCollector
-from agent_runner.tools.executor import ToolCallRequest, ToolExecutionResult, ToolExecutor
 from agent_runner.tools.internal.catalog import build_internal_tool_registry
 from agent_runner.tools.internal.web_search import (
     _DuckDuckGoResultParser,
     _VisibleTextParser,
     _WebSearchClient,
 )
-from agent_runner.tools.registry import ToolDefinition, ToolRegistry
+from agent_runner.tools.registry import ToolDefinition
 
 
-def _delay_definition(tool_key: str, delay: float, fails: bool = False) -> ToolDefinition:
+def _delay_definition(
+    tool_key: str,
+    delay: float,
+    fails: bool = False,
+    timeline: list[tuple[str, str, float]] | None = None,
+) -> ToolDefinition:
     async def execute(value: int) -> dict[str, int]:
         """Run a delayed test Tool.
 
         Args:
             value: Value returned by the test Tool.
         """
-        await asyncio.sleep(delay)
-        if fails:
-            raise ValueError(f"failed:{value}")
-        return {"value": value}
+        if timeline is not None:
+            timeline.append((tool_key, "start", asyncio.get_running_loop().time()))
+        try:
+            await asyncio.sleep(delay)
+            if fails:
+                raise ValueError(f"failed:{value}")
+            return {"value": value}
+        finally:
+            if timeline is not None:
+                timeline.append((tool_key, "end", asyncio.get_running_loop().time()))
 
     sdk_tool = function_tool(
         name_override=tool_key.replace(".", "_"),
@@ -51,7 +65,57 @@ def _tool_context(tool_name: str, call_id: str, arguments: str) -> ToolContext[N
 
 
 async def _execute_builtin(tool_key: str, arguments: dict) -> dict:
-    return await ToolExecutor(build_internal_tool_registry()).execute(tool_key, arguments)
+    definition = build_internal_tool_registry().get(tool_key)
+    assert definition is not None
+    assert definition.function_tool is not None
+    arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    return await definition.function_tool.on_invoke_tool(
+        _tool_context(definition.tool_name, "test-call", arguments_json),
+        arguments_json,
+    )
+
+
+class _ToolLoopModel(Model):
+    """Deterministic model that requests two Tools, then answers from their outputs."""
+
+    def __init__(self, tool_names: tuple[str, str]) -> None:
+        self.tool_names = tool_names
+        self.inputs: list[object] = []
+
+    async def get_response(self, *args: object, **kwargs: object) -> ModelResponse:
+        model_input = kwargs["input"]
+        self.inputs.append(model_input)
+
+        if len(self.inputs) == 1:
+            output = [
+                ResponseFunctionToolCall(
+                    arguments='{"value":1}',
+                    call_id="call-success",
+                    name=self.tool_names[0],
+                    type="function_call",
+                ),
+                ResponseFunctionToolCall(
+                    arguments='{"value":2}',
+                    call_id="call-failure",
+                    name=self.tool_names[1],
+                    type="function_call",
+                ),
+            ]
+        else:
+            output = [
+                ResponseOutputMessage(
+                    id="message-final",
+                    content=[ResponseOutputText(annotations=[], text="Tool loop completed", type="output_text")],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ]
+
+        return ModelResponse(output=output, usage=Usage(), response_id=f"response-{len(self.inputs)}")
+
+    def stream_response(self, *args: object, **kwargs: object):
+        raise NotImplementedError
 
 
 async def test_current_time_includes_timezone_offset_and_time() -> None:
@@ -171,48 +235,43 @@ def test_html_parsers_close_open_results_and_remove_hidden_content() -> None:
     assert page_parser.text() == "Visible\ntext"
 
 
-async def test_batch_execution_is_parallel_and_partial_failure_does_not_cancel_sibling() -> None:
-    registry = ToolRegistry()
-    registry.register(_delay_definition("test.success", 0.05))
-    registry.register(_delay_definition("test.failure", 0.05, fails=True))
-    executor = ToolExecutor(registry)
-    started = asyncio.get_running_loop().time()
-
-    results = await executor.execute_batch(
-        [
-            ToolCallRequest(tool_key="test.success", arguments={"value": 1}),
-            ToolCallRequest(tool_key="test.failure", arguments={"value": 2}),
-        ]
-    )
-
-    elapsed = asyncio.get_running_loop().time() - started
-    assert elapsed < 0.09
-    assert results == [
-        ToolExecutionResult(tool_key="test.success", status="success", result={"value": 1}),
-        ToolExecutionResult(tool_key="test.failure", status="error", error="failed:2"),
+async def test_sdk_runner_executes_parallel_tools_and_continues_with_outputs() -> None:
+    timeline: list[tuple[str, str, float]] = []
+    definitions = [
+        _delay_definition("test.success", 0.05, timeline=timeline),
+        _delay_definition("test.failure", 0.05, fails=True, timeline=timeline),
     ]
-
-
-async def test_batch_cancellation_cancels_every_in_flight_tool() -> None:
-    registry = ToolRegistry()
-    registry.register(_delay_definition("test.first", 10))
-    registry.register(_delay_definition("test.second", 10))
-    token = CancellationToken()
-    task = asyncio.create_task(
-        ToolExecutor(registry).execute_batch(
-            [
-                ToolCallRequest(tool_key="test.first", arguments={"value": 1}),
-                ToolCallRequest(tool_key="test.second", arguments={"value": 2}),
-            ],
-            token,
-        )
+    collector = ToolExecutionCollector()
+    adapter = OpenAIAgentsSdkAdapter(model_factory=SimpleNamespace())
+    model = _ToolLoopModel((definitions[0].tool_name, definitions[1].tool_name))
+    sdk_agent = Agent(
+        name="Tool loop integration",
+        instructions="Run both Tools.",
+        model=model,
+        tools=adapter._build_sdk_tools(definitions, collector, cancellation_token=None),
     )
-    await asyncio.sleep(0)
 
-    token.cancel()
+    result = await Runner.run(starting_agent=sdk_agent, input="Run the Tool loop.")
 
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    starts = {tool_key: timestamp for tool_key, phase, timestamp in timeline if phase == "start"}
+    ends = {tool_key: timestamp for tool_key, phase, timestamp in timeline if phase == "end"}
+    assert max(starts.values()) < min(ends.values())
+    assert result.final_output == "Tool loop completed"
+    assert len(model.inputs) == 2
+
+    second_input = model.inputs[1]
+    assert isinstance(second_input, list)
+    tool_outputs = {
+        item["call_id"]: json.loads(item["output"])
+        for item in second_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    }
+    assert tool_outputs == {
+        "call-success": {"value": 1},
+        "call-failure": {"status": "error", "error": "failed:2"},
+    }
+    assert collector.get("call-success").status == "COMPLETED"
+    assert collector.get("call-failure").status == "FAILED"
 
 
 async def test_collector_returns_structured_failure_for_model_and_audit() -> None:
@@ -258,7 +317,7 @@ async def test_cancelled_observed_call_builds_partial_turn_when_sdk_removes_raw_
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    capture = OpenAIAgentsRuntime(model_factory=SimpleNamespace())._build_observed_partial_capture(
+    capture = OpenAIAgentsSdkAdapter(model_factory=SimpleNamespace())._build_observed_partial_capture(
         initial_messages=[CapturedMessage(role="user", content="cancel")],
         definitions=[definition],
         collector=collector,
@@ -276,7 +335,7 @@ async def test_cancelled_observed_call_builds_partial_turn_when_sdk_removes_raw_
 
 
 def test_tool_stream_events_keep_call_identity_and_status() -> None:
-    runtime = OpenAIAgentsRuntime(model_factory=SimpleNamespace())
+    runtime = OpenAIAgentsSdkAdapter(model_factory=SimpleNamespace())
     collector = ToolExecutionCollector()
     collector._executions["call-1"] = SimpleNamespace(tool_name="test_success", status="FAILED")
     called = RunItemStreamEvent(

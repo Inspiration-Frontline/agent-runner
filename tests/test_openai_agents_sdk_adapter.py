@@ -4,7 +4,7 @@ from agent_runner.agent_definitions.config_models import AgentDefinition, Memory
 from agent_runner.api.streaming import UsageEvent
 from agent_runner.context.builder import AgentContext, Message, RuntimeToolCall
 from agent_runner.context.models import UserProfile
-from agent_runner.runtime.openai_agents_runtime import OpenAIAgentsRuntime
+from agent_runner.runtime.openai_agents_sdk_adapter import OpenAIAgentsSdkAdapter
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -18,7 +18,7 @@ class DummyModelFactory:
 
 
 def test_build_input_preserves_history_and_current_message():
-    runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
+    runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     context = AgentContext(
         agent_config=_agent(),
         system_prompt="system",
@@ -40,7 +40,7 @@ def test_build_input_preserves_history_and_current_message():
 
 
 def test_build_input_preserves_plain_text_when_multipart_content_is_empty():
-    runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
+    runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     context = AgentContext(
         agent_config=_agent(),
         system_prompt="system",
@@ -58,7 +58,7 @@ def test_build_input_preserves_plain_text_when_multipart_content_is_empty():
 
 
 def test_build_input_converts_provider_neutral_tool_history_to_responses_items():
-    runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
+    runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     context = AgentContext(
         agent_config=_agent(),
         system_prompt="system",
@@ -99,7 +99,7 @@ def test_build_input_converts_provider_neutral_tool_history_to_responses_items()
 
 def test_build_sdk_agent_uses_agents_sdk_model():
     model_factory = DummyModelFactory()
-    runtime = OpenAIAgentsRuntime(model_factory=model_factory)
+    runtime = OpenAIAgentsSdkAdapter(model_factory=model_factory)
 
     sdk_agent = runtime._build_sdk_agent(_agent(), "system prompt")
 
@@ -114,7 +114,7 @@ def test_build_sdk_agent_uses_agents_sdk_model():
 
 
 def test_response_completed_event_usage_is_passed_through():
-    runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
+    runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     event = SimpleNamespace(
         data=SimpleNamespace(
             response=SimpleNamespace(usage=SimpleNamespace(input_tokens=12, output_tokens=5, total_tokens=17))
@@ -129,7 +129,7 @@ def test_response_completed_event_usage_is_passed_through():
 
 
 def test_response_completed_event_without_usage_is_ignored():
-    runtime = OpenAIAgentsRuntime(model_factory=DummyModelFactory())
+    runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     event = SimpleNamespace(data=SimpleNamespace(response=SimpleNamespace(usage=None)))
 
     assert runtime._convert_response_completed_usage(event.data) is None

@@ -64,14 +64,14 @@ class NormalizedModelOutput:
     tool_calls: tuple[CapturedToolCall, ...]
 
 
-class OpenAIAgentsRuntime:
+class OpenAIAgentsSdkAdapter:
     """
-    Runtime for executing AgentBreaker agents through openai-agents-python.
+    Adapter between AgentBreaker's runtime contracts and openai-agents-python.
 
-    This class converts the local AgentBreaker agent definition and context into
-    an Agents SDK Agent, delegates the agent loop and model stream handling to the
-    SDK, then maps semantic SDK stream events back to AgentBreaker's SSE event
-    dictionary contract.
+    This class does not implement an Agent or Tool loop. It converts the local
+    AgentBreaker definition and context into an Agents SDK Agent, delegates the
+    complete model/Tool loop to ``Runner``, then maps SDK stream events and run
+    evidence back to AgentBreaker's typed runtime and persistence contracts.
     """
 
     def __init__(self, model_factory: LiteLLMModelFactory | None = None):
@@ -121,6 +121,8 @@ class OpenAIAgentsRuntime:
         trace_id = str(uuid4())
         model_completed_times: list[int] = []
         model_completed_usages: list[tuple[int, int, int]] = []
+        # Runner recognizes model Tool Calls, invokes the FunctionTools attached to sdk_agent,
+        # appends their outputs to the next model input, and repeats until a final output.
         result = Runner.run_streamed(
             starting_agent=sdk_agent,
             input=sdk_input,
