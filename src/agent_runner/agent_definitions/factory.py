@@ -19,7 +19,7 @@ class AgentFactory:
         _agent_registry: In-memory registry mapping agent_id to AgentDefinition instances.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the agent factory with an empty registry.
         """
@@ -102,7 +102,7 @@ class AgentFactory:
         """
         return self._agent_registry.get(agent_id)
 
-    def remove_agent(self, agent_id: int):
+    def remove_agent(self, agent_id: int) -> None:
         """
         Remove an agent from the registry.
 

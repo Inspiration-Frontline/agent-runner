@@ -73,7 +73,7 @@ class TokenDeltaEvent(StreamEvent):
     Sent during streaming to provide incremental text output from the agent.
     """
 
-    def __init__(self, content: str):
+    def __init__(self, content: str) -> None:
         """
         Initialize a token delta event.
 
@@ -91,7 +91,7 @@ class ToolStartEvent(StreamEvent):
     and arguments being used.
     """
 
-    def __init__(self, tool: str, tool_call_id: str, tool_args: dict[str, Any] | None = None):
+    def __init__(self, tool: str, tool_call_id: str, tool_args: dict[str, Any] | None = None) -> None:
         """
         Initialize a tool start event.
 
@@ -116,7 +116,7 @@ class ToolResultEvent(StreamEvent):
     that can be used by the agent.
     """
 
-    def __init__(self, tool: str, tool_call_id: str, tool_result: Any, tool_status: str):
+    def __init__(self, tool: str, tool_call_id: str, tool_result: Any, tool_status: str) -> None:
         """
         Initialize a tool result event.
 
@@ -141,7 +141,7 @@ class ErrorEvent(StreamEvent):
     a descriptive error message.
     """
 
-    def __init__(self, error_message: str, error_code: str | None = None, phase: str | None = None):
+    def __init__(self, error_message: str, error_code: str | None = None, phase: str | None = None) -> None:
         """
         Initialize an error event.
 
@@ -157,7 +157,7 @@ class ErrorEvent(StreamEvent):
 
 
 class SavingEvent(StreamEvent):
-    def __init__(self):
+    def __init__(self) -> None:
         """Create the transient event emitted before Round persistence begins."""
         super().__init__(type=StreamEventType.SAVING)
 
@@ -175,7 +175,7 @@ class AttachmentProcessingEvent(StreamEvent):
 
 
 class PersistedEvent(StreamEvent):
-    def __init__(self):
+    def __init__(self) -> None:
         """Create the event emitted after Conversation Manager confirms persistence."""
         super().__init__(type=StreamEventType.PERSISTED)
 
@@ -185,7 +185,7 @@ class UsageEvent(StreamEvent):
     Event containing token usage reported by the upstream model response.
     """
 
-    def __init__(self, prompt_tokens: int, completion_tokens: int, total_tokens: int):
+    def __init__(self, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
         """
         Initialize a usage event.
 
@@ -210,7 +210,7 @@ class DoneEvent(StreamEvent):
     processing has finished.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize a done event.
         """

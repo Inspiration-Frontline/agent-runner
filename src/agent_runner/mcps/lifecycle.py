@@ -2,8 +2,19 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
+
+
+class MCPManagerProtocol(Protocol):
+    """Operations needed to own one request-scoped MCP connection."""
+
+    async def get_connection(self, server_id: str) -> object:
+        """Acquire a connection for the requested server."""
+
+    async def release_connection(self, server_id: str, connection: object) -> None:
+        """Return a previously acquired connection."""
 
 
 @dataclass
@@ -23,7 +34,7 @@ class MCPSession:
 
     session_id: str
     server_id: str
-    connection: any
+    connection: object
     active: bool = True
 
 
@@ -39,7 +50,7 @@ class MCPLifecycle:
         _sessions: Dictionary mapping session IDs to MCPSession instances.
     """
 
-    def __init__(self, mcp_manager):
+    def __init__(self, mcp_manager: MCPManagerProtocol) -> None:
         """
         Initialize the MCP lifecycle manager.
 
@@ -70,7 +81,7 @@ class MCPLifecycle:
         logger.info(f"Created MCP session: {session_id} for server: {server_id}")
         return session
 
-    async def close_session(self, session_id: str):
+    async def close_session(self, session_id: str) -> None:
         """
         Close and cleanup an MCP session.
 
@@ -114,7 +125,7 @@ class MCPLifecycle:
         finally:
             await self.close_session(session_id)
 
-    async def close_all_sessions(self):
+    async def close_all_sessions(self) -> None:
         """
         Close all active MCP sessions.
         """

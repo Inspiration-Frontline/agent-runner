@@ -6,9 +6,11 @@ providing streaming response endpoints for real-time agent communication.
 """
 
 import asyncio
+from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from agent_runner.config import CancelChatRequest, ChatRequest
 from agent_runner.conversation import ConversationBusyError
@@ -16,6 +18,12 @@ from agent_runner.runtime.cancellation import conversation_cancellation_registry
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 router = APIRouter()
+
+
+class CancelChatResponse(BaseModel):
+    """Acknowledgement returned after requesting Conversation cancellation."""
+
+    cancelled: bool
 
 
 def trusted_user_id(x_user_id: str | None) -> int:
@@ -37,7 +45,7 @@ def trusted_user_id(x_user_id: str | None) -> int:
 async def cancel_chat(
     cancel_request: CancelChatRequest,
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-):
+) -> CancelChatResponse:
     """Request cancellation of the active generation for one authenticated Conversation."""
     user_id = trusted_user_id(x_user_id)
     cancelled = False
@@ -46,7 +54,7 @@ async def cancel_chat(
         if cancelled:
             break
         await asyncio.sleep(0.05)
-    return {"cancelled": cancelled}
+    return CancelChatResponse(cancelled=cancelled)
 
 
 @router.post("/chat/stream")
@@ -54,7 +62,7 @@ async def chat_stream(
     request: Request,
     chat_request: ChatRequest,
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-):
+) -> StreamingResponse:
     """
     Stream agent chat responses through SSE (Server-Sent Events).
 
@@ -65,10 +73,7 @@ async def chat_stream(
     Args:
         request: The FastAPI request object for connection management.
         chat_request: The chat request containing:
-            - agent_id: Agent identifier to invoke
-            - version: Optional agent version
             - conversation_id: Optional conversation ID
-            - user_id: User identifier
             - message: User's message content
 
     Returns:
@@ -81,8 +86,7 @@ async def chat_stream(
     Example:
         POST /v1/agent/chat/stream
         {
-            "agent_id": "assistant-v1",
-            "user_id": "user123",
+            "conversation_id": "conv_example123",
             "message": "Hello, how can I help?"
         }
     """
@@ -101,7 +105,7 @@ async def chat_stream(
             },
         ) from error
 
-    async def event_generator():
+    async def event_generator() -> AsyncGenerator[str]:
         """Yield orchestrator events as SSE frames while preserving disconnect cleanup."""
         try:
             async for event in orchestrator.run(chat_request, user_id, request):

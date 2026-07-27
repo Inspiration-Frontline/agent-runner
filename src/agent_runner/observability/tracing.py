@@ -1,6 +1,6 @@
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
@@ -25,16 +25,9 @@ class Span:
     trace_id: str
     name: str
     parent_id: str | None = None
-    attributes: dict[str, Any] = None
+    attributes: dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        """
-        Initialize attributes dictionary if not provided.
-        """
-        if self.attributes is None:
-            self.attributes = {}
-
-    def set_attribute(self, key: str, value: Any):
+    def set_attribute(self, key: str, value: Any) -> None:
         """
         Set an attribute on this span.
 
@@ -44,7 +37,7 @@ class Span:
         """
         self.attributes[key] = value
 
-    def add_event(self, name: str, attributes: dict[str, Any] | None = None):
+    def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
         """
         Add an event to this span.
 

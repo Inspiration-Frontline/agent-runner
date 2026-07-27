@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from typing import Any, cast
 
 import pytest
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import ResponseBase
@@ -13,6 +14,7 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     PrepareConversationReferencesResponse,
     PreparedConversationReference,
     RoundStatus,
+    SaveConversationRoundRequest,
     SaveConversationRoundResponse,
 )
 from fastapi import HTTPException
@@ -21,7 +23,7 @@ from agent_runner.agent_definitions.config_models import AgentDefinition, Memory
 from agent_runner.api import routes
 from agent_runner.api.streaming import StreamEventType
 from agent_runner.config import AgentConfig, ChatRequest, ConversationReferenceRequest
-from agent_runner.context.builder import AgentContext
+from agent_runner.context.builder import AgentContext, Message
 from agent_runner.context.models import UserProfile
 from agent_runner.conversation import ConversationBusyError
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
@@ -50,15 +52,24 @@ class FakeLock:
 
 class FakeConversationClient:
     def __init__(self) -> None:
-        self.saved_requests = []
+        self.saved_requests: list[SaveConversationRoundRequest] = []
 
-    async def get_round_history(self, user_id: int, conversation_id: str):
+    async def get_round_history(
+        self,
+        user_id: int,
+        conversation_id: str,
+    ) -> GetConversationRoundHistoryResponse:
         return GetConversationRoundHistoryResponse(
             base=ResponseBase(code=0, success=True),
             data=ConversationRoundHistory(conversation_id=conversation_id, latest_round_number=1),
         )
 
-    async def get_model_context(self, user_id: int, conversation_id: str, end_round_number: int):
+    async def get_model_context(
+        self,
+        user_id: int,
+        conversation_id: str,
+        end_round_number: int,
+    ) -> GetConversationReplayResponse:
         assert end_round_number == 1
         return GetConversationReplayResponse(
             base=ResponseBase(code=0, success=True),
@@ -72,11 +83,16 @@ class FakeConversationClient:
             ),
         )
 
-    async def save_round(self, request):
+    async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         self.saved_requests.append(request)
         return SaveConversationRoundResponse(base=ResponseBase(code=0, success=True))
 
-    async def prepare_references(self, user_id: int, destination_conversation_id: str, references):
+    async def prepare_references(
+        self,
+        user_id: int,
+        destination_conversation_id: str,
+        references: list[ConversationReference],
+    ) -> PrepareConversationReferencesResponse:
         assert destination_conversation_id == "conv_multi"
         assert references == [
             ConversationReference(
@@ -100,7 +116,7 @@ class FakeConversationClient:
 
 
 class FakeConfigLoader:
-    async def load(self, agent_id: int):
+    async def load(self, agent_id: int) -> AgentConfig:
         return AgentConfig(
             agent_id=agent_id,
             version=2,
@@ -116,9 +132,9 @@ class FakeConfigLoader:
 
 class CapturingContextBuilder:
     def __init__(self) -> None:
-        self.history = []
+        self.history: list[Message] = []
 
-    async def build(self, **kwargs):
+    async def build(self, **kwargs: Any) -> AgentContext:
         self.history = kwargs["conversation_history"]
         return AgentContext(
             agent_config=kwargs["agent_config"],
@@ -127,12 +143,12 @@ class CapturingContextBuilder:
             user_profile=UserProfile(),
             rag_chunks=[],
             current_message=kwargs["current_message"],
-            tool_specs=[],
+            tool_specs=(),
         )
 
 
 class FakeAgentFactory:
-    async def create(self, config: AgentConfig):
+    async def create(self, config: AgentConfig) -> AgentDefinition:
         return AgentDefinition(
             agent_id=config.agent_id,
             version=config.version,
@@ -149,12 +165,22 @@ class FakeAgentFactory:
 
 
 class SuccessRuntime:
-    async def run_streamed(self, agent, context, token) -> AsyncGenerator[dict]:
+    async def run_streamed(
+        self,
+        agent: AgentDefinition,
+        context: AgentContext,
+        token: "FakeToken",
+    ) -> AsyncGenerator[dict[str, object]]:
         yield {"type": "token_delta", "content": "Your name is Ada."}
 
 
 class FailureRuntime:
-    async def run_streamed(self, agent, context, token) -> AsyncGenerator[dict]:
+    async def run_streamed(
+        self,
+        agent: AgentDefinition,
+        context: AgentContext,
+        token: "FakeToken",
+    ) -> AsyncGenerator[dict[str, object]]:
         yield {"type": "error", "content": "provider unavailable"}
 
 
@@ -167,14 +193,14 @@ class FakeToken:
 
 
 class FakeCancellationManager:
-    def create_token(self):
+    def create_token(self) -> FakeToken:
         return FakeToken()
 
-    async def cleanup(self, token) -> None:
+    async def cleanup(self, token: FakeToken) -> None:
         pass
 
 
-async def test_second_round_uses_replay_and_persists_full_snapshot():
+async def test_second_round_uses_replay_and_persists_full_snapshot() -> None:
     orchestrator, client, context_builder = _orchestrator(SuccessRuntime())
 
     events = [
@@ -191,8 +217,12 @@ async def test_second_round_uses_replay_and_persists_full_snapshot():
     ]
     saved = client.saved_requests[0]
     assert saved.round_number == 2
-    assert saved.turns[0].agent_identity.version == 2
-    assert [(message.role, message.content) for message in saved.turns[0].llm_call.request.messages] == [
+    turn = saved.turns[0]
+    assert turn.agent_identity is not None
+    assert turn.agent_identity.version == 2
+    assert turn.llm_call is not None
+    assert turn.llm_call.request is not None
+    assert [(message.role, message.content) for message in turn.llm_call.request.messages] == [
         (MessageRole.SYSTEM, "latest instructions"),
         (MessageRole.USER, "My name is Ada."),
         (MessageRole.ASSISTANT, "Nice to meet you."),
@@ -200,7 +230,7 @@ async def test_second_round_uses_replay_and_persists_full_snapshot():
     ]
 
 
-async def test_same_group_references_are_labelled_and_persist_the_frozen_boundary():
+async def test_same_group_references_are_labelled_and_persist_the_frozen_boundary() -> None:
     orchestrator, client, context_builder = _orchestrator(SuccessRuntime())
     request = ChatRequest(
         conversation_id="conv_multi",
@@ -238,7 +268,7 @@ async def test_same_group_references_are_labelled_and_persist_the_frozen_boundar
     ]
 
 
-async def test_model_failure_is_persisted_as_new_failed_round():
+async def test_model_failure_is_persisted_as_new_failed_round() -> None:
     orchestrator, client, _ = _orchestrator(FailureRuntime())
 
     events = [
@@ -256,7 +286,7 @@ async def test_model_failure_is_persisted_as_new_failed_round():
     assert saved.error_message == "provider unavailable"
 
 
-async def test_disconnect_is_persisted_as_cancelled_round():
+async def test_disconnect_is_persisted_as_cancelled_round() -> None:
     orchestrator, client, _ = _orchestrator(SuccessRuntime())
 
     events = [
@@ -273,7 +303,7 @@ async def test_disconnect_is_persisted_as_cancelled_round():
     assert saved.turns == []
 
 
-async def test_busy_conversation_returns_http_409_before_stream(monkeypatch):
+async def test_busy_conversation_returns_http_409_before_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     class BusyOrchestrator:
         async def acquire_conversation(self, conversation_id: str) -> None:
             raise ConversationBusyError("busy")
@@ -284,22 +314,30 @@ async def test_busy_conversation_returns_http_409_before_stream(monkeypatch):
     monkeypatch.setattr(routes, "RuntimeOrchestrator", BusyOrchestrator)
 
     with pytest.raises(HTTPException) as raised:
-        await routes.chat_stream(FakeRequest(), ChatRequest(conversation_id="conv_busy", message="hello"), "1")
+        await routes.chat_stream(
+            cast(Any, FakeRequest()),
+            ChatRequest(conversation_id="conv_busy", message="hello"),
+            "1",
+        )
 
     assert raised.value.status_code == 409
+    assert isinstance(raised.value.detail, dict)
     assert raised.value.detail["code"] == "CONVERSATION_BUSY"
 
 
-def _orchestrator(runtime):
+def _orchestrator(
+    runtime: SuccessRuntime | FailureRuntime,
+) -> tuple[RuntimeOrchestrator, FakeConversationClient, CapturingContextBuilder]:
     orchestrator = object.__new__(RuntimeOrchestrator)
+    harness = cast(Any, orchestrator)
     client = FakeConversationClient()
     context_builder = CapturingContextBuilder()
-    orchestrator.config_loader = FakeConfigLoader()
-    orchestrator.context_builder = context_builder
-    orchestrator.agent_factory = FakeAgentFactory()
-    orchestrator.openai_runtime = runtime
-    orchestrator.cancellation_manager = FakeCancellationManager()
-    orchestrator.conversation_client = client
-    orchestrator.execution_lock = FakeLock()
+    harness.config_loader = FakeConfigLoader()
+    harness.context_builder = context_builder
+    harness.agent_factory = FakeAgentFactory()
+    harness.openai_runtime = runtime
+    harness.cancellation_manager = FakeCancellationManager()
+    harness.conversation_client = client
+    harness.execution_lock = FakeLock()
     orchestrator._lock_acquired = False
     return orchestrator, client, context_builder

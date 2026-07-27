@@ -68,7 +68,7 @@ class NacosConfigLoader:
         self.enabled = enabled
         self.config_client: NacosConfigService | None = None
         self._cached_config: dict[str, Any] = {}
-        self._listener_task: asyncio.Task | None = None
+        self._listener_task: asyncio.Task[None] | None = None
 
     async def initialize(self) -> None:
         """

@@ -1,9 +1,13 @@
 import logging
 
+import pytest
+
 from agent_runner.runtime.events import RuntimeEvent, RuntimeEventBus, RuntimeEventType
 
 
-async def test_failing_handler_is_logged_and_does_not_stop_other_handlers(caplog):
+async def test_failing_handler_is_logged_and_does_not_stop_other_handlers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     event_bus = RuntimeEventBus()
     called: list[str] = []
 

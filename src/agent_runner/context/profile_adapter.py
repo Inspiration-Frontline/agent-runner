@@ -21,7 +21,7 @@ class ProfileAdapter:
         client: Async HTTP client for service communication.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the profile adapter with service URL and HTTP client.
         """
@@ -29,7 +29,7 @@ class ProfileAdapter:
         self.base_url = current_settings.user_profiler_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
-    async def retrieve(self, user_id: str | int) -> UserProfile:
+    async def retrieve(self, user_id: int) -> UserProfile:
         """
         Retrieve user profile data from the service.
 
@@ -53,7 +53,7 @@ class ProfileAdapter:
             logger.exception(f"Error retrieving profile for user {user_id}")
             return UserProfile()
 
-    async def update(self, user_id: str | int, profile_data: UserProfile) -> bool:
+    async def update(self, user_id: int, profile_data: UserProfile) -> bool:
         """
         Update user profile data in the service.
 
@@ -74,7 +74,7 @@ class ProfileAdapter:
             logger.exception(f"Error updating profile for user {user_id}")
             return False
 
-    async def close(self):
+    async def close(self) -> None:
         """
         Close the HTTP client connection.
         """

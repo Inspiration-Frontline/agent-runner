@@ -19,6 +19,15 @@ class _FetchedPage:
     final_url: str
 
 
+@dataclass
+class _SearchResult:
+    """One normalized DuckDuckGo result before fetching its destination."""
+
+    url: str
+    title: str = ""
+    snippet: str = ""
+
+
 class _WebSearchClient:
     async def search(self, query: str) -> dict[str, object]:
         """Search DuckDuckGo and fetch readable content from the bounded result set."""
@@ -51,18 +60,21 @@ class _WebSearchClient:
             raise ValueError("Search succeeded, but no result page produced readable content.")
         return {"query": normalized, "results": pages}
 
-    async def _fetch_result(self, client: httpx.AsyncClient, result: dict) -> dict:
+    async def _fetch_result(
+        self,
+        client: httpx.AsyncClient,
+        result: _SearchResult,
+    ) -> dict[str, object]:
         """Fetch and sanitize one result page while preserving per-page errors."""
-        url = str(result.get("href") or result.get("url") or "")
-        item = {
-            "title": result.get("title") or "",
-            "url": url,
-            "snippet": result.get("body") or result.get("snippet") or "",
+        item: dict[str, object] = {
+            "title": result.title,
+            "url": result.url,
+            "snippet": result.snippet,
             "content": "",
             "error": "",
         }
         try:
-            fetched_page = await self._safe_get(client, url)
+            fetched_page = await self._safe_get(client, result.url)
             parser = _VisibleTextParser()
             parser.feed(fetched_page.body)
             parser.close()
@@ -137,8 +149,8 @@ class _DuckDuckGoResultParser(HTMLParser):
         """Initialize an HTML parser that captures at most the configured result count."""
         super().__init__(convert_charrefs=True)
         self.limit = limit
-        self.results: list[dict] = []
-        self._current: dict | None = None
+        self.results: list[_SearchResult] = []
+        self._current: _SearchResult | None = None
         self._capture: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -149,7 +161,7 @@ class _DuckDuckGoResultParser(HTMLParser):
             href = attributes.get("href") or ""
             parsed = urlparse(href)
             redirected = parse_qs(parsed.query).get("uddg")
-            self._current = {"url": redirected[0] if redirected else href, "title": "", "snippet": ""}
+            self._current = _SearchResult(url=redirected[0] if redirected else href)
             self._capture = "title"
         elif self._current is not None and "result__snippet" in classes:
             self._capture = "snippet"
@@ -165,8 +177,10 @@ class _DuckDuckGoResultParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         """Append visible text to the currently captured result field."""
-        if self._current is not None and self._capture:
-            self._current[self._capture] += data
+        if self._current is not None and self._capture == "title":
+            self._current.title += data
+        elif self._current is not None and self._capture == "snippet":
+            self._current.snippet += data
 
     def close(self) -> None:
         """Flush a partially closed result before releasing parser state."""

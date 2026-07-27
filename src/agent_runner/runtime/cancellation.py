@@ -99,7 +99,7 @@ class CancellationManager:
         _tokens: Dictionary mapping token IDs to cancellation tokens.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Create the compatibility token manager used by isolated runtime callers.
 
         Conversation cancellation uses :class:`ConversationCancellationRegistry`; this manager
@@ -134,7 +134,7 @@ class CancellationManager:
         """
         return self._tokens.get(token_id)
 
-    def cancel_token(self, token_id: str):
+    def cancel_token(self, token_id: str) -> None:
         """Signal cancellation for a token addressed by its compatibility ID.
 
         Args:
@@ -144,7 +144,7 @@ class CancellationManager:
         if token:
             token.cancel()
 
-    async def cleanup(self, token: CancellationToken):
+    async def cleanup(self, token: CancellationToken) -> None:
         """Cancel and yield once so scheduled callbacks can finish before request teardown.
 
         Args:
@@ -153,7 +153,7 @@ class CancellationManager:
         token.cancel()
         await asyncio.sleep(0)
 
-    def remove_token(self, token_id: str):
+    def remove_token(self, token_id: str) -> None:
         """Forget a compatibility token after its request has terminated.
 
         Args:

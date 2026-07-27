@@ -1,11 +1,11 @@
 import logging
 import sys
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
 
-def setup_logging(level: int = logging.INFO, json_format: bool = False):
+def setup_logging(level: int = logging.INFO, json_format: bool = False) -> None:
     """
     Configure structured logging for the application.
 
@@ -53,7 +53,7 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     Returns:
         structlog.stdlib.BoundLogger: A bound logger instance.
     """
-    return structlog.get_logger(name)
+    return cast(structlog.stdlib.BoundLogger, structlog.get_logger(name))
 
 
 class RequestContextFilter(logging.Filter):

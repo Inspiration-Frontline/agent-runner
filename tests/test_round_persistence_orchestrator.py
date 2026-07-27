@@ -1,9 +1,11 @@
 from collections.abc import AsyncGenerator
+from typing import Any, cast
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import ResponseBase
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
     ConversationRoundHistory,
     GetConversationRoundHistoryResponse,
+    SaveConversationRoundRequest,
     SaveConversationRoundResponse,
 )
 
@@ -34,15 +36,19 @@ class FakeLock:
 class FakeConversationClient:
     def __init__(self, save_success: bool) -> None:
         self.save_success = save_success
-        self.saved_request = None
+        self.saved_request: SaveConversationRoundRequest | None = None
 
-    async def get_round_history(self, user_id: int, conversation_id: str):
+    async def get_round_history(
+        self,
+        user_id: int,
+        conversation_id: str,
+    ) -> GetConversationRoundHistoryResponse:
         return GetConversationRoundHistoryResponse(
             base=ResponseBase(code=0, success=True),
             data=ConversationRoundHistory(conversation_id=conversation_id, latest_round_number=0),
         )
 
-    async def save_round(self, request):
+    async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         self.saved_request = request
         return SaveConversationRoundResponse(
             base=ResponseBase(
@@ -54,7 +60,7 @@ class FakeConversationClient:
 
 
 class FakeConfigLoader:
-    async def load(self, agent_id: int):
+    async def load(self, agent_id: int) -> AgentConfig:
         return AgentConfig(
             agent_id=agent_id,
             version=1,
@@ -69,7 +75,7 @@ class FakeConfigLoader:
 
 
 class FakeContextBuilder:
-    async def build(self, **kwargs):
+    async def build(self, **kwargs: Any) -> AgentContext:
         return AgentContext(
             agent_config=kwargs["agent_config"],
             system_prompt="system prompt",
@@ -77,12 +83,12 @@ class FakeContextBuilder:
             user_profile=UserProfile(),
             rag_chunks=[],
             current_message=kwargs["current_message"],
-            tool_specs=[],
+            tool_specs=(),
         )
 
 
 class FakeAgentFactory:
-    async def create(self, config: AgentConfig):
+    async def create(self, config: AgentConfig) -> AgentDefinition:
         return AgentDefinition(
             agent_id=config.agent_id,
             version=config.version,
@@ -99,7 +105,12 @@ class FakeAgentFactory:
 
 
 class FakeRuntime:
-    async def run_streamed(self, agent, context, token) -> AsyncGenerator[dict]:
+    async def run_streamed(
+        self,
+        agent: AgentDefinition,
+        context: AgentContext,
+        token: "FakeToken",
+    ) -> AsyncGenerator[dict[str, object]]:
         yield {"type": "token_delta", "content": "Persisted "}
         yield {"type": "token_delta", "content": "answer"}
         yield {"type": "usage", "prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
@@ -114,14 +125,14 @@ class FakeToken:
 
 
 class FakeCancellationManager:
-    def create_token(self):
+    def create_token(self) -> FakeToken:
         return FakeToken()
 
-    async def cleanup(self, token) -> None:
+    async def cleanup(self, token: FakeToken) -> None:
         pass
 
 
-async def test_success_reports_done_only_after_persistence():
+async def test_success_reports_done_only_after_persistence() -> None:
     orchestrator, client, lock = _orchestrator(save_success=True)
 
     events = [
@@ -139,13 +150,15 @@ async def test_success_reports_done_only_after_persistence():
         StreamEventType.PERSISTED,
         StreamEventType.DONE,
     ]
+    assert client.saved_request is not None
+    assert client.saved_request.final_answer is not None
     assert client.saved_request.final_answer.content == "Persisted answer"
     assert client.saved_request.user_id == 1
     assert client.saved_request.conversation_id == "conv_persistence"
     assert lock.released is True
 
 
-async def test_persistence_failure_never_reports_persisted_or_done():
+async def test_persistence_failure_never_reports_persisted_or_done() -> None:
     orchestrator, _, lock = _orchestrator(save_success=False)
 
     events: list[StreamEvent] = [
@@ -163,7 +176,7 @@ async def test_persistence_failure_never_reports_persisted_or_done():
     assert lock.released is True
 
 
-def test_public_request_forbids_user_and_agent_identity():
+def test_public_request_forbids_user_and_agent_identity() -> None:
     fields = {"conversation_id": "conv_persistence", "message": "Question", "user_id": 1, "agent_id": 1}
     try:
         ChatRequest.model_validate(fields)
@@ -172,7 +185,7 @@ def test_public_request_forbids_user_and_agent_identity():
     raise AssertionError("Identity fields must not be accepted from the public request body.")
 
 
-def test_public_request_rejects_blank_messages():
+def test_public_request_rejects_blank_messages() -> None:
     try:
         ChatRequest(conversation_id="conv_persistence", message="   ")
     except ValueError:
@@ -180,15 +193,16 @@ def test_public_request_rejects_blank_messages():
     raise AssertionError("Blank messages must be rejected before model execution.")
 
 
-def _orchestrator(save_success: bool):
+def _orchestrator(save_success: bool) -> tuple[RuntimeOrchestrator, FakeConversationClient, FakeLock]:
     orchestrator = object.__new__(RuntimeOrchestrator)
+    harness = cast(Any, orchestrator)
     client = FakeConversationClient(save_success)
     lock = FakeLock()
-    orchestrator.config_loader = FakeConfigLoader()
-    orchestrator.context_builder = FakeContextBuilder()
-    orchestrator.agent_factory = FakeAgentFactory()
-    orchestrator.openai_runtime = FakeRuntime()
-    orchestrator.cancellation_manager = FakeCancellationManager()
-    orchestrator.conversation_client = client
-    orchestrator.execution_lock = lock
+    harness.config_loader = FakeConfigLoader()
+    harness.context_builder = FakeContextBuilder()
+    harness.agent_factory = FakeAgentFactory()
+    harness.openai_runtime = FakeRuntime()
+    harness.cancellation_manager = FakeCancellationManager()
+    harness.conversation_client = client
+    harness.execution_lock = lock
     return orchestrator, client, lock

@@ -1,6 +1,7 @@
-from typing import Any
+from typing import Any, cast
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    ConversationReference,
     GetConversationReplayRequest,
     GetConversationReplayResponse,
     GetConversationRoundHistoryRequest,
@@ -49,9 +50,10 @@ class ConversationManagerClient:
         Returns:
             Typed history response containing the latest persisted Round number.
         """
-        return await self._service.get_conversation_round_history(
+        response = await self._service.get_conversation_round_history(
             GetConversationRoundHistoryRequest(user_id=user_id, conversation_id=conversation_id)
         )
+        return cast(GetConversationRoundHistoryResponse, response)
 
     async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         """Persist one terminal Round through the Manager RPC.
@@ -62,7 +64,8 @@ class ConversationManagerClient:
         Returns:
             Domain response envelope; validation conflicts are data, while transport failures raise.
         """
-        return await self._service.save_conversation_round(request, timeout=10.0)
+        response = await self._service.save_conversation_round(request, timeout=10.0)
+        return cast(SaveConversationRoundResponse, response)
 
     async def prepare_files(
         self,
@@ -85,7 +88,7 @@ class ConversationManagerClient:
         Returns:
             Per-file state and aggregate readiness/failure flags.
         """
-        return await self._service.prepare_conversation_files(
+        response = await self._service.prepare_conversation_files(
             PrepareConversationFilesRequest(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -94,6 +97,7 @@ class ConversationManagerClient:
             ),
             timeout=10.0,
         )
+        return cast(PrepareConversationFilesResponse, response)
 
     async def get_model_context(
         self, user_id: int, conversation_id: str, end_round_number: int
@@ -108,7 +112,7 @@ class ConversationManagerClient:
         Returns:
             Typed model-context response used to reconstruct provider-neutral history.
         """
-        return await self._service.get_conversation_replay(
+        response = await self._service.get_conversation_replay(
             GetConversationReplayRequest(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -116,15 +120,16 @@ class ConversationManagerClient:
                 detail_level=ReplayDetailLevel.MODEL_CONTEXT,
             )
         )
+        return cast(GetConversationReplayResponse, response)
 
     async def prepare_references(
         self,
         user_id: int,
         destination_conversation_id: str,
-        references,
+        references: list[ConversationReference],
     ) -> PrepareConversationReferencesResponse:
         """Authorize and resolve frozen same-Group Conversation evidence in one RPC."""
-        return await self._service.prepare_conversation_references(
+        response = await self._service.prepare_conversation_references(
             PrepareConversationReferencesRequest(
                 user_id=user_id,
                 destination_conversation_id=destination_conversation_id,
@@ -132,6 +137,7 @@ class ConversationManagerClient:
             ),
             timeout=10.0,
         )
+        return cast(PrepareConversationReferencesResponse, response)
 
     async def close(self) -> None:
         """Close the underlying RPC channel so request cleanup does not leak sockets/tasks."""

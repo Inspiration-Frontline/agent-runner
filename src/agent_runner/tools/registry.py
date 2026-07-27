@@ -45,7 +45,7 @@ class ToolDefinition:
     function_tool: FunctionTool | None = None
     source_type: ToolSourceType = ToolSourceType.INTERNAL
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Calculate the initial audit digest of this normalized definition."""
         canonical_definition = {
             "description": self.description,
@@ -94,7 +94,7 @@ class ToolRegistry:
         _tools_by_source: Dictionary mapping source types to lists of Tool keys.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the tool registry with empty collections.
         """
@@ -105,7 +105,7 @@ class ToolRegistry:
             ToolSourceType.MCP: [],
         }
 
-    def register(self, tool: ToolDefinition):
+    def register(self, tool: ToolDefinition) -> None:
         """
         Register a tool in the registry.
 
@@ -121,7 +121,7 @@ class ToolRegistry:
             self._tools_by_source[tool.source_type].append(tool.tool_key)
         logger.info("Registered Tool: %s (source: %s)", tool.tool_key, tool.source_type)
 
-    def unregister(self, tool_key: str):
+    def unregister(self, tool_key: str) -> None:
         """
         Unregister a tool from the registry.
 

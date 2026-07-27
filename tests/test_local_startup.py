@@ -1,3 +1,5 @@
+import pytest
+
 from agent_runner import local_startup
 
 
@@ -11,10 +13,13 @@ class HealthyResponse:
         return None
 
 
-def test_open_docs_when_server_is_ready(monkeypatch):
+def test_open_docs_when_server_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     opened_urls: list[str] = []
-    monkeypatch.setattr(local_startup.urllib.request, "urlopen", lambda *args, **kwargs: HealthyResponse())
-    monkeypatch.setattr(local_startup.webbrowser, "open", opened_urls.append)
+    monkeypatch.setattr(
+        "agent_runner.local_startup.urllib.request.urlopen",
+        lambda *args, **kwargs: HealthyResponse(),
+    )
+    monkeypatch.setattr("agent_runner.local_startup.webbrowser.open", opened_urls.append)
 
     local_startup.open_docs_when_ready(8000, timeout_seconds=0.1)
 

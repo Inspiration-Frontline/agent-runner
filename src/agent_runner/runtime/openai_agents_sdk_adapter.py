@@ -1,14 +1,17 @@
 import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
-from agents import Agent, FunctionTool, ModelSettings, Runner
+from agents import Agent, FunctionTool, Model, ModelSettings, Runner
+from agents.items import TResponseInputItem
+from agents.result import RunResultStreaming
 from agents.retry import ModelRetrySettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
+from agents.tool import Tool
 from agents.tool_context import ToolContext
 from openai.types.responses.response_completed_event import ResponseCompletedEvent
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
@@ -48,6 +51,16 @@ from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 logger = logging.getLogger(__name__)
 
 
+class AgentModelFactory(Protocol):
+    """Small model-factory boundary used by the SDK adapter and its tests."""
+
+    def create_model(self, model: str) -> str | Model:
+        """Create an SDK-compatible model for one Agent definition."""
+
+    async def close(self) -> None:
+        """Release resources owned by the model factory."""
+
+
 @dataclass(frozen=True)
 class AssistantResponse:
     """Compatibility response returned by the non-streaming adapter path."""
@@ -64,6 +77,15 @@ class NormalizedModelOutput:
     tool_calls: tuple[CapturedToolCall, ...]
 
 
+@dataclass(frozen=True)
+class PreparedSdkExecution:
+    """One request-scoped SDK Agent and the Tool audit state attached to it."""
+
+    agent: Agent[Any]
+    definitions: list[ToolDefinition]
+    collector: ToolExecutionCollector
+
+
 class OpenAIAgentsSdkAdapter:
     """
     Adapter between AgentBreaker's runtime contracts and openai-agents-python.
@@ -74,7 +96,7 @@ class OpenAIAgentsSdkAdapter:
     evidence back to AgentBreaker's typed runtime and persistence contracts.
     """
 
-    def __init__(self, model_factory: LiteLLMModelFactory | None = None):
+    def __init__(self, model_factory: AgentModelFactory | None = None) -> None:
         """Create the SDK adapter and an empty durable capture snapshot.
 
         Args:
@@ -108,13 +130,11 @@ class OpenAIAgentsSdkAdapter:
         """
         # Agents SDK agents are declarative; Runner owns execution and streaming.
         self.last_capture = AgentRunCapture()
-        collector = ToolExecutionCollector()
-        registry = tool_registry or ToolRegistry()
-        definitions = self._resolve_tool_definitions(agent, registry)
-        sdk_agent = self._build_sdk_agent(
-            agent,
-            context.system_prompt,
-            self._build_sdk_tools(definitions, collector, cancellation_token),
+        prepared = self._prepare_sdk_execution(
+            agent=agent,
+            context=context,
+            cancellation_token=cancellation_token,
+            tool_registry=tool_registry,
         )
         sdk_input = self._build_input(context)
         run_start = epoch_millis()
@@ -124,7 +144,7 @@ class OpenAIAgentsSdkAdapter:
         # Runner recognizes model Tool Calls, invokes the FunctionTools attached to sdk_agent,
         # appends their outputs to the next model input, and repeats until a final output.
         result = Runner.run_streamed(
-            starting_agent=sdk_agent,
+            starting_agent=prepared.agent,
             input=sdk_input,
             max_turns=10,
         )
@@ -138,7 +158,7 @@ class OpenAIAgentsSdkAdapter:
                     result.cancel()
                     break
 
-                converted = self._convert_stream_event(event, collector)
+                converted = self._convert_stream_event(event, prepared.collector)
                 if isinstance(event, RawResponsesStreamEvent) and isinstance(event.data, ResponseCompletedEvent):
                     model_completed_times.append(epoch_millis())
                     usage = getattr(event.data.response, "usage", None)
@@ -167,8 +187,8 @@ class OpenAIAgentsSdkAdapter:
             self.last_capture = self._build_capture(
                 result=result,
                 context=context,
-                definitions=definitions,
-                collector=collector,
+                definitions=prepared.definitions,
+                collector=prepared.collector,
                 run_start=run_start,
                 trace_id=trace_id,
                 model_completed_times=model_completed_times,
@@ -181,13 +201,15 @@ class OpenAIAgentsSdkAdapter:
         agent: AgentDefinition,
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> AssistantResponse:
-        """Execute the non-streaming compatibility path without configured Tools.
+        """Execute one request through the SDK's non-streaming Agent and Tool loop.
 
         Args:
             agent: Resolved AgentBreaker definition.
             context: Provider-neutral execution context.
             cancellation_token: Optional token checked before invoking the model.
+            tool_registry: Registry containing the configured decorated Tools.
 
         Returns:
             Typed assistant response for legacy callers.
@@ -198,17 +220,44 @@ class OpenAIAgentsSdkAdapter:
         if cancellation_token and cancellation_token.is_cancelled():
             raise asyncio.CancelledError("Execution cancelled")
 
-        sdk_agent = self._build_sdk_agent(agent, context.system_prompt, [])
+        prepared = self._prepare_sdk_execution(
+            agent=agent,
+            context=context,
+            cancellation_token=cancellation_token,
+            tool_registry=tool_registry,
+        )
         result = await Runner.run(
-            starting_agent=sdk_agent,
+            starting_agent=prepared.agent,
             input=self._build_input(context),
             max_turns=10,
         )
         return AssistantResponse(content=str(result.final_output), role="assistant")
 
+    def _prepare_sdk_execution(
+        self,
+        *,
+        agent: AgentDefinition,
+        context: AgentContext,
+        cancellation_token: CancellationToken | None,
+        tool_registry: ToolRegistry | None,
+    ) -> PreparedSdkExecution:
+        """Resolve and attach configured Tools identically for both SDK Runner entry points."""
+        collector = ToolExecutionCollector()
+        registry = tool_registry or ToolRegistry()
+        definitions = self._resolve_tool_definitions(agent, registry)
+        sdk_tools = self._build_sdk_tools(definitions, collector, cancellation_token)
+        return PreparedSdkExecution(
+            agent=self._build_sdk_agent(agent, context.system_prompt, sdk_tools),
+            definitions=definitions,
+            collector=collector,
+        )
+
     def _build_sdk_agent(
-        self, agent: AgentDefinition, system_prompt: str, tools: list[FunctionTool] | None = None
-    ) -> Agent:
+        self,
+        agent: AgentDefinition,
+        system_prompt: str,
+        tools: Sequence[FunctionTool] | None = None,
+    ) -> Agent[Any]:
         """Translate an AgentBreaker definition into one request-scoped SDK Agent.
 
         Args:
@@ -220,6 +269,7 @@ class OpenAIAgentsSdkAdapter:
             SDK Agent configured with provider timeout, retry, and parallel Tool policy.
         """
         settings = get_settings()
+        sdk_tools: list[Tool] = list(tools or ())
         return Agent(
             name=agent.name,
             instructions=system_prompt,
@@ -232,7 +282,7 @@ class OpenAIAgentsSdkAdapter:
                 retry=ModelRetrySettings(max_retries=settings.lite_llm_max_retries),
                 parallel_tool_calls=True,
             ),
-            tools=tools or [],
+            tools=sdk_tools,
         )
 
     def _resolve_tool_definitions(self, agent: AgentDefinition, registry: ToolRegistry) -> list[ToolDefinition]:
@@ -308,7 +358,7 @@ class OpenAIAgentsSdkAdapter:
             tools.append(replace(definition.function_tool, on_invoke_tool=invoke))
         return tools
 
-    def _build_input(self, context: AgentContext) -> list[dict[str, Any]]:
+    def _build_input(self, context: AgentContext) -> list[TResponseInputItem]:
         """Convert provider-neutral messages into this SDK's Responses API input shapes.
 
         Conversation Manager stores assistant Tool Calls and Tool results as neutral messages.
@@ -348,41 +398,53 @@ class OpenAIAgentsSdkAdapter:
                     )
             return converted
 
-        input_items: list[dict[str, Any]] = []
+        input_items: list[TResponseInputItem] = []
         for message in context.conversation_history:
             if message.role == "assistant" and message.tool_calls:
                 if message.content:
-                    input_items.append({"role": "assistant", "content": message.content})
+                    input_items.append(cast(TResponseInputItem, {"role": "assistant", "content": message.content}))
                 for tool_call in message.tool_calls:
                     input_items.append(
-                        {
-                            "type": "function_call",
-                            "call_id": tool_call.call_id,
-                            "name": tool_call.function_name,
-                            "arguments": tool_call.arguments,
-                        }
+                        cast(
+                            TResponseInputItem,
+                            {
+                                "type": "function_call",
+                                "call_id": tool_call.call_id,
+                                "name": tool_call.function_name,
+                                "arguments": tool_call.arguments,
+                            },
+                        )
                     )
             elif message.role == "tool":
                 input_items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": message.tool_call_id or "",
-                        "output": message.content,
-                    }
+                    cast(
+                        TResponseInputItem,
+                        {
+                            "type": "function_call_output",
+                            "call_id": message.tool_call_id or "",
+                            "output": message.content,
+                        },
+                    )
                 )
             else:
                 input_items.append(
-                    {
-                        "role": message.role,
-                        "content": provider_content(message),
-                    }
+                    cast(
+                        TResponseInputItem,
+                        {
+                            "role": message.role,
+                            "content": provider_content(message),
+                        },
+                    )
                 )
 
         input_items.append(
-            {
-                "role": "user",
-                "content": provider_content(context.current_message),
-            }
+            cast(
+                TResponseInputItem,
+                {
+                    "role": "user",
+                    "content": provider_content(context.current_message),
+                },
+            )
         )
         return input_items
 
@@ -427,8 +489,8 @@ class OpenAIAgentsSdkAdapter:
                 raw_item = getattr(event.item, "raw_item", None)
                 captured_call = CapturedToolCall(
                     tool_call_id=str(getattr(event.item, "call_id", None) or ""),
-                    tool_name=getattr(raw_item, "name", "") if raw_item is not None else "",
-                    arguments=getattr(raw_item, "arguments", None) if raw_item is not None else "{}",
+                    tool_name=str(getattr(raw_item, "name", "")) if raw_item is not None else "",
+                    arguments=str(getattr(raw_item, "arguments", "{}")) if raw_item is not None else "{}",
                 )
                 if collector is not None:
                     collector.record_call(captured_call)
@@ -450,7 +512,7 @@ class OpenAIAgentsSdkAdapter:
 
         return None
 
-    def _convert_response_completed_usage(self, event_data: Any) -> ModelUsage | None:
+    def _convert_response_completed_usage(self, event_data: ResponseCompletedEvent) -> ModelUsage | None:
         """Extract provider usage when a completed response reports it.
 
         Args:
@@ -472,7 +534,7 @@ class OpenAIAgentsSdkAdapter:
     def _build_capture(
         self,
         *,
-        result,
+        result: RunResultStreaming,
         context: AgentContext,
         definitions: list[ToolDefinition],
         collector: ToolExecutionCollector,
@@ -818,7 +880,7 @@ class OpenAIAgentsSdkAdapter:
         self,
         response_content: str,
         tool_calls: list[CapturedToolCall],
-        executions,
+        executions: list[CapturedToolExecution],
     ) -> list[CapturedMessage]:
         """Create neutral assistant/tool continuation messages for the next model Turn.
 
@@ -895,6 +957,6 @@ class OpenAIAgentsSdkAdapter:
         model_dump = getattr(value, "model_dump", None)
         return model_dump(mode="json") if callable(model_dump) else value
 
-    async def close(self):
+    async def close(self) -> None:
         """Release HTTP resources owned by the LiteLLM model factory."""
         await self.model_factory.close()

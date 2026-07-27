@@ -170,7 +170,7 @@ class ConfigurationManager:
 
         return self.get_settings()
 
-    def _merge_settings(self, base: Settings, nacos_config: dict) -> Settings:
+    def _merge_settings(self, base: Settings, nacos_config: dict[str, Any]) -> Settings:
         """Merge local settings with Nacos configuration (Nacos values override)."""
         field_mapping = {
             "server": {"host": "server_host", "port": "server_port"},

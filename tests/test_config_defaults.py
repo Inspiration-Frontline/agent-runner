@@ -1,10 +1,12 @@
+import pytest
+
 from agent_runner.agent_definitions import loader as loader_module
 from agent_runner.config import CONFIG_DIR, get_env_file, get_settings
 from agent_runner.context import profile_adapter, rag_adapter
 from agent_runner.context.builder import ContextBuilder
 
 
-def test_context_builder_reads_current_context_budget(monkeypatch):
+def test_context_builder_reads_current_context_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "agent_runner.context.builder.get_settings", lambda: type("S", (), {"max_context_tokens": 2048})()
     )
@@ -14,7 +16,7 @@ def test_context_builder_reads_current_context_budget(monkeypatch):
     assert builder.token_budget_manager.max_tokens == 2048
 
 
-def test_profile_adapter_reads_current_service_url(monkeypatch):
+def test_profile_adapter_reads_current_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "agent_runner.context.profile_adapter.get_settings",
         lambda: type("S", (), {"user_profiler_url": "http://profile-test"})(),
@@ -25,7 +27,7 @@ def test_profile_adapter_reads_current_service_url(monkeypatch):
     assert adapter.base_url == "http://profile-test"
 
 
-def test_rag_adapter_reads_current_service_url(monkeypatch):
+def test_rag_adapter_reads_current_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "agent_runner.context.rag_adapter.get_settings",
         lambda: type("S", (), {"knowledge_service_url": "http://rag-test"})(),
@@ -36,7 +38,7 @@ def test_rag_adapter_reads_current_service_url(monkeypatch):
     assert adapter.base_url == "http://rag-test"
 
 
-def test_agent_config_loader_reads_current_service_defaults(monkeypatch):
+def test_agent_config_loader_reads_current_service_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_settings = type(
         "S",
         (),
@@ -67,14 +69,14 @@ def test_agent_config_loader_reads_current_service_defaults(monkeypatch):
     assert str(loader.local_config_path).endswith("config\\custom.json")
 
 
-def test_local_env_file_is_default(monkeypatch):
+def test_local_env_file_is_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AGENT_RUNNER_ENV_FILE", raising=False)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
 
     assert get_env_file() == CONFIG_DIR / "agent-runner.env"
 
 
-def test_local_settings_do_not_require_manual_env_vars():
+def test_local_settings_do_not_require_manual_env_vars() -> None:
     settings = get_settings()
 
     assert settings.nacos_enabled is False

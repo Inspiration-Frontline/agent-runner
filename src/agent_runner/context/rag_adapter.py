@@ -21,7 +21,7 @@ class RAGAdapter:
         client: Async HTTP client for service communication.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the RAG adapter with service URL and HTTP client.
         """
@@ -32,8 +32,8 @@ class RAGAdapter:
     async def retrieve(
         self,
         query: str,
-        agent_id: str | int,
-        user_id: str | int | None = None,
+        agent_id: int,
+        user_id: int | None = None,
         top_k: int = 5,
     ) -> list[RagChunk]:
         """
@@ -79,7 +79,7 @@ class RAGAdapter:
             logger.exception("Error retrieving RAG chunks")
             return []
 
-    async def close(self):
+    async def close(self) -> None:
         """
         Close the HTTP client connection.
         """

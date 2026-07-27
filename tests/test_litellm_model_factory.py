@@ -1,7 +1,7 @@
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
 
 
-def test_bare_proxy_model_uses_openai_provider_prefix():
+def test_bare_proxy_model_uses_openai_provider_prefix() -> None:
     factory = LiteLLMModelFactory(
         base_url="http://localhost:4000",
         api_key="sk-test",
@@ -11,7 +11,7 @@ def test_bare_proxy_model_uses_openai_provider_prefix():
     assert factory._normalize_model("Qwen/Qwen3-4B") == "openai/Qwen/Qwen3-4B"
 
 
-def test_known_provider_model_is_left_unchanged():
+def test_known_provider_model_is_left_unchanged() -> None:
     factory = LiteLLMModelFactory(
         base_url="http://localhost:4000",
         api_key="sk-test",
@@ -21,7 +21,7 @@ def test_known_provider_model_is_left_unchanged():
     assert factory._normalize_model("anthropic/claude-sonnet-4-5") == "anthropic/claude-sonnet-4-5"
 
 
-def test_created_model_targets_external_proxy():
+def test_created_model_targets_external_proxy() -> None:
     factory = LiteLLMModelFactory(
         base_url="http://localhost:4000",
         api_key="sk-test",

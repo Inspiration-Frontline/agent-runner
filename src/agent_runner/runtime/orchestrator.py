@@ -13,6 +13,7 @@ from collections.abc import AsyncGenerator
 from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic, time_ns
+from typing import Protocol
 from uuid import uuid4
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import AgentIdentity
@@ -49,7 +50,6 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
     ToolDefinition as ProtoToolDefinition,
 )
-from fastapi import Request
 
 from agent_runner.agent_definitions.config_models import AgentDefinition
 from agent_runner.agent_definitions.factory import AgentFactory
@@ -99,10 +99,17 @@ from agent_runner.runtime.model_events import (
     ModelUsage,
 )
 from agent_runner.runtime.openai_agents_sdk_adapter import OpenAIAgentsSdkAdapter
-from agent_runner.runtime.tool_loop import AgentRunCapture, CapturedModelTurn
+from agent_runner.runtime.tool_loop import AgentRunCapture, CapturedModelTurn, CapturedToolCall
 from agent_runner.tools.internal.catalog import build_internal_tool_registry
 
 logger = logging.getLogger(__name__)
+
+
+class DisconnectAwareRequest(Protocol):
+    """Request boundary needed by the stream loop to observe client disconnects."""
+
+    async def is_disconnected(self) -> bool:
+        """Report whether the HTTP client has disconnected."""
 
 
 @dataclass(frozen=True)
@@ -252,7 +259,7 @@ class RuntimeOrchestrator:
         openai_runtime: Runtime wrapper for OpenAI Agents SDK.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the runtime orchestrator with all required components.
 
@@ -284,7 +291,12 @@ class RuntimeOrchestrator:
         await self.execution_lock.acquire(conversation_id)
         self._lock_acquired = True
 
-    async def run(self, chat_request: ChatRequest, user_id: int, http_request: Request) -> AsyncGenerator[StreamEvent]:
+    async def run(
+        self,
+        chat_request: ChatRequest,
+        user_id: int,
+        http_request: DisconnectAwareRequest,
+    ) -> AsyncGenerator[StreamEvent]:
         """Run one request while keeping terminal persistence and cleanup in one outer boundary."""
         state = RuntimeRequestState(
             cancellation_token=self.cancellation_manager.create_token(),
@@ -324,7 +336,7 @@ class RuntimeOrchestrator:
         self,
         chat_request: ChatRequest,
         user_id: int,
-        http_request: Request,
+        http_request: DisconnectAwareRequest,
         state: RuntimeRequestState,
     ) -> AsyncGenerator[StreamEvent]:
         """Execute the successful lifecycle as explicit preparation, model, and save phases."""
@@ -588,10 +600,10 @@ class RuntimeOrchestrator:
 
     async def _stream_model(
         self,
-        agent,
+        agent: AgentDefinition,
         context: AgentContext,
         conversation_history: list[Message],
-        http_request: Request,
+        http_request: DisconnectAwareRequest,
         cancellation_token: CancellationToken,
     ) -> AsyncGenerator[StreamEvent | ModelStreamComplete]:
         """Stream public model events while retaining one typed terminal capture."""
@@ -693,7 +705,7 @@ class RuntimeOrchestrator:
         chat_request: ChatRequest,
         user_id: int,
         attachment_request_id: str,
-        http_request: Request,
+        http_request: DisconnectAwareRequest,
         cancellation_token: CancellationToken,
     ) -> AsyncGenerator[AttachmentProcessingEvent | FilePreparationComplete]:
         """Poll one frozen file selection until it is ready, failed, timed out, or cancelled."""
@@ -878,7 +890,7 @@ class RuntimeOrchestrator:
         conversation_id: str,
         chat_request: ChatRequest,
         response_text: str,
-        agent,
+        agent: AgentDefinition,
         capture: AgentRunCapture,
         round_start: int,
         call_end: int,
@@ -920,7 +932,7 @@ class RuntimeOrchestrator:
         self,
         turn_number: int,
         captured: CapturedModelTurn,
-        agent,
+        agent: AgentDefinition,
         status: TurnStatus = TurnStatus.COMPLETED,
         error_message: str = "",
     ) -> ConversationTurn:
@@ -1031,7 +1043,7 @@ class RuntimeOrchestrator:
             Message satisfying Conversation Manager's mutually exclusive content contract.
         """
         role = MessageRole[message.role.upper()]
-        tool_calls = [self._captured_tool_call_to_proto(call) for call in message.tool_calls]
+        tool_calls = [self._runtime_tool_call_to_proto(call) for call in message.tool_calls]
         content_parts = self._captured_content_parts_to_proto(message.capture_content)
         return LlmConversationMessage(
             role=role,
@@ -1066,7 +1078,7 @@ class RuntimeOrchestrator:
             )
         return parts
 
-    def _captured_tool_call_to_proto(self, call) -> ToolCall:
+    def _captured_tool_call_to_proto(self, call: CapturedToolCall) -> ToolCall:
         """Convert one SDK Tool call evidence object into the persistence protobuf type.
 
         Args:
@@ -1081,6 +1093,14 @@ class RuntimeOrchestrator:
             function=FunctionCall(name=call.tool_name, arguments=call.arguments),
         )
 
+    def _runtime_tool_call_to_proto(self, call: RuntimeToolCall) -> ToolCall:
+        """Convert a provider-neutral replay Tool Call into the persistence protobuf type."""
+        return ToolCall(
+            id=call.call_id,
+            type=call.call_type,
+            function=FunctionCall(name=call.function_name, arguments=call.arguments),
+        )
+
     async def _persist_terminal_round(
         self,
         user_id: int,
@@ -1090,7 +1110,7 @@ class RuntimeOrchestrator:
         status: RoundStatus,
         error_message: str,
         *,
-        agent=None,
+        agent: AgentDefinition | None = None,
         capture: AgentRunCapture | None = None,
     ) -> None:
         """Persist a failed/cancelled Round exactly once when execution ends prematurely.
@@ -1138,7 +1158,7 @@ class RuntimeOrchestrator:
         except Exception:
             logger.exception("Failed to persist terminal round")
 
-    def _to_context_messages(self, messages) -> list[Message]:
+    def _to_context_messages(self, messages: list[LlmConversationMessage]) -> list[Message]:
         """Convert replay protobuf messages into provider-neutral runtime context.
 
         Args:
@@ -1159,15 +1179,19 @@ class RuntimeOrchestrator:
             if message.role not in role_names:
                 continue
 
-            tool_calls = tuple(
-                RuntimeToolCall(
-                    call_id=tool_call.id,
-                    call_type=tool_call.type,
-                    function_name=tool_call.function.name,
-                    arguments=tool_call.function.arguments,
+            runtime_tool_calls: list[RuntimeToolCall] = []
+            for tool_call in message.tool_calls:
+                if tool_call.function is None:
+                    raise ValueError(f"Replay Tool Call {tool_call.id!r} is missing its function payload.")
+                runtime_tool_calls.append(
+                    RuntimeToolCall(
+                        call_id=tool_call.id,
+                        call_type=tool_call.type,
+                        function_name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
                 )
-                for tool_call in message.tool_calls
-            )
+            tool_calls = tuple(runtime_tool_calls)
             content = message.content
             capture_content: tuple[CaptureContentPart, ...] = ()
             if message.content_parts:
@@ -1203,6 +1227,10 @@ class RuntimeOrchestrator:
             MessageRole.ASSISTANT: "Assistant",
         }
         for reference in references:
+            source_boundary = reference.reference
+            if source_boundary is None:
+                raise ValueError("Prepared Conversation reference is missing its frozen source boundary.")
+
             transcript = "\n\n".join(
                 f"{role_labels.get(item.role, 'Message')}: {item.content}" for item in reference.context_messages
             )
@@ -1211,8 +1239,8 @@ class RuntimeOrchestrator:
                     role="user",
                     content=(
                         f"Referenced Conversation: {reference.source_title}\n"
-                        f"Source ID: {reference.reference.source_conversation_id}\n"
-                        f"Frozen through Round: {reference.reference.source_end_round_number}\n\n"
+                        f"Source ID: {source_boundary.source_conversation_id}\n"
+                        f"Frozen through Round: {source_boundary.source_end_round_number}\n\n"
                         f"{transcript}"
                     ),
                 )
@@ -1483,16 +1511,18 @@ class RuntimeOrchestrator:
         if isinstance(event, ModelTokenDelta):
             return TokenDeltaEvent(content=event.content)
         if isinstance(event, ModelToolStarted):
-            arguments = event.arguments_json
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError:
-                    arguments = {"raw_arguments": arguments}
+            try:
+                parsed_arguments = json.loads(event.arguments_json)
+            except json.JSONDecodeError:
+                parsed_arguments = None
+
+            tool_args = (
+                parsed_arguments if isinstance(parsed_arguments, dict) else {"raw_arguments": event.arguments_json}
+            )
             return ToolStartEvent(
                 tool=event.tool_name,
                 tool_call_id=event.tool_call_id,
-                tool_args=arguments,
+                tool_args=tool_args,
             )
         if isinstance(event, ModelToolCompleted):
             result = event.result
@@ -1536,15 +1566,30 @@ class RuntimeOrchestrator:
             )
         if event_type == "usage":
             return ModelUsage(
-                prompt_tokens=int(event.get("prompt_tokens", 0)),
-                completion_tokens=int(event.get("completion_tokens", 0)),
-                total_tokens=int(event.get("total_tokens", 0)),
+                prompt_tokens=RuntimeOrchestrator._legacy_int(event, "prompt_tokens"),
+                completion_tokens=RuntimeOrchestrator._legacy_int(event, "completion_tokens"),
+                total_tokens=RuntimeOrchestrator._legacy_int(event, "total_tokens"),
             )
         if event_type == "error":
             return ModelError(str(event.get("error_message", event.get("content", ""))))
         raise TypeError(f"Unsupported legacy model event type: {event_type!r}")
 
-    async def _cleanup(self, cancellation_token):
+    @staticmethod
+    def _legacy_int(event: dict[str, object], key: str) -> int:
+        """Read an integer from a legacy event without coercing arbitrary objects."""
+        value = event.get(key, 0)
+        if isinstance(value, bool):
+            raise TypeError(f"Legacy event field {key!r} must be an integer, not bool.")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError as error:
+                raise TypeError(f"Legacy event field {key!r} must be an integer.") from error
+        raise TypeError(f"Legacy event field {key!r} must be an integer.")
+
+    async def _cleanup(self, cancellation_token: CancellationToken) -> None:
         """Release request-scoped cancellation state after every terminal path.
 
         Args:
@@ -1553,7 +1598,7 @@ class RuntimeOrchestrator:
         """
         await self.cancellation_manager.cleanup(cancellation_token)
 
-    async def close(self):
+    async def close(self) -> None:
         """Close request-scoped clients and the distributed lease client.
 
         The HTTP route calls this from its generator ``finally`` block so sockets, config watchers,

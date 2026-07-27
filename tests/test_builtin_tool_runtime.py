@@ -1,12 +1,15 @@
 import asyncio
 import json
+from collections.abc import AsyncIterator, Sequence
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from agents import Agent, Runner, function_tool
-from agents.items import ModelResponse
+from agents.items import ModelResponse, TResponseOutputItem, TResponseStreamEvent
 from agents.models.interface import Model
 from agents.stream_events import RunItemStreamEvent
+from agents.tool import Tool
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText
@@ -19,6 +22,7 @@ from agent_runner.runtime.tool_loop import CapturedToolCall, ToolExecutionCollec
 from agent_runner.tools.internal.catalog import build_internal_tool_registry
 from agent_runner.tools.internal.web_search import (
     _DuckDuckGoResultParser,
+    _SearchResult,
     _VisibleTextParser,
     _WebSearchClient,
 )
@@ -55,24 +59,25 @@ def _delay_definition(
     return ToolDefinition.from_function_tool(tool_key, sdk_tool)
 
 
-def _tool_context(tool_name: str, call_id: str, arguments: str) -> ToolContext[None]:
+def _tool_context(tool_name: str, call_id: str, arguments: str) -> ToolContext[object]:
     return ToolContext(
-        context=None,
+        context=object(),
         tool_name=tool_name,
         tool_call_id=call_id,
         tool_arguments=arguments,
     )
 
 
-async def _execute_builtin(tool_key: str, arguments: dict) -> dict:
+async def _execute_builtin(tool_key: str, arguments: dict[str, object]) -> dict[str, Any]:
     definition = build_internal_tool_registry().get(tool_key)
     assert definition is not None
     assert definition.function_tool is not None
     arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-    return await definition.function_tool.on_invoke_tool(
+    result = await definition.function_tool.on_invoke_tool(
         _tool_context(definition.tool_name, "test-call", arguments_json),
         arguments_json,
     )
+    return cast(dict[str, Any], result)
 
 
 class _ToolLoopModel(Model):
@@ -87,7 +92,7 @@ class _ToolLoopModel(Model):
         self.inputs.append(model_input)
 
         if len(self.inputs) == 1:
-            output = [
+            output: list[TResponseOutputItem] = [
                 ResponseFunctionToolCall(
                     arguments='{"value":1}',
                     call_id="call-success",
@@ -114,7 +119,7 @@ class _ToolLoopModel(Model):
 
         return ModelResponse(output=output, usage=Usage(), response_id=f"response-{len(self.inputs)}")
 
-    def stream_response(self, *args: object, **kwargs: object):
+    def stream_response(self, *args: object, **kwargs: object) -> AsyncIterator[TResponseStreamEvent]:
         raise NotImplementedError
 
 
@@ -163,7 +168,7 @@ def test_builtin_definitions_are_derived_from_sdk_function_tools() -> None:
     assert definition.parameters["properties"]["expression"]["description"].startswith("Code-style")
 
 
-async def test_weather_uses_geocoding_and_current_weather(monkeypatch) -> None:
+async def test_weather_uses_geocoding_and_current_weather(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = [
         _JsonResponse(
             {
@@ -198,7 +203,9 @@ async def test_weather_uses_geocoding_and_current_weather(monkeypatch) -> None:
     assert len(client.calls) == 2
 
 
-async def test_web_search_parses_duckduckgo_and_keeps_partial_page_failures(monkeypatch) -> None:
+async def test_web_search_parses_duckduckgo_and_keeps_partial_page_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     search_html = """
         <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa">A title</a>
         <div class="result__snippet">A snippet</div>
@@ -208,10 +215,16 @@ async def test_web_search_parses_duckduckgo_and_keeps_partial_page_failures(monk
     client = _GetOnlyClient([_TextResponse(search_html)])
     monkeypatch.setattr("agent_runner.tools.internal.web_search.httpx.AsyncClient", lambda **_: client)
 
-    async def fetch_result(_self, _client, result: dict) -> dict:
-        if result["title"].strip() == "A title":
-            return {**result, "content": "Readable A", "error": ""}
-        return {**result, "content": "", "error": "page failed"}
+    async def fetch_result(_self: object, _client: object, result: _SearchResult) -> dict[str, object]:
+        content = "Readable A" if result.title.strip() == "A title" else ""
+        error = "" if content else "page failed"
+        return {
+            "title": result.title,
+            "url": result.url,
+            "snippet": result.snippet,
+            "content": content,
+            "error": error,
+        }
 
     monkeypatch.setattr(_WebSearchClient, "_fetch_result", fetch_result)
 
@@ -227,7 +240,7 @@ def test_html_parsers_close_open_results_and_remove_hidden_content() -> None:
     search_parser = _DuckDuckGoResultParser(1)
     search_parser.feed('<a class="result__a" href="https://example.com">Title</a>')
     search_parser.close()
-    assert search_parser.results == [{"url": "https://example.com", "title": "Title", "snippet": ""}]
+    assert search_parser.results == [_SearchResult(url="https://example.com", title="Title")]
 
     page_parser = _VisibleTextParser()
     page_parser.feed("<main>Visible<script>hidden()</script><style>hidden</style> text</main>")
@@ -244,11 +257,12 @@ async def test_sdk_runner_executes_parallel_tools_and_continues_with_outputs() -
     collector = ToolExecutionCollector()
     adapter = OpenAIAgentsSdkAdapter(model_factory=SimpleNamespace())
     model = _ToolLoopModel((definitions[0].tool_name, definitions[1].tool_name))
+    sdk_tools: list[Tool] = list(adapter._build_sdk_tools(definitions, collector, cancellation_token=None))
     sdk_agent = Agent(
         name="Tool loop integration",
         instructions="Run both Tools.",
         model=model,
-        tools=adapter._build_sdk_tools(definitions, collector, cancellation_token=None),
+        tools=sdk_tools,
     )
 
     result = await Runner.run(starting_agent=sdk_agent, input="Run the Tool loop.")
@@ -270,8 +284,12 @@ async def test_sdk_runner_executes_parallel_tools_and_continues_with_outputs() -
         "call-success": {"value": 1},
         "call-failure": {"status": "error", "error": "failed:2"},
     }
-    assert collector.get("call-success").status == "COMPLETED"
-    assert collector.get("call-failure").status == "FAILED"
+    success_execution = collector.get("call-success")
+    failure_execution = collector.get("call-failure")
+    assert success_execution is not None
+    assert failure_execution is not None
+    assert success_execution.status == "COMPLETED"
+    assert failure_execution.status == "FAILED"
 
 
 async def test_collector_returns_structured_failure_for_model_and_audit() -> None:
@@ -288,8 +306,10 @@ async def test_collector_returns_structured_failure_for_model_and_audit() -> Non
     )
 
     assert json.loads(model_result) == {"status": "error", "error": "failed:2"}
-    assert collector.get("call-1").status == "FAILED"
-    assert collector.get("call-1").raw_result == model_result
+    execution = collector.get("call-1")
+    assert execution is not None
+    assert execution.status == "FAILED"
+    assert execution.raw_result == model_result
 
 
 async def test_cancelled_observed_call_builds_partial_turn_when_sdk_removes_raw_response() -> None:
@@ -337,17 +357,20 @@ async def test_cancelled_observed_call_builds_partial_turn_when_sdk_removes_raw_
 def test_tool_stream_events_keep_call_identity_and_status() -> None:
     runtime = OpenAIAgentsSdkAdapter(model_factory=SimpleNamespace())
     collector = ToolExecutionCollector()
-    collector._executions["call-1"] = SimpleNamespace(tool_name="test_success", status="FAILED")
+    cast(Any, collector)._executions["call-1"] = SimpleNamespace(tool_name="test_success", status="FAILED")
     called = RunItemStreamEvent(
         name="tool_called",
-        item=SimpleNamespace(
-            call_id="call-1",
-            raw_item=SimpleNamespace(name="test_success", arguments='{"value":1}'),
+        item=cast(
+            Any,
+            SimpleNamespace(
+                call_id="call-1",
+                raw_item=SimpleNamespace(name="test_success", arguments='{"value":1}'),
+            ),
         ),
     )
     output = RunItemStreamEvent(
         name="tool_output",
-        item=SimpleNamespace(call_id="call-1", output='{"status":"error"}'),
+        item=cast(Any, SimpleNamespace(call_id="call-1", output='{"status":"error"}')),
     )
 
     assert runtime._convert_stream_event(called, collector) == ModelToolStarted(
@@ -369,13 +392,13 @@ def test_tool_stream_events_keep_call_identity_and_status() -> None:
 
 
 class _JsonResponse:
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: dict[str, object]) -> None:
         self.body = body
 
     def raise_for_status(self) -> None:
         return None
 
-    def json(self) -> dict:
+    def json(self) -> dict[str, object]:
         return self.body
 
 
@@ -388,16 +411,16 @@ class _TextResponse:
 
 
 class _GetOnlyClient:
-    def __init__(self, responses: list) -> None:
-        self.responses = responses
-        self.calls: list[tuple[str, dict | None]] = []
+    def __init__(self, responses: Sequence[object]) -> None:
+        self.responses = list(responses)
+        self.calls: list[tuple[str, dict[str, object] | None]] = []
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "_GetOnlyClient":
         return self
 
-    async def __aexit__(self, exc_type, exc, traceback) -> None:
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         return None
 
-    async def get(self, url: str, params: dict | None = None):
+    async def get(self, url: str, params: dict[str, object] | None = None) -> object:
         self.calls.append((url, params))
         return self.responses.pop(0)

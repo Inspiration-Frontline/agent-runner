@@ -43,7 +43,7 @@ class MCPManager:
         _lock: Lock for thread-safe manager operations.
     """
 
-    def __init__(self, max_connections_per_server: int = 5):
+    def __init__(self, max_connections_per_server: int = 5) -> None:
         """
         Initialize the MCP manager.
 
@@ -55,7 +55,7 @@ class MCPManager:
         self._max_connections_per_server = max_connections_per_server
         self._lock = asyncio.Lock()
 
-    async def register_server(self, config: MCPServerConfig):
+    async def register_server(self, config: MCPServerConfig) -> None:
         """
         Register a new MCP server.
 
@@ -74,7 +74,7 @@ class MCPManager:
             )
             logger.info(f"Registered MCP server: {config.server_id}")
 
-    async def unregister_server(self, server_id: str):
+    async def unregister_server(self, server_id: str) -> None:
         """
         Unregister an MCP server and close its connections.
 
@@ -110,7 +110,7 @@ class MCPManager:
 
         return await pool.acquire()
 
-    async def release_connection(self, server_id: str, connection: Any):
+    async def release_connection(self, server_id: str, connection: Any) -> None:
         """
         Release a connection back to the server's pool.
 
@@ -185,7 +185,7 @@ class MCPManager:
         """
         return {"status": "not_implemented", "tool": tool_name}
 
-    async def close_all(self):
+    async def close_all(self) -> None:
         """
         Close all connections for all registered servers.
         """

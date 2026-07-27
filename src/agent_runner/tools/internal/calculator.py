@@ -43,8 +43,10 @@ def _evaluate(node: ast.AST, depth: int) -> int | float:
     """Evaluate the restricted arithmetic AST without executing arbitrary Python code."""
     if depth > 64:
         raise ValueError("Expression nesting is too deep.")
-    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-        return node.value
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return value
     if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
         left = _evaluate(node.left, depth + 1)
         right = _evaluate(node.right, depth + 1)

@@ -22,8 +22,8 @@ class RequestLifecycle:
     """
 
     request_id: str
-    agent_id: str
-    user_id: str
+    agent_id: int
+    user_id: int
 
 
 class LifecycleManager:
@@ -37,13 +37,13 @@ class LifecycleManager:
         _active_requests: Dictionary mapping request IDs to lifecycle instances.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the lifecycle manager with empty request tracking.
         """
         self._active_requests: dict[str, RequestLifecycle] = {}
 
-    def register(self, lifecycle: RequestLifecycle):
+    def register(self, lifecycle: RequestLifecycle) -> None:
         """
         Register a new request lifecycle.
 
@@ -53,7 +53,7 @@ class LifecycleManager:
         self._active_requests[lifecycle.request_id] = lifecycle
         logger.info(f"Request registered: {lifecycle.request_id}")
 
-    def unregister(self, request_id: str):
+    def unregister(self, request_id: str) -> None:
         """
         Unregister a request lifecycle.
 

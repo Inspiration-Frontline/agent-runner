@@ -17,7 +17,7 @@ class PromptAssembler:
         rag_section_header: Header for the RAG knowledge section in assembled prompts.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the prompt assembler with section headers.
         """

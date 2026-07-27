@@ -43,7 +43,7 @@ class AgentConfigLoader:
         cache_ttl_seconds: TTL for cached configurations in Redis.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the agent configuration loader.
 
@@ -154,7 +154,7 @@ class AgentConfigLoader:
             logger.warning(f"Failed to get config from Redis cache: {e}")
         return None
 
-    async def _set_cache(self, cache_key: str, config: AgentConfig):
+    async def _set_cache(self, cache_key: str, config: AgentConfig) -> None:
         """
         Store agent configuration in Redis cache with TTL.
 
@@ -245,7 +245,7 @@ class AgentConfigLoader:
             temperature=data.get("temperature", 0.7),
         )
 
-    async def invalidate_cache(self, agent_id: int | None = None):
+    async def invalidate_cache(self, agent_id: int | None = None) -> None:
         """
         Invalidate cached agent configurations in Redis.
 
@@ -277,7 +277,7 @@ class AgentConfigLoader:
         except Exception as e:
             logger.warning(f"Failed to invalidate cache: {e}")
 
-    async def close(self):
+    async def close(self) -> None:
         """
         Close HTTP and Redis client connections.
 

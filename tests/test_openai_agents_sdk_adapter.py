@@ -1,26 +1,35 @@
 from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from agents import Runner, function_tool
 
 from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from agent_runner.api.streaming import UsageEvent
+from agent_runner.config import AgentConfig
 from agent_runner.context.builder import AgentContext, Message, RuntimeToolCall
 from agent_runner.context.models import UserProfile
 from agent_runner.runtime.openai_agents_sdk_adapter import OpenAIAgentsSdkAdapter
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
+from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
 
 class DummyModelFactory:
-    def __init__(self):
+    def __init__(self) -> None:
         self.created_models: list[str] = []
 
     def create_model(self, model: str) -> str:
         self.created_models.append(model)
         return f"model:{model}"
 
+    async def close(self) -> None:
+        pass
 
-def test_build_input_preserves_history_and_current_message():
+
+def test_build_input_preserves_history_and_current_message() -> None:
     runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     context = AgentContext(
-        agent_config=_agent(),
+        agent_config=_agent_config(),
         system_prompt="system",
         conversation_history=[
             Message(role="user", content="previous user"),
@@ -29,7 +38,7 @@ def test_build_input_preserves_history_and_current_message():
         user_profile=UserProfile(),
         rag_chunks=[],
         current_message=Message(role="user", content="current user"),
-        tool_specs=[],
+        tool_specs=(),
     )
 
     assert runtime._build_input(context) == [
@@ -39,16 +48,16 @@ def test_build_input_preserves_history_and_current_message():
     ]
 
 
-def test_build_input_preserves_plain_text_when_multipart_content_is_empty():
+def test_build_input_preserves_plain_text_when_multipart_content_is_empty() -> None:
     runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     context = AgentContext(
-        agent_config=_agent(),
+        agent_config=_agent_config(),
         system_prompt="system",
         conversation_history=[Message(role="assistant", content="Previous answer")],
         user_profile=UserProfile(),
         rag_chunks=[],
         current_message=Message(role="user", content="Expand on that answer"),
-        tool_specs=[],
+        tool_specs=(),
     )
 
     assert runtime._build_input(context)[-1] == {
@@ -57,10 +66,10 @@ def test_build_input_preserves_plain_text_when_multipart_content_is_empty():
     }
 
 
-def test_build_input_converts_provider_neutral_tool_history_to_responses_items():
+def test_build_input_converts_provider_neutral_tool_history_to_responses_items() -> None:
     runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     context = AgentContext(
-        agent_config=_agent(),
+        agent_config=_agent_config(),
         system_prompt="system",
         conversation_history=[
             Message(
@@ -81,7 +90,7 @@ def test_build_input_converts_provider_neutral_tool_history_to_responses_items()
         user_profile=UserProfile(),
         rag_chunks=[],
         current_message=Message(role="user", content="What was it?"),
-        tool_specs=[],
+        tool_specs=(),
     )
 
     assert runtime._build_input(context) == [
@@ -97,7 +106,7 @@ def test_build_input_converts_provider_neutral_tool_history_to_responses_items()
     ]
 
 
-def test_build_sdk_agent_uses_agents_sdk_model():
+def test_build_sdk_agent_uses_agents_sdk_model() -> None:
     model_factory = DummyModelFactory()
     runtime = OpenAIAgentsSdkAdapter(model_factory=model_factory)
 
@@ -109,11 +118,12 @@ def test_build_sdk_agent_uses_agents_sdk_model():
     assert sdk_agent.model_settings.temperature == 0.3
     assert sdk_agent.model_settings.max_tokens == 256
     assert sdk_agent.model_settings.include_usage is True
+    assert sdk_agent.model_settings.extra_args is not None
     assert sdk_agent.model_settings.extra_args["timeout"] == 120.0
     assert model_factory.created_models == ["Qwen/Qwen3-235B-A22B-Instruct-2507"]
 
 
-def test_response_completed_event_usage_is_passed_through():
+def test_response_completed_event_usage_is_passed_through() -> None:
     runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     event = SimpleNamespace(
         data=SimpleNamespace(
@@ -128,14 +138,14 @@ def test_response_completed_event_usage_is_passed_through():
     assert usage.total_tokens == 17
 
 
-def test_response_completed_event_without_usage_is_ignored():
+def test_response_completed_event_without_usage_is_ignored() -> None:
     runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
     event = SimpleNamespace(data=SimpleNamespace(response=SimpleNamespace(usage=None)))
 
     assert runtime._convert_response_completed_usage(event.data) is None
 
 
-def test_orchestrator_converts_usage_event_without_estimation():
+def test_orchestrator_converts_usage_event_without_estimation() -> None:
     orchestrator = object.__new__(RuntimeOrchestrator)
     event = orchestrator._convert_event(
         {
@@ -154,8 +164,8 @@ def test_orchestrator_converts_usage_event_without_estimation():
 
 def _agent() -> AgentDefinition:
     return AgentDefinition(
-        agent_id="smoke-test",
-        version="local",
+        agent_id=1,
+        version=1,
         name="Smoke",
         description="Smoke test agent",
         model="Qwen/Qwen3-235B-A22B-Instruct-2507",
@@ -166,3 +176,57 @@ def _agent() -> AgentDefinition:
         max_output_tokens=256,
         temperature=0.3,
     )
+
+
+def _agent_config() -> AgentConfig:
+    return AgentConfig(
+        agent_id=1,
+        version=1,
+        name="Smoke",
+        model="Qwen/Qwen3-235B-A22B-Instruct-2507",
+        system_prompt="system",
+        tools=[],
+        mcp_servers=[],
+        max_output_tokens=256,
+        temperature=0.3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_registers_configured_tools_on_sdk_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    @function_tool
+    def echo_value(value: str) -> str:
+        """Return the supplied value."""
+        return value
+
+    registry = ToolRegistry()
+    registry.register(ToolDefinition.from_function_tool("test.echo", echo_value))
+    agent = _agent()
+    agent.tools = ["test.echo"]
+    context = AgentContext(
+        agent_config=_agent_config(),
+        system_prompt="system",
+        conversation_history=[],
+        user_profile=UserProfile(),
+        rag_chunks=[],
+        current_message=Message(role="user", content="echo this"),
+        tool_specs=(),
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_run(**kwargs: Any) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(final_output="done")
+
+    monkeypatch.setattr(Runner, "run", fake_run)
+
+    response = await OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory()).run(
+        agent,
+        context,
+        tool_registry=registry,
+    )
+
+    sdk_agent = captured["starting_agent"]
+    assert [tool.name for tool in sdk_agent.tools] == ["echo_value"]
+    assert captured["input"] == [{"role": "user", "content": "echo this"}]
+    assert response.content == "done"

@@ -42,7 +42,7 @@ class MCPConnectionPool:
         _semaphore: Semaphore for connection limit enforcement.
     """
 
-    def __init__(self, server_id: str, max_connections: int = 5):
+    def __init__(self, server_id: str, max_connections: int = 5) -> None:
         """
         Initialize the connection pool.
 
@@ -85,7 +85,7 @@ class MCPConnectionPool:
             self._connections[conn_id] = pooled_conn
             return connection
 
-    async def release(self, connection: Any):
+    async def release(self, connection: Any) -> None:
         """
         Release a connection back to the pool.
 
@@ -111,7 +111,7 @@ class MCPConnectionPool:
         logger.info(f"Creating new MCP connection for server: {self.server_id}")
         return {"server_id": self.server_id, "connected": True}
 
-    async def close_all(self):
+    async def close_all(self) -> None:
         """
         Close all connections in the pool.
         """
@@ -126,7 +126,7 @@ class MCPConnectionPool:
             self._available.clear()
             logger.info(f"Closed all connections for server: {self.server_id}")
 
-    async def _close_connection(self, connection: Any):
+    async def _close_connection(self, connection: Any) -> None:
         """
         Close a single connection.
 

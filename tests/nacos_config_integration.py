@@ -59,7 +59,7 @@ LOCAL_DEFAULTS = {
 }
 
 
-async def publish_config(loader: NacosConfigLoader, content: str):
+async def publish_config(loader: NacosConfigLoader, content: str) -> None:
     """Publish configuration to Nacos using the SDK's internal client."""
     if not loader.config_client:
         raise RuntimeError("Nacos client not initialized")
@@ -77,7 +77,10 @@ async def publish_config(loader: NacosConfigLoader, content: str):
     print(f"Published config to Nacos: data_id={loader.data_id}, group={loader.group}")
 
 
-async def wait_for_debug_config(expected: dict[str, object], timeout_seconds: float = 30.0) -> dict:
+async def wait_for_debug_config(
+    expected: dict[str, object],
+    timeout_seconds: float = 30.0,
+) -> dict[str, object]:
     """Poll the running service until the debug config endpoint returns expected values."""
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     last_config = None
@@ -85,7 +88,10 @@ async def wait_for_debug_config(expected: dict[str, object], timeout_seconds: fl
         while asyncio.get_running_loop().time() < deadline:
             resp = await client.get("http://localhost:8000/v1/agent/debug/config")
             resp.raise_for_status()
-            last_config = resp.json()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                raise TypeError("Debug config endpoint must return a JSON object.")
+            last_config = payload
             if all(last_config.get(key) == value for key, value in expected.items()):
                 return last_config
             await asyncio.sleep(1)
@@ -93,7 +99,7 @@ async def wait_for_debug_config(expected: dict[str, object], timeout_seconds: fl
     raise AssertionError(f"Expected config values {expected}, got {last_config}")
 
 
-async def test_config_priority(loader: NacosConfigLoader):
+async def test_config_priority(loader: NacosConfigLoader) -> None:
     """Test that Nacos config overrides local defaults."""
     print("\n=== TEST 1: Config Priority (Nacos > Local) ===")
 
@@ -126,7 +132,7 @@ async def test_config_priority(loader: NacosConfigLoader):
     print("OK TEST 1 PASSED: Nacos config overrides local defaults")
 
 
-async def test_dynamic_refresh(loader: NacosConfigLoader):
+async def test_dynamic_refresh(loader: NacosConfigLoader) -> None:
     """Test that config updates are reflected dynamically."""
     print("\n=== TEST 2: Dynamic Refresh ===")
 
@@ -159,7 +165,7 @@ async def test_dynamic_refresh(loader: NacosConfigLoader):
     print("OK TEST 2 PASSED: Dynamic refresh works correctly")
 
 
-async def cleanup(loader: NacosConfigLoader):
+async def cleanup(loader: NacosConfigLoader) -> None:
     """Remove test config from Nacos."""
     print("\n=== CLEANUP ===")
     if loader.config_client:
@@ -173,7 +179,7 @@ async def cleanup(loader: NacosConfigLoader):
     await loader.close()
 
 
-async def main():
+async def main() -> None:
     """Run all tests."""
     print("Starting Nacos configuration integration tests...")
     print("Prerequisites:")

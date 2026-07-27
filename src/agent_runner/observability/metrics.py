@@ -1,7 +1,10 @@
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from starlette.requests import Request
+from starlette.responses import Response
 
 REQUEST_COUNT = Counter(
     "agent_runner_requests_total",
@@ -44,7 +47,7 @@ class MetricsCollector:
     tool calls, model calls, and token usage.
     """
 
-    def record_request(self, method: str, endpoint: str, status: int, latency: float):
+    def record_request(self, method: str, endpoint: str, status: int, latency: float) -> None:
         """
         Record request metrics.
 
@@ -57,7 +60,7 @@ class MetricsCollector:
         REQUEST_COUNT.labels(method=method, endpoint=endpoint, status=str(status)).inc()
         REQUEST_LATENCY.labels(method=method, endpoint=endpoint).observe(latency)
 
-    def record_tool_call(self, tool_name: str, status: str):
+    def record_tool_call(self, tool_name: str, status: str) -> None:
         """
         Record tool call metrics.
 
@@ -67,7 +70,7 @@ class MetricsCollector:
         """
         TOOL_CALLS.labels(tool_name=tool_name, status=status).inc()
 
-    def record_model_call(self, model: str, status: str):
+    def record_model_call(self, model: str, status: str) -> None:
         """
         Record model call metrics.
 
@@ -77,7 +80,7 @@ class MetricsCollector:
         """
         MODEL_CALLS.labels(model=model, status=status).inc()
 
-    def record_tokens(self, model: str, token_type: str, count: int):
+    def record_tokens(self, model: str, token_type: str, count: int) -> None:
         """
         Record token usage metrics.
 
@@ -114,7 +117,10 @@ def get_metrics_collector() -> MetricsCollector:
     return _metrics_collector
 
 
-async def metrics_middleware(request, call_next):
+async def metrics_middleware(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
     """
     FastAPI middleware for collecting request metrics.
 
