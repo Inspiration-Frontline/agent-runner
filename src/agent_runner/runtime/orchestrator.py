@@ -779,6 +779,9 @@ class RuntimeOrchestrator:
             additional_system_instruction=attachment_input.additional_instruction,
         )
 
+        # TODO: Replace this text-only estimate after MCP Tool schemas and complete multimodal
+        # provider payloads are connected. The final guard must use the selected model's context
+        # limit and account for Tool schemas, structured/image input, and provider framing.
         context_text = "\n".join(
             [
                 context.system_prompt,

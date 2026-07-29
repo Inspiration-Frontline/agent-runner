@@ -22,10 +22,11 @@ from fastapi import HTTPException
 from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from agent_runner.api import routes
 from agent_runner.api.streaming import StreamEventType
-from agent_runner.config import AgentConfig, ChatRequest, ConversationReferenceRequest
+from agent_runner.config import AgentConfig, ChatRequest, ConversationReferenceRequest, get_settings
 from agent_runner.context.builder import AgentContext, Message
 from agent_runner.context.models import UserProfile
 from agent_runner.conversation import ConversationBusyError
+from agent_runner.runtime import orchestrator as orchestrator_module
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -184,6 +185,21 @@ class FailureRuntime:
         yield {"type": "error", "content": "provider unavailable"}
 
 
+class CountingRuntime(SuccessRuntime):
+    def __init__(self) -> None:
+        self.called = False
+
+    async def run_streamed(
+        self,
+        agent: AgentDefinition,
+        context: AgentContext,
+        token: "FakeToken",
+    ) -> AsyncGenerator[dict[str, object]]:
+        self.called = True
+        async for item in super().run_streamed(agent, context, token):
+            yield item
+
+
 class FakeToken:
     def is_cancelled(self) -> bool:
         return False
@@ -266,6 +282,34 @@ async def test_same_group_references_are_labelled_and_persist_the_frozen_boundar
             source_end_round_number=4,
         )
     ]
+
+
+async def test_reference_context_overflow_returns_typed_error_before_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = CountingRuntime()
+    orchestrator, _, _ = _orchestrator(runtime)
+    settings = get_settings().model_copy(
+        update={"max_context_tokens": 8, "max_output_tokens": 7}
+    )
+    monkeypatch.setattr(orchestrator_module, "get_settings", lambda: settings)
+    request = ChatRequest(
+        conversation_id="conv_multi",
+        message="Use the source",
+        references=[
+            ConversationReferenceRequest(
+                source_conversation_id="conv_source",
+                source_end_round_number=4,
+            )
+        ],
+    )
+
+    events = [event async for event in orchestrator.run(request, 1, FakeRequest())]
+
+    assert events[-1].type == StreamEventType.ERROR
+    assert events[-1].error_code == "CONVERSATION_REFERENCE_CONTEXT_TOO_LARGE"
+    assert events[-1].phase == "reference_preparation"
+    assert runtime.called is False
 
 
 async def test_model_failure_is_persisted_as_new_failed_round() -> None:

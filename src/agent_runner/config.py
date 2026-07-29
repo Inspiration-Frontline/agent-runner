@@ -333,6 +333,8 @@ class ChatRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")
     message: str = Field(default="", max_length=100_000)
     file_ids: list[str] = Field(default_factory=list, max_length=5)
+    # TODO: Move this limit to Nacos and expose the same effective value to Conversation Manager,
+    # Agent Runner, and UI instead of maintaining independent validation constants.
     references: list[ConversationReferenceRequest] = Field(default_factory=list, max_length=10)
     ui_locale: Literal["zh-CN", "en-US"] = "zh-CN"
 
