@@ -5,6 +5,18 @@ from typing import Any, cast
 import structlog
 
 
+def _add_trace_context(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+    from agent_runner.observability.tracing import current_span_id, current_trace_id
+
+    trace_id = current_trace_id()
+    span_id = current_span_id()
+    if trace_id:
+        event_dict["trace_id"] = trace_id
+    if span_id:
+        event_dict["span_id"] = span_id
+    return event_dict
+
+
 def setup_logging(level: int = logging.INFO, json_format: bool = False) -> None:
     """
     Configure structured logging for the application.
@@ -14,13 +26,16 @@ def setup_logging(level: int = logging.INFO, json_format: bool = False) -> None:
         json_format: Whether to use JSON format (default: False, uses console format).
     """
     logging.basicConfig(
-        format="%(message)s",
+        format="%(asctime)s %(levelname)s [trace_id=%(trace_id)s span_id=%(span_id)s] %(name)s: %(message)s",
         stream=sys.stdout,
         level=level,
     )
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(RequestContextFilter())
 
     processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
+        _add_trace_context,
         structlog.processors.add_log_level,
         structlog.processors.StackInfoRenderer(),
     ]
@@ -71,4 +86,8 @@ class RequestContextFilter(logging.Filter):
         Returns:
             bool: True to allow the record to be logged.
         """
+        from agent_runner.observability.tracing import current_span_id, current_trace_id
+
+        record.trace_id = current_trace_id() or "-"
+        record.span_id = current_span_id() or "-"
         return True

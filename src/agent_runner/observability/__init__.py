@@ -10,7 +10,17 @@ from agent_runner.observability.metrics import (
     get_metrics_collector,
     metrics_middleware,
 )
-from agent_runner.observability.tracing import Span, Tracer, get_tracer, init_tracer
+from agent_runner.observability.tracing import (
+    Span,
+    Tracer,
+    current_span_id,
+    current_trace_id,
+    extract_trace_context,
+    get_tracer,
+    init_tracer,
+    inject_trace_context,
+    shutdown_tracer,
+)
 
 __all__ = [
     "setup_logging",
@@ -20,6 +30,11 @@ __all__ = [
     "Span",
     "get_tracer",
     "init_tracer",
+    "shutdown_tracer",
+    "current_trace_id",
+    "current_span_id",
+    "extract_trace_context",
+    "inject_trace_context",
     "MetricsCollector",
     "get_metrics_collector",
     "metrics_middleware",

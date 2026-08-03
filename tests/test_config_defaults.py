@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from agent_runner.agent_definitions import loader as loader_module
@@ -83,3 +85,10 @@ def test_local_settings_do_not_require_manual_env_vars() -> None:
     assert settings.local_agent_config_enabled is True
     assert settings.lite_llm_base_url == "http://localhost:4000"
     assert settings.lite_llm_api_key
+
+
+def test_local_general_agent_uses_the_service_output_budget() -> None:
+    config = json.loads((CONFIG_DIR / "agents.json").read_text(encoding="utf-8"))
+    general_agent = next(agent for agent in config["agents"] if agent["agent_id"] == 1)
+
+    assert general_agent["max_output_tokens"] == get_settings().max_output_tokens == 4096

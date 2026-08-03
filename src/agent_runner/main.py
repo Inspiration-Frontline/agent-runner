@@ -12,6 +12,7 @@ from agent_runner.config import get_settings, initialize_settings
 from agent_runner.nacos_config import close_nacos_loader
 from agent_runner.observability.logging import setup_logging
 from agent_runner.observability.metrics import metrics_middleware
+from agent_runner.observability.tracing import init_tracer, shutdown_tracer
 
 
 @asynccontextmanager
@@ -34,12 +35,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await initialize_settings()
 
     current_settings = get_settings()
+    init_tracer(
+        current_settings.otel_service_name,
+        endpoint=current_settings.otel_exporter_otlp_endpoint,
+        sampling_ratio=current_settings.otel_sampling_ratio,
+        enabled=current_settings.otel_enabled,
+    )
     if current_settings.debug_endpoints_enabled or current_settings.environment in ["local", "dev"]:
         app.include_router(debug_router, prefix="/v1/agent")
 
     yield
 
     await close_nacos_loader()
+    shutdown_tracer()
 
 
 app = FastAPI(

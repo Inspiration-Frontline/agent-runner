@@ -1,161 +1,242 @@
-from collections.abc import Generator
+import json
+import logging
+from collections.abc import Generator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from typing import Any
-from uuid import uuid4
+
+from opentelemetry import context, propagate, trace
+from opentelemetry.context import Context
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+from opentelemetry.trace import SpanKind, Status, StatusCode
+
+logger = logging.getLogger(__name__)
+
+_provider: TracerProvider | None = None
+_exporter_configured = False
+_tracer: "Tracer | None" = None
+
+_REDACTED = "[REDACTED]"
+_MAX_DEPTH = 12
+_SENSITIVE_KEY_SUFFIXES = (
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "idtoken",
+    "password",
+    "privatekey",
+    "refreshtoken",
+    "secret",
+)
+_SENSITIVE_KEYS = {"passwd", "token"}
 
 
-@dataclass
+def _hex_trace_id(span_context: trace.SpanContext) -> str:
+    return format(span_context.trace_id, "032x") if span_context.is_valid else ""
+
+
+def _hex_span_id(span_context: trace.SpanContext) -> str:
+    return format(span_context.span_id, "016x") if span_context.is_valid else ""
+
+
+def trace_json(value: Any, max_chars: int) -> str:
+    """Serialize trace content with recursive secret redaction and a hard size limit."""
+    normalized = _sanitize_trace_value(value, depth=0)
+    if isinstance(normalized, str):
+        serialized = normalized
+    else:
+        serialized = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
+    if len(serialized) <= max_chars:
+        return serialized
+    suffix = f"...[truncated {len(serialized) - max_chars} chars]"
+    prefix_length = max(0, max_chars - len(suffix))
+    return f"{serialized[:prefix_length]}{suffix}"
+
+
+def _sanitize_trace_value(value: Any, *, depth: int) -> Any:
+    if depth >= _MAX_DEPTH:
+        return "[MAX_DEPTH]"
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, str):
+        return _sanitize_trace_string(value, depth=depth)
+    if isinstance(value, bytes):
+        return f"[BINARY {len(value)} bytes]"
+    if isinstance(value, Mapping):
+        return {
+            str(key): _REDACTED if _is_sensitive_key(str(key)) else _sanitize_trace_value(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence):
+        return [_sanitize_trace_value(item, depth=depth + 1) for item in value]
+    if hasattr(value, "model_dump"):
+        return _sanitize_trace_value(value.model_dump(mode="json"), depth=depth + 1)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _sanitize_trace_value(asdict(value), depth=depth + 1)
+    return str(value)
+
+
+def _sanitize_trace_string(value: str, *, depth: int) -> Any:
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return value
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return value
+    return _sanitize_trace_value(parsed, depth=depth + 1)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = "".join(character for character in key.lower() if character.isalnum())
+    return normalized in _SENSITIVE_KEYS or any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
+
+
 class Span:
-    """
-    Tracing span for distributed tracing.
+    """Small AgentBreaker facade over an OpenTelemetry span."""
 
-    Represents a single operation within a trace, tracking
-    timing, attributes, and parent-child relationships.
+    def __init__(self, otel_span: trace.Span, name: str, parent_id: str | None = None) -> None:
+        self._otel_span = otel_span
+        self.name = name
+        self.parent_id = parent_id
 
-    Attributes:
-        span_id: Unique identifier for this span.
-        trace_id: Trace ID that this span belongs to.
-        name: Name of the operation this span represents.
-        parent_id: ID of the parent span, if this is a child span.
-        attributes: Dictionary of attributes attached to this span.
-    """
+    @property
+    def span_id(self) -> str:
+        return _hex_span_id(self._otel_span.get_span_context())
 
-    span_id: str
-    trace_id: str
-    name: str
-    parent_id: str | None = None
-    attributes: dict[str, Any] = field(default_factory=dict)
+    @property
+    def trace_id(self) -> str:
+        return _hex_trace_id(self._otel_span.get_span_context())
 
     def set_attribute(self, key: str, value: Any) -> None:
-        """
-        Set an attribute on this span.
-
-        Args:
-            key: Attribute key.
-            value: Attribute value.
-        """
-        self.attributes[key] = value
+        if value is not None:
+            self._otel_span.set_attribute(key, value)
 
     def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
-        """
-        Add an event to this span.
+        self._otel_span.add_event(name, attributes=attributes)
 
-        Args:
-            name: Name of the event.
-            attributes: Optional attributes for the event.
-        """
-        pass
+    def record_exception(self, error: BaseException) -> None:
+        self._otel_span.set_attribute("error.type", type(error).__name__)
+        self._otel_span.set_status(Status(StatusCode.ERROR, type(error).__name__))
 
 
 class Tracer:
-    """
-    Tracer for creating and managing trace spans.
+    """Creates real OpenTelemetry spans while keeping the existing local API narrow."""
 
-    Provides functionality to create spans, manage span hierarchy,
-    and track current span context.
-
-    Attributes:
-        service_name: Name of the service for trace identification.
-        _current_span: Currently active span in the context.
-    """
-
-    def __init__(self, service_name: str = "agent-runner"):
-        """
-        Initialize the tracer.
-
-        Args:
-            service_name: Name of the service being traced.
-        """
+    def __init__(self, service_name: str = "agent-runner") -> None:
         self.service_name = service_name
-        self._current_span: Span | None = None
-
-    def start_span(
-        self,
-        name: str,
-        parent: Span | None = None,
-        attributes: dict[str, Any] | None = None,
-    ) -> Span:
-        """
-        Start a new span.
-
-        Args:
-            name: Name of the operation for this span.
-            parent: Optional parent span for hierarchical tracing.
-            attributes: Optional initial attributes for the span.
-
-        Returns:
-            Span: The newly created span.
-        """
-        trace_id = parent.trace_id if parent else str(uuid4())
-        parent_id = parent.span_id if parent else None
-
-        span = Span(
-            span_id=str(uuid4()),
-            trace_id=trace_id,
-            name=name,
-            parent_id=parent_id,
-            attributes=attributes or {},
-        )
-
-        return span
+        self._otel_tracer = trace.get_tracer(service_name)
 
     @contextmanager
     def span(
         self,
         name: str,
         attributes: dict[str, Any] | None = None,
+        *,
+        parent_context: Context | None = None,
+        kind: SpanKind = SpanKind.INTERNAL,
     ) -> Generator[Span]:
-        """
-        Context manager for scoped span usage.
+        parent_span = trace.get_current_span(parent_context).get_span_context() if parent_context else None
+        parent_id = _hex_span_id(parent_span) if parent_span is not None and parent_span.is_valid else None
+        with self._otel_tracer.start_as_current_span(
+            name,
+            context=parent_context,
+            kind=kind,
+            attributes=attributes,
+        ) as otel_span:
+            wrapped = Span(otel_span, name, parent_id)
+            try:
+                yield wrapped
+            except BaseException as error:
+                wrapped.record_exception(error)
+                raise
 
-        Args:
-            name: Name of the operation for this span.
-            attributes: Optional initial attributes for the span.
 
-        Yields:
-            Span: The span for use within the context.
-        """
-        span = self.start_span(name, self._current_span, attributes)
-        previous_span = self._current_span
-        self._current_span = span
+def _ensure_provider(service_name: str = "agent-runner", sampling_ratio: float = 1.0) -> TracerProvider:
+    global _provider
+    if _provider is None:
+        _provider = TracerProvider(
+            resource=Resource.create({"service.name": service_name}),
+            sampler=ParentBased(TraceIdRatioBased(sampling_ratio)),
+        )
+        trace.set_tracer_provider(_provider)
+    return _provider
 
+
+def init_tracer(
+    service_name: str = "agent-runner",
+    *,
+    endpoint: str | None = None,
+    sampling_ratio: float = 1.0,
+    enabled: bool = True,
+) -> Tracer:
+    """Initialize the process provider and optionally attach the non-blocking OTLP exporter."""
+    global _exporter_configured, _tracer
+    provider = _ensure_provider(service_name, sampling_ratio)
+    if enabled and endpoint and not _exporter_configured:
         try:
-            yield span
-        except Exception as e:
-            span.set_attribute("error", True)
-            span.set_attribute("error.message", str(e))
-            raise
-        finally:
-            self._current_span = previous_span
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
-
-_tracer: Tracer | None = None
+            exporter = OTLPSpanExporter(endpoint=endpoint, insecure=endpoint.startswith("http://"))
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+            _exporter_configured = True
+            logger.info("OpenTelemetry OTLP exporter configured for %s", endpoint)
+        except Exception:
+            logger.exception("OpenTelemetry exporter setup failed; requests will continue without export")
+    _tracer = Tracer(service_name)
+    return _tracer
 
 
 def get_tracer() -> Tracer:
-    """
-    Get the global tracer instance.
-
-    Returns:
-        Tracer: The global tracer instance.
-    """
     global _tracer
     if _tracer is None:
+        _ensure_provider()
         _tracer = Tracer()
     return _tracer
 
 
-def init_tracer(service_name: str = "agent-runner") -> Tracer:
-    """
-    Initialize the global tracer with a service name.
+def shutdown_tracer() -> None:
+    if _provider is None:
+        return
+    try:
+        _provider.shutdown()
+    except Exception:
+        logger.exception("OpenTelemetry shutdown failed")
 
-    Args:
-        service_name: Name of the service for trace identification.
 
-    Returns:
-        Tracer: The initialized tracer instance.
-    """
-    global _tracer
-    _tracer = Tracer(service_name)
-    return _tracer
+def current_trace_id() -> str:
+    return _hex_trace_id(trace.get_current_span().get_span_context())
+
+
+def current_span_id() -> str:
+    return _hex_span_id(trace.get_current_span().get_span_context())
+
+
+def extract_trace_context(headers: Mapping[str, str]) -> Context:
+    return propagate.extract(carrier=headers)
+
+
+def inject_trace_context(headers: MutableMapping[str, str]) -> None:
+    propagate.inject(carrier=headers)
+
+
+def attach_trace_context(trace_context: Context) -> object:
+    return context.attach(trace_context)
+
+
+def detach_trace_context(token: object) -> None:
+    context.detach(token)

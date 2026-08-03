@@ -1,4 +1,10 @@
-from agent_runner.gateway.litellm_client import LiteLLMModelFactory
+from typing import Any
+
+import pytest
+from agents import Model, ModelSettings
+
+from agent_runner.gateway.litellm_client import LiteLLMModelFactory, TracedModel
+from agent_runner.observability.tracing import get_tracer
 
 
 def test_bare_proxy_model_uses_openai_provider_prefix() -> None:
@@ -30,7 +36,36 @@ def test_created_model_targets_external_proxy() -> None:
 
     model = factory.create_model("Qwen/Qwen3-4B")
 
+    assert isinstance(model, Model)
     assert model.model == "openai/Qwen/Qwen3-4B"
     assert model.base_url == "http://localhost:4000"
     assert model.api_key == "sk-test"
     assert factory.request_timeout_seconds == 3
+
+
+def test_token_limit_takes_precedence_over_provider_stop_reason() -> None:
+    response = type("Response", (), {"usage": type("Usage", (), {"output_tokens": 512})(), "output": []})()
+
+    assert TracedModel._finish_reason(response, ModelSettings(max_tokens=512)) == "length"
+
+
+class HeaderCapturingModel:
+    def __init__(self) -> None:
+        self.model_settings: ModelSettings | None = None
+
+    async def get_response(self, *args: Any, **kwargs: Any) -> object:
+        self.model_settings = kwargs.get("model_settings") or args[2]
+        return object()
+
+
+@pytest.mark.asyncio
+async def test_traced_model_injects_current_llm_span_context() -> None:
+    delegate = HeaderCapturingModel()
+    model = TracedModel(delegate, "openai/test-model")  # type: ignore[arg-type]
+
+    with get_tracer().span("agent.run") as agent_span:
+        await model.get_response(None, [], ModelSettings(), [], None, [], None)
+
+    assert delegate.model_settings is not None
+    traceparent = dict(delegate.model_settings.extra_headers or {})["traceparent"]
+    assert traceparent.split("-")[1] == agent_span.trace_id

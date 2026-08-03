@@ -4,8 +4,11 @@ from dataclasses import dataclass, field
 from time import time_ns
 
 from agents.tool_context import ToolContext
+from opentelemetry.trace import SpanKind
 
+from agent_runner.config import get_settings
 from agent_runner.context.builder import CapturedMessage
+from agent_runner.observability.tracing import get_tracer, trace_json
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.tools.registry import ToolDefinition
 
@@ -111,64 +114,90 @@ class ToolExecutionCollector:
         Raises:
             asyncio.CancelledError: When cancellation interrupts the Tool invocation.
         """
-        start_time = epoch_millis()
-        try:
-            if cancellation_token is not None and cancellation_token.is_cancelled():
-                raise asyncio.CancelledError("Tool execution cancelled")
-            if definition.function_tool is None:
-                raise ValueError(f"Tool has no SDK FunctionTool: {definition.tool_key}")
-            result = await definition.function_tool.on_invoke_tool(tool_context, arguments_json)
-            result_content = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            self._executions[tool_call_id] = CapturedToolExecution(
-                tool_call_id=tool_call_id,
-                tool_key=definition.tool_key,
-                tool_name=definition.tool_name,
-                arguments=arguments_json,
-                status="COMPLETED",
-                result_content=result_content,
-                raw_result=result_content,
-                error_message="",
-                start_time=start_time,
-                end_time=max(start_time, epoch_millis()),
-            )
-            return result_content
-        except asyncio.CancelledError:
-            self._executions[tool_call_id] = CapturedToolExecution(
-                tool_call_id=tool_call_id,
-                tool_key=definition.tool_key,
-                tool_name=definition.tool_name,
-                arguments=arguments_json,
-                status="CANCELLED",
-                result_content="",
-                raw_result="",
-                error_message="Generation cancelled.",
-                start_time=start_time,
-                end_time=max(start_time, epoch_millis()),
-            )
-            raise
-        except Exception as error:
-            # A single Tool failure is returned to the model so sibling calls and the Agent loop
-            # can continue. The persisted execution still records the failure independently.
-            error_message = str(error) or type(error).__name__
-            result_content = json.dumps(
-                {"status": "error", "error": error_message},
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            self._executions[tool_call_id] = CapturedToolExecution(
-                tool_call_id=tool_call_id,
-                tool_key=definition.tool_key,
-                tool_name=definition.tool_name,
-                arguments=arguments_json,
-                status="FAILED",
-                result_content=result_content,
-                raw_result=result_content,
-                error_message=error_message,
-                start_time=start_time,
-                end_time=max(start_time, epoch_millis()),
-            )
-            return result_content
+        attributes = {
+            "tool.key": definition.tool_key,
+            "tool.name": definition.tool_name,
+            "tool.source": definition.source_type.value,
+            "gen_ai.tool.call.id": tool_call_id,
+            "gen_ai.tool.name": definition.tool_name,
+        }
+        with get_tracer().span("tool.call", attributes, kind=SpanKind.CLIENT) as span:
+            settings = get_settings()
+            if settings.otel_capture_content:
+                span.set_attribute(
+                    "gen_ai.tool.call.arguments",
+                    trace_json(arguments_json, settings.otel_content_max_chars),
+                )
+            start_time = epoch_millis()
+            try:
+                if cancellation_token is not None and cancellation_token.is_cancelled():
+                    raise asyncio.CancelledError("Tool execution cancelled")
+                if definition.function_tool is None:
+                    raise ValueError(f"Tool has no SDK FunctionTool: {definition.tool_key}")
+                result = await definition.function_tool.on_invoke_tool(tool_context, arguments_json)
+                result_content = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                self._record_execution(
+                    tool_call_id, definition, arguments_json, "COMPLETED", result_content, "", start_time
+                )
+                span.set_attribute("tool.status", "COMPLETED")
+                if settings.otel_capture_content:
+                    span.set_attribute(
+                        "gen_ai.tool.call.result",
+                        trace_json(result_content, settings.otel_content_max_chars),
+                    )
+                return result_content
+            except asyncio.CancelledError:
+                self._record_execution(
+                    tool_call_id, definition, arguments_json, "CANCELLED", "", "Generation cancelled.", start_time
+                )
+                span.set_attribute("tool.status", "CANCELLED")
+                if settings.otel_capture_content:
+                    span.set_attribute("gen_ai.tool.call.result", "Generation cancelled.")
+                raise
+            except Exception as error:
+                # A Tool failure becomes a model-visible result so sibling calls can continue.
+                error_message = str(error) or type(error).__name__
+                result_content = json.dumps(
+                    {"status": "error", "error": error_message},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                self._record_execution(
+                    tool_call_id, definition, arguments_json, "FAILED", result_content, error_message, start_time
+                )
+                span.set_attribute("tool.status", "FAILED")
+                span.set_attribute("error.type", type(error).__name__)
+                if settings.otel_capture_content:
+                    span.set_attribute(
+                        "gen_ai.tool.call.result",
+                        trace_json(result_content, settings.otel_content_max_chars),
+                    )
+                return result_content
+
+    def _record_execution(
+        self,
+        tool_call_id: str,
+        definition: ToolDefinition,
+        arguments_json: str,
+        status: str,
+        result_content: str,
+        error_message: str,
+        start_time: int,
+    ) -> None:
+        """Store one normalized Tool outcome without duplicating persistence mapping."""
+        self._executions[tool_call_id] = CapturedToolExecution(
+            tool_call_id=tool_call_id,
+            tool_key=definition.tool_key,
+            tool_name=definition.tool_name,
+            arguments=arguments_json,
+            status=status,
+            result_content=result_content,
+            raw_result=result_content,
+            error_message=error_message,
+            start_time=start_time,
+            end_time=max(start_time, epoch_millis()),
+        )
 
     def get(self, tool_call_id: str) -> CapturedToolExecution | None:
         """Return terminal evidence for one Tool call when a handler recorded it.

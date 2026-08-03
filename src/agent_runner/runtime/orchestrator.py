@@ -36,6 +36,7 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     PreparedConversationReference,
     RoundStatus,
     SaveConversationRoundRequest,
+    SaveConversationRoundResponse,
     TokenUsage,
     ToolCall,
     ToolCallExecution,
@@ -85,6 +86,7 @@ from agent_runner.conversation import (
     ConversationExecutionLock,
     ConversationManagerClient,
 )
+from agent_runner.observability.tracing import Span, current_trace_id, get_tracer, trace_json
 from agent_runner.runtime.cancellation import (
     CancellationManager,
     CancellationToken,
@@ -352,26 +354,37 @@ class RuntimeOrchestrator:
         prepared_files: list[PreparedConversationFile] = []
         if chat_request.file_ids:
             try:
-                async for result in self._prepare_files(
-                    chat_request,
-                    user_id,
-                    state.attachment_request_id,
-                    http_request,
-                    state.cancellation_token,
-                ):
-                    if isinstance(result, FilePreparationComplete):
-                        prepared_files = list(result.files)
-                    else:
-                        yield result
+                with get_tracer().span("file.prepare", {"file.count": len(chat_request.file_ids)}):
+                    async for result in self._prepare_files(
+                        chat_request,
+                        user_id,
+                        state.attachment_request_id,
+                        http_request,
+                        state.cancellation_token,
+                    ):
+                        if isinstance(result, FilePreparationComplete):
+                            prepared_files = list(result.files)
+                        else:
+                            yield result
             except FilePreparationError as error:
                 await self._persist_known_failure(chat_request, user_id, state, str(error))
                 yield ErrorEvent(str(error), error_code=error.error_code, phase="attachment_preparation")
                 return
 
         # Step 3: Prepare agent context (with referenced conversations, uploaded files, ...).
-        context_result = await self._create_agent_context(
-            chat_request, user_id, state, prepared_files, conversation_history
-        )
+        with get_tracer().span(
+            "context.build",
+            {
+                "conversation.id": chat_request.conversation_id,
+                "context.history_message_count": len(conversation_history),
+                "context.prepared_file_count": len(prepared_files),
+                "context.reference_count": len(chat_request.references),
+            },
+        ) as context_span:
+            context_result = await self._create_agent_context(
+                chat_request, user_id, state, prepared_files, conversation_history
+            )
+            self._record_context_span(context_span, context_result, state)
         if isinstance(context_result, PreparationFailure):
             yield context_result.event
             return
@@ -380,17 +393,19 @@ class RuntimeOrchestrator:
         context = context_result.context
 
         model_result: ModelStreamComplete | None = None
-        async for model_event in self._stream_model(
-            state.agent,
-            context,
-            conversation_history,
-            http_request,
-            state.cancellation_token,
-        ):
-            if isinstance(model_event, ModelStreamComplete):
-                model_result = model_event
-            else:
-                yield model_event
+        with get_tracer().span("agent.run", self._agent_span_attributes(state.agent)) as agent_span:
+            async for model_event in self._stream_model(
+                state.agent,
+                context,
+                conversation_history,
+                http_request,
+                state.cancellation_token,
+            ):
+                if isinstance(model_event, ModelStreamComplete):
+                    model_result = model_event
+                else:
+                    yield model_event
+            self._record_agent_result_span(agent_span, model_result)
         if model_result is None:
             raise RuntimeError("Model stream completed without a terminal result.")
 
@@ -402,6 +417,63 @@ class RuntimeOrchestrator:
 
         async for persistence_event in self._persist_completed_response(chat_request, user_id, state, model_result):
             yield persistence_event
+
+    @staticmethod
+    def _record_context_span(
+        span: Span,
+        result: AgentContextReady | PreparationFailure,
+        state: RuntimeRequestState,
+    ) -> None:
+        """Attach the resolved context shape without duplicating its full LLM payload."""
+        if isinstance(result, PreparationFailure):
+            span.set_attribute("context.status", "failed")
+            span.set_attribute("error.type", result.event.error_code or "CONTEXT_PREPARATION_FAILED")
+            span.add_event("context.failed")
+            return
+
+        context = result.context
+        span.set_attribute("context.status", "ready")
+        span.set_attribute("context.system_prompt_chars", len(context.system_prompt))
+        span.set_attribute("context.history_message_count", len(context.conversation_history))
+        span.set_attribute("context.rag_chunk_count", len(context.rag_chunks))
+        span.set_attribute("context.tool_count", len(context.tool_specs))
+        span.set_attribute("context.current_message_chars", len(context.current_message.content))
+        if state.agent is not None:
+            span.set_attribute("agent.id", state.agent.agent_id)
+            span.set_attribute("agent.name", state.agent.name)
+            span.set_attribute("gen_ai.request.model", state.agent.model)
+        span.add_event("context.ready")
+
+    @staticmethod
+    def _agent_span_attributes(agent: AgentDefinition) -> dict[str, object]:
+        settings = get_settings()
+        return {
+            "agent.id": agent.agent_id,
+            "agent.name": agent.name,
+            "agent.version": agent.version,
+            "gen_ai.request.model": agent.model,
+            "gen_ai.request.max_tokens": agent.max_output_tokens,
+            "gen_ai.request.temperature": agent.temperature,
+            "agent.tool_count": len(agent.tools),
+            "agent.tools": trace_json(agent.tools, settings.otel_content_max_chars),
+        }
+
+    @staticmethod
+    def _record_agent_result_span(span: Span, result: ModelStreamComplete | None) -> None:
+        """Summarize final model and Tool evidence on the owning Agent span."""
+        if result is None:
+            span.set_attribute("agent.status", "missing_result")
+            span.add_event("agent.result.missing")
+            return
+        turns = result.capture.turns
+        span.set_attribute("agent.status", result.terminal_status.name if result.terminal_status else "COMPLETED")
+        span.set_attribute("agent.response_chars", len(result.response_text))
+        span.set_attribute("agent.turn_count", len(turns))
+        span.set_attribute("agent.tool_execution_count", sum(len(turn.tool_executions) for turn in turns))
+        span.set_attribute("gen_ai.usage.input_tokens", sum(turn.prompt_tokens for turn in turns))
+        span.set_attribute("gen_ai.usage.output_tokens", sum(turn.completion_tokens for turn in turns))
+        span.set_attribute("gen_ai.usage.total_tokens", sum(turn.total_tokens for turn in turns))
+        span.add_event("agent.completed")
 
     async def _prepare_conversation_context(
         self,
@@ -416,7 +488,15 @@ class RuntimeOrchestrator:
 
         # Preflight happens before billable model/Tool work. Conversation Manager authorizes the
         # destination and returns the durable high-water/replay boundary used for this entire run.
-        preflight_result = await self._load_conversation_preflight(chat_request, user_id)
+        with get_tracer().span(
+            "preflight",
+            {
+                "conversation.id": chat_request.conversation_id,
+                "conversation.reference_count": len(chat_request.references),
+            },
+        ) as preflight_span:
+            preflight_result = await self._load_conversation_preflight(chat_request, user_id)
+            self._record_preflight_span(preflight_span, preflight_result)
         if isinstance(preflight_result, PreparationFailure):
             return preflight_result
         preflight = preflight_result
@@ -427,7 +507,8 @@ class RuntimeOrchestrator:
         if not chat_request.references:
             return ConversationContextReady(tuple(conversation_history))
 
-        reference_result = await self._prepare_reference_context(chat_request, user_id)
+        with get_tracer().span("reference.prepare", {"reference.count": len(chat_request.references)}):
+            reference_result = await self._prepare_reference_context(chat_request, user_id)
         if isinstance(reference_result, ReferenceContextReady):
             conversation_history.extend(reference_result.messages)
             return ConversationContextReady(tuple(conversation_history))
@@ -440,6 +521,19 @@ class RuntimeOrchestrator:
             reference_result.event.error_message or "Conversation reference preparation failed.",
         )
         return reference_result
+
+    @staticmethod
+    def _record_preflight_span(span: Span, result: ConversationPreflight | PreparationFailure) -> None:
+        """Record authorization/replay boundaries selected before billable work."""
+        if isinstance(result, PreparationFailure):
+            span.set_attribute("preflight.status", "failed")
+            span.set_attribute("error.type", result.event.error_code or "PREFLIGHT_FAILED")
+            span.add_event("preflight.failed")
+            return
+        span.set_attribute("preflight.status", "ready")
+        span.set_attribute("conversation.next_round_number", result.next_round_number)
+        span.set_attribute("conversation.history_message_count", len(result.conversation_history))
+        span.add_event("preflight.ready")
 
     async def _create_agent_context(
         self,
@@ -523,7 +617,7 @@ class RuntimeOrchestrator:
         )
         yield SavingEvent()
         try:
-            saved = await self.conversation_client.save_round(save_request)
+            saved = await self._save_round(save_request)
         except Exception as error:
             logger.exception("Failed to persist completed round")
             yield ErrorEvent(str(error), error_code="PERSISTENCE_FAILED", phase="persistence")
@@ -680,7 +774,7 @@ class RuntimeOrchestrator:
                         response_tool_calls=[],
                         tool_executions=[],
                         request_id=str(uuid4()),
-                        trace_id=str(uuid4()),
+                        trace_id=current_trace_id(),
                         start_time=call_start,
                         llm_end_time=legacy_end,
                         end_time=legacy_end,
@@ -929,6 +1023,7 @@ class RuntimeOrchestrator:
             start_time=round_start,
             end_time=call_end,
             references=self._to_proto_references(chat_request),
+            trace_id=current_trace_id(),
         )
 
     def _to_proto_turn(
@@ -979,9 +1074,15 @@ class RuntimeOrchestrator:
             message_storage_mode=LlmMessageStorageMode[captured.message_storage_mode],
         )
         response_tool_calls = [self._captured_tool_call_to_proto(call) for call in captured.response_tool_calls]
+        if response_tool_calls:
+            finish_reason = "tool_calls"
+        elif captured.completion_tokens >= agent.max_output_tokens:
+            finish_reason = "length"
+        else:
+            finish_reason = "stop"
         response = LlmResponse(
             message=AssistantMessage(content=captured.response_content, tool_calls=response_tool_calls),
-            finish_reason="tool_calls" if response_tool_calls else "stop",
+            finish_reason=finish_reason,
             usage=TokenUsage(
                 prompt_tokens=captured.prompt_tokens,
                 completion_tokens=captured.completion_tokens,
@@ -1151,15 +1252,38 @@ class RuntimeOrchestrator:
             start_time=round_start,
             end_time=max(round_start, _epoch_millis()),
             references=self._to_proto_references(chat_request),
+            trace_id=current_trace_id(),
         )
         try:
-            response = await self.conversation_client.save_round(request)
+            response = await self._save_round(request)
             if response.base is None or not response.base.success:
                 logger.error("Failed to persist terminal round: %s", response.base)
             else:
                 self._terminal_round_persisted = True
         except Exception:
             logger.exception("Failed to persist terminal round")
+
+    async def _save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
+        """Persist one terminal Round inside the shared tracing phase."""
+        tool_execution_count = sum(len(turn.tool_call_executions) for turn in request.turns)
+        attributes = {
+            "conversation.id": request.conversation_id,
+            "conversation.round_number": request.round_number,
+            "conversation.round_status": request.status.name,
+            "conversation.turn_count": len(request.turns),
+            "conversation.tool_execution_count": tool_execution_count,
+            "conversation.reference_count": len(request.references),
+            "conversation.answer_chars": len(request.final_answer.content) if request.final_answer is not None else 0,
+            "conversation.trace_id": request.trace_id,
+        }
+        with get_tracer().span("round.persist", attributes) as span:
+            span.add_event("round.persistence.started")
+            response = await self.conversation_client.save_round(request)
+            success = response.base is not None and response.base.success
+            span.set_attribute("rpc.success", success)
+            span.set_attribute("rpc.code", response.base.code if response.base is not None else -1)
+            span.add_event("round.persisted" if success else "round.persistence.rejected")
+            return response
 
     def _to_context_messages(self, messages: list[LlmConversationMessage]) -> list[Message]:
         """Convert replay protobuf messages into provider-neutral runtime context.

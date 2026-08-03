@@ -121,6 +121,23 @@ class Settings(BaseSettings):
     environment: str = Field(default="local", validation_alias="ENVIRONMENT")
     debug_endpoints_enabled: bool = Field(default=True, validation_alias="DEBUG_ENDPOINTS_ENABLED")
 
+    # OpenTelemetry tracing. Every environment defaults to 100% sampling; deployments can lower
+    # the ratio without changing code when volume or retention requirements change.
+    otel_enabled: bool = Field(default=True, validation_alias="OTEL_ENABLED")
+    otel_service_name: str = Field(default="agent-runner", validation_alias="OTEL_SERVICE_NAME")
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://127.0.0.1:4317", validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+    otel_sampling_ratio: float = Field(default=1.0, validation_alias="OTEL_TRACES_SAMPLER_ARG", ge=0.0, le=1.0)
+    # Content capture is opt-in because prompts and Tool payloads can contain business data.
+    otel_capture_content: bool = Field(default=False, validation_alias="OTEL_CAPTURE_CONTENT")
+    otel_content_max_chars: int = Field(
+        default=16_384,
+        validation_alias="OTEL_CONTENT_MAX_CHARS",
+        ge=256,
+        le=131_072,
+    )
+
     # Built-in Tool network safety settings. Persisted Tool results are not semantically trimmed
     # in Phase 5; the byte limit protects the HTTP client from unbounded remote responses.
     tool_http_timeout_seconds: float = Field(default=15.0, validation_alias="TOOL_HTTP_TIMEOUT_SECONDS")
@@ -204,6 +221,14 @@ class ConfigurationManager:
                 "ttl_seconds": "agent_config_cache_ttl_seconds",
             },
             "debug": {"endpoints_enabled": "debug_endpoints_enabled"},
+            "observability": {
+                "otel_enabled": "otel_enabled",
+                "otel_service_name": "otel_service_name",
+                "otel_exporter_otlp_endpoint": "otel_exporter_otlp_endpoint",
+                "otel_sampling_ratio": "otel_sampling_ratio",
+                "otel_capture_content": "otel_capture_content",
+                "otel_content_max_chars": "otel_content_max_chars",
+            },
         }
 
         updates: dict[str, Any] = {}

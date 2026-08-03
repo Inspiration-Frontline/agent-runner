@@ -29,6 +29,7 @@ from agent_runner.context.builder import (
     message_to_capture,
 )
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
+from agent_runner.observability.tracing import current_trace_id
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.runtime.model_events import (
     ModelError,
@@ -138,7 +139,9 @@ class OpenAIAgentsSdkAdapter:
         )
         sdk_input = self._build_input(context)
         run_start = epoch_millis()
-        trace_id = str(uuid4())
+        trace_id = current_trace_id()
+        if not trace_id:
+            raise RuntimeError("Agent execution requires an active OpenTelemetry trace.")
         model_completed_times: list[int] = []
         model_completed_usages: list[tuple[int, int, int]] = []
         # Runner recognizes model Tool Calls, invokes the FunctionTools attached to sdk_agent,
