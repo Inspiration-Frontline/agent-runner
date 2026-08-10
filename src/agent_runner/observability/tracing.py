@@ -16,10 +16,6 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 
 logger = logging.getLogger(__name__)
 
-_provider: TracerProvider | None = None
-_exporter_configured = False
-_tracer: "Tracer | None" = None
-
 _REDACTED = "[REDACTED]"
 _MAX_DEPTH = 12
 _SENSITIVE_KEY_SUFFIXES = (
@@ -34,7 +30,7 @@ _SENSITIVE_KEY_SUFFIXES = (
     "refreshtoken",
     "secret",
 )
-_SENSITIVE_KEYS = {"passwd", "token"}
+_SENSITIVE_KEYS = frozenset({"passwd", "token"})
 
 
 def _hex_trace_id(span_context: trace.SpanContext) -> str:
@@ -137,9 +133,13 @@ class Span:
 class Tracer:
     """Creates real OpenTelemetry spans while keeping the existing local API narrow."""
 
-    def __init__(self, service_name: str = "agent-runner") -> None:
+    def __init__(self, service_name: str = "agent-runner", provider: TracerProvider | None = None) -> None:
         self.service_name = service_name
-        self._otel_tracer = trace.get_tracer(service_name)
+        self._provider = provider or TracerProvider(
+            resource=Resource.create({"service.name": service_name}),
+            sampler=ParentBased(TraceIdRatioBased(1.0)),
+        )
+        self._otel_tracer = self._provider.get_tracer(service_name)
 
     @contextmanager
     def span(
@@ -166,56 +166,41 @@ class Tracer:
                 raise
 
 
-def _ensure_provider(service_name: str = "agent-runner", sampling_ratio: float = 1.0) -> TracerProvider:
-    global _provider
-    if _provider is None:
-        _provider = TracerProvider(
+class TracingManager:
+    """Application-scoped owner of the OpenTelemetry provider and exporter."""
+
+    def __init__(
+        self,
+        service_name: str = "agent-runner",
+        *,
+        endpoint: str | None = None,
+        sampling_ratio: float = 1.0,
+        enabled: bool = True,
+    ) -> None:
+        self._provider = TracerProvider(
             resource=Resource.create({"service.name": service_name}),
             sampler=ParentBased(TraceIdRatioBased(sampling_ratio)),
         )
-        trace.set_tracer_provider(_provider)
-    return _provider
+        if enabled and endpoint:
+            self._configure_exporter(endpoint)
+        self.tracer = Tracer(service_name, self._provider)
 
-
-def init_tracer(
-    service_name: str = "agent-runner",
-    *,
-    endpoint: str | None = None,
-    sampling_ratio: float = 1.0,
-    enabled: bool = True,
-) -> Tracer:
-    """Initialize the process provider and optionally attach the non-blocking OTLP exporter."""
-    global _exporter_configured, _tracer
-    provider = _ensure_provider(service_name, sampling_ratio)
-    if enabled and endpoint and not _exporter_configured:
+    def _configure_exporter(self, endpoint: str) -> None:
         try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
             exporter = OTLPSpanExporter(endpoint=endpoint, insecure=endpoint.startswith("http://"))
-            provider.add_span_processor(BatchSpanProcessor(exporter))
-            _exporter_configured = True
+            self._provider.add_span_processor(BatchSpanProcessor(exporter))
             logger.info("OpenTelemetry OTLP exporter configured for %s", endpoint)
         except Exception:
             logger.exception("OpenTelemetry exporter setup failed; requests will continue without export")
-    _tracer = Tracer(service_name)
-    return _tracer
 
-
-def get_tracer() -> Tracer:
-    global _tracer
-    if _tracer is None:
-        _ensure_provider()
-        _tracer = Tracer()
-    return _tracer
-
-
-def shutdown_tracer() -> None:
-    if _provider is None:
-        return
-    try:
-        _provider.shutdown()
-    except Exception:
-        logger.exception("OpenTelemetry shutdown failed")
+    def shutdown(self) -> None:
+        """Flush and stop the provider owned by this application instance."""
+        try:
+            self._provider.shutdown()
+        except Exception:
+            logger.exception("OpenTelemetry shutdown failed")
 
 
 def current_trace_id() -> str:

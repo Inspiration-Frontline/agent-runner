@@ -78,7 +78,7 @@ class _WebSearchClient:
             parser = _VisibleTextParser()
             parser.feed(fetched_page.body)
             parser.close()
-            content = parser.text()
+            content = parser.get_text()
             item["url"] = fetched_page.final_url
             item["content"] = content or ""
             if not item["content"]:
@@ -214,7 +214,7 @@ class _VisibleTextParser(HTMLParser):
             if normalized:
                 self._parts.append(normalized)
 
-    def text(self) -> str:
+    def get_text(self) -> str:
         """Return normalized visible text joined into model-readable lines."""
         # TODO: Apply a shared semantic context trimmer after AgentBreaker defines a unified
         # replay/tool/RAG context policy. Phase 5 retains all extracted text within the network cap.

@@ -17,7 +17,7 @@ from openai.types.responses.response_completed_event import ResponseCompletedEve
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
 
 from agent_runner.agent_definitions.config_models import AgentDefinition
-from agent_runner.config import get_settings
+from agent_runner.config import Settings
 from agent_runner.context.builder import (
     AgentContext,
     CapturedMessage,
@@ -29,7 +29,7 @@ from agent_runner.context.builder import (
     message_to_capture,
 )
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
-from agent_runner.observability.tracing import current_trace_id
+from agent_runner.observability.tracing import Tracer, current_trace_id
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.runtime.model_events import (
     ModelError,
@@ -45,7 +45,7 @@ from agent_runner.runtime.tool_loop import (
     CapturedToolCall,
     CapturedToolExecution,
     ToolExecutionCollector,
-    epoch_millis,
+    get_epoch_millis,
 )
 from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
@@ -97,14 +97,21 @@ class OpenAIAgentsSdkAdapter:
     evidence back to AgentBreaker's typed runtime and persistence contracts.
     """
 
-    def __init__(self, model_factory: AgentModelFactory | None = None) -> None:
+    def __init__(
+        self,
+        model_factory: AgentModelFactory | None = None,
+        settings: Settings | None = None,
+        tracer: Tracer | None = None,
+    ) -> None:
         """Create the SDK adapter and an empty durable capture snapshot.
 
         Args:
             model_factory: Provider-neutral model factory. The default uses the configured LiteLLM
                 gateway, allowing ModelScope or another OpenAI-compatible provider behind it.
         """
-        self.model_factory = model_factory or LiteLLMModelFactory()
+        self.settings = settings or Settings()
+        self.tracer = tracer or Tracer(self.settings.otel_service_name)
+        self.model_factory = model_factory or LiteLLMModelFactory(settings=self.settings, tracer=self.tracer)
         self.last_capture = AgentRunCapture()
 
     async def run_streamed(
@@ -138,7 +145,7 @@ class OpenAIAgentsSdkAdapter:
             tool_registry=tool_registry,
         )
         sdk_input = self._build_input(context)
-        run_start = epoch_millis()
+        run_start = get_epoch_millis()
         trace_id = current_trace_id()
         if not trace_id:
             raise RuntimeError("Agent execution requires an active OpenTelemetry trace.")
@@ -163,7 +170,7 @@ class OpenAIAgentsSdkAdapter:
 
                 converted = self._convert_stream_event(event, prepared.collector)
                 if isinstance(event, RawResponsesStreamEvent) and isinstance(event.data, ResponseCompletedEvent):
-                    model_completed_times.append(epoch_millis())
+                    model_completed_times.append(get_epoch_millis())
                     usage = getattr(event.data.response, "usage", None)
                     model_completed_usages.append(
                         (
@@ -245,7 +252,7 @@ class OpenAIAgentsSdkAdapter:
         tool_registry: ToolRegistry | None,
     ) -> PreparedSdkExecution:
         """Resolve and attach configured Tools identically for both SDK Runner entry points."""
-        collector = ToolExecutionCollector()
+        collector = ToolExecutionCollector(self.settings, self.tracer)
         registry = tool_registry or ToolRegistry()
         definitions = self._resolve_tool_definitions(agent, registry)
         sdk_tools = self._build_sdk_tools(definitions, collector, cancellation_token)
@@ -271,7 +278,6 @@ class OpenAIAgentsSdkAdapter:
         Returns:
             SDK Agent configured with provider timeout, retry, and parallel Tool policy.
         """
-        settings = get_settings()
         sdk_tools: list[Tool] = list(tools or ())
         return Agent(
             name=agent.name,
@@ -281,8 +287,8 @@ class OpenAIAgentsSdkAdapter:
                 temperature=agent.temperature,
                 max_tokens=agent.max_output_tokens,
                 include_usage=True,
-                extra_args={"timeout": settings.lite_llm_request_timeout_seconds},
-                retry=ModelRetrySettings(max_retries=settings.lite_llm_max_retries),
+                extra_args={"timeout": self.settings.lite_llm_request_timeout_seconds},
+                retry=ModelRetrySettings(max_retries=self.settings.lite_llm_max_retries),
                 parallel_tool_calls=True,
             ),
             tools=sdk_tools,
@@ -580,7 +586,7 @@ class OpenAIAgentsSdkAdapter:
         raw_responses = list(result.raw_responses)
         # Cancellation can remove SDK raw_responses after tool_called was already emitted. Preserve
         # that observed evidence as a partial Turn instead of losing the Tool Call entirely.
-        if not raw_responses and collector.calls():
+        if not raw_responses and collector.list_calls():
             return self._build_observed_partial_capture(
                 initial_messages=initial_messages,
                 definitions=definitions,
@@ -598,7 +604,7 @@ class OpenAIAgentsSdkAdapter:
             event_llm_end = (
                 model_completed_times[index]
                 if index < len(model_completed_times)
-                else max(previous_turn_end, epoch_millis())
+                else max(previous_turn_end, get_epoch_millis())
             )
             normalized_output = self._normalize_response_output(response.output)
             response_content = normalized_output.content
@@ -606,7 +612,7 @@ class OpenAIAgentsSdkAdapter:
             if not tool_calls and index == len(raw_responses) - 1:
                 # The SDK may clear a cancelled response's output after already publishing
                 # tool_called events. Those events remain authoritative audit evidence.
-                tool_calls = [call for call in collector.calls() if call.tool_call_id not in assigned_tool_call_ids]
+                tool_calls = [call for call in collector.list_calls() if call.tool_call_id not in assigned_tool_call_ids]
             assigned_tool_call_ids.update(call.tool_call_id for call in tool_calls)
             executions = self._complete_execution_audit(
                 tool_calls=tool_calls,
@@ -625,7 +631,7 @@ class OpenAIAgentsSdkAdapter:
             raw_request = json.dumps(
                 {
                     "messages": [captured_message_to_dict(message) for message in full_model_input],
-                    "tools": [self._definition_dict(definition) for definition in definitions],
+                    "tools": [self._convert_definition_to_dict(definition) for definition in definitions],
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -633,7 +639,7 @@ class OpenAIAgentsSdkAdapter:
             )
             raw_response = json.dumps(
                 {
-                    "output": [self._model_dump(item) for item in response.output],
+                    "output": [self._dump_model(item) for item in response.output],
                     "observed_tool_calls": [
                         {
                             "id": call.tool_call_id,
@@ -710,8 +716,8 @@ class OpenAIAgentsSdkAdapter:
             Partial capture preserving observed Tool evidence.
         """
         initial_messages = [self._coerce_capture_message(message) for message in initial_messages]
-        tool_calls = collector.calls()
-        event_llm_end = model_completed_times[-1] if model_completed_times else epoch_millis()
+        tool_calls = collector.list_calls()
+        event_llm_end = model_completed_times[-1] if model_completed_times else get_epoch_millis()
         executions = self._complete_execution_audit(
             tool_calls=tool_calls,
             definitions=definitions,
@@ -727,7 +733,7 @@ class OpenAIAgentsSdkAdapter:
         raw_request = json.dumps(
             {
                 "messages": [captured_message_to_dict(message) for message in initial_messages],
-                "tools": [self._definition_dict(definition) for definition in definitions],
+                "tools": [self._convert_definition_to_dict(definition) for definition in definitions],
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -924,7 +930,7 @@ class OpenAIAgentsSdkAdapter:
             )
         return messages
 
-    def _definition_dict(self, definition: ToolDefinition) -> dict[str, Any]:
+    def _convert_definition_to_dict(self, definition: ToolDefinition) -> dict[str, Any]:
         """Serialize a Tool definition into deterministic raw-request audit JSON.
 
         Args:
@@ -943,7 +949,7 @@ class OpenAIAgentsSdkAdapter:
             "definition_hash": definition.definition_hash,
         }
 
-    def _model_dump(self, value: Any) -> Any:
+    def _dump_model(self, value: Any) -> Any:
         """Convert an SDK response item, not an LLM model, into JSON-compatible audit data.
 
         SDK output items are usually Pydantic models, while provider adapters may already return

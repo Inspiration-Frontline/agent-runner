@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from agent_runner.config import ChatRequest, ConversationReferenceRequest
+from agent_runner.config import ConversationReferenceRequest, ConversationRequest
 
 
 def reference(source_id: str = "conv_source", boundary: int = 1) -> dict[str, object]:
@@ -24,25 +24,25 @@ def test_reference_request_rejects_invalid_contract(payload: dict[str, object]) 
         ConversationReferenceRequest.model_validate(payload)
 
 
-def test_chat_request_rejects_duplicate_and_self_references() -> None:
+def test_conversation_request_rejects_duplicate_and_self_references() -> None:
     with pytest.raises(ValidationError):
-        ChatRequest(
+        ConversationRequest(
             conversation_id="conv_destination",
             message="Use sources",
             references=[reference(), reference()],
         )
 
     with pytest.raises(ValidationError):
-        ChatRequest(
+        ConversationRequest(
             conversation_id="conv_destination",
             message="Use sources",
             references=[reference(source_id="conv_destination")],
         )
 
 
-def test_chat_request_rejects_more_than_ten_references() -> None:
+def test_conversation_request_rejects_more_than_ten_references() -> None:
     with pytest.raises(ValidationError):
-        ChatRequest(
+        ConversationRequest(
             conversation_id="conv_destination",
             message="Use sources",
             references=[reference(source_id=f"conv_source_{index}") for index in range(11)],

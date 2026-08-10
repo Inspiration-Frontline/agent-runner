@@ -246,6 +246,3 @@ class ConversationCancellationRegistry:
         key = (user_id, conversation_id)
         if self._tokens.get(key) is token:
             del self._tokens[key]
-
-
-conversation_cancellation_registry = ConversationCancellationRegistry()

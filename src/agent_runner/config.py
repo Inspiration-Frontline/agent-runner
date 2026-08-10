@@ -146,10 +146,6 @@ class Settings(BaseSettings):
     web_fetch_max_redirects: int = Field(default=3, validation_alias="WEB_FETCH_MAX_REDIRECTS")
 
 
-# Base settings loaded from local environment files (before Nacos merge)
-_base_settings = Settings()
-
-
 class ConfigurationManager:
     """
     Configuration manager that merges local and Nacos configurations.
@@ -165,6 +161,7 @@ class ConfigurationManager:
     def __init__(self, base_settings: Settings):
         """Create a settings manager with the local settings snapshot as its merge base."""
         self._base_settings = base_settings
+        self._nacos_loader: Any | None = None
 
     async def initialize(self) -> Settings:
         """
@@ -178,10 +175,15 @@ class ConfigurationManager:
             return self._base_settings
 
         try:
-            from agent_runner.nacos_config import get_nacos_loader
+            from agent_runner.nacos_config import NacosConfigLoader
 
-            loader = await get_nacos_loader(self._base_settings)
-            logger.info(f"Nacos config client initialized: data_id={loader.data_id}, group={loader.group}")
+            self._nacos_loader = NacosConfigLoader.from_settings(self._base_settings)
+            await self._nacos_loader.initialize()
+            logger.info(
+                "Nacos config client initialized: data_id=%s, group=%s",
+                self._nacos_loader.data_id,
+                self._nacos_loader.group,
+            )
         except Exception as e:
             logger.warning(f"Failed to initialize Nacos: {e}, using local configuration only")
 
@@ -260,54 +262,23 @@ class ConfigurationManager:
             return self._base_settings
 
         try:
-            from agent_runner.nacos_config import _nacos_loader
-
-            if _nacos_loader and _nacos_loader._cached_config:
-                return self._merge_settings(self._base_settings, _nacos_loader._cached_config)
+            if self._nacos_loader is not None and self._nacos_loader.cached_config:
+                return self._merge_settings(self._base_settings, self._nacos_loader.cached_config)
         except Exception:
-            pass
+            logger.exception("Failed to merge the current Nacos configuration")
 
         return self._base_settings
 
-
-# Global configuration manager instance
-_config_manager: ConfigurationManager | None = None
+    async def close(self) -> None:
+        """Release the loader owned by this application-scoped manager."""
+        if self._nacos_loader is not None:
+            await self._nacos_loader.close()
+            self._nacos_loader = None
 
 
 def get_settings() -> Settings:
-    """
-    Get the current application settings.
-
-    Returns the merged settings if configuration manager is initialized,
-    otherwise returns the base settings from local configuration files.
-
-    Returns:
-        Settings: The current application settings.
-    """
-    if _config_manager:
-        return _config_manager.get_settings()
-    return _base_settings
-
-
-async def initialize_settings() -> Settings:
-    """
-    Initialize application settings with Nacos configuration merge.
-
-    This function should be called during application startup to ensure
-    Nacos configuration is loaded and merged with local configuration.
-
-    Returns:
-        Settings: The initialized settings instance.
-    """
-    global _config_manager
-    if _config_manager is None:
-        _config_manager = ConfigurationManager(_base_settings)
-    return await _config_manager.initialize()
-
-
-# For backward compatibility, expose settings as the base settings snapshot.
-# Call get_settings() after initialize_settings() when you need merged values.
-settings = _base_settings
+    """Load a fresh file-backed settings snapshot for standalone component use."""
+    return Settings()
 
 
 class MemoryPolicy(BaseModel):
@@ -335,11 +306,11 @@ class ConversationReferenceRequest(BaseModel):
     source_end_round_number: int = Field(gt=0)
 
 
-class ChatRequest(BaseModel):
+class ConversationRequest(BaseModel):
     """
-    Chat request model for agent interactions.
+    Conversation request model for agent interactions.
 
-    Represents a single chat request to an agent, including conversation context and the message to
+    Represents one Conversation request to an agent, including context and the message to
     process. ``file_ids`` are stable references selected by the browser; Agent Runner sends them to
     Conversation Manager for authorization/preparation and never interprets them as file bytes.
 
@@ -392,7 +363,7 @@ class ChatRequest(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def require_message_or_files(self) -> "ChatRequest":
+    def require_message_or_files(self) -> "ConversationRequest":
         """Require visible text unless the request contains at least one attachment."""
         if not self.message and not self.file_ids:
             raise ValueError("message or file_ids is required")
@@ -401,7 +372,7 @@ class ChatRequest(BaseModel):
         return self
 
 
-class CancelChatRequest(BaseModel):
+class CancelConversationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conversation_id: str = Field(min_length=1, max_length=64, pattern=r"^conv_[A-Za-z0-9_-]+$")

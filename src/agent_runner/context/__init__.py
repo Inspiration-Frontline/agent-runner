@@ -4,7 +4,7 @@ from agent_runner.context.prompt_assembler import PromptAssembler
 from agent_runner.context.rag_adapter import RAGAdapter
 from agent_runner.context.truncation import TokenBudget, TokenBudgetManager
 
-__all__ = [
+__all__ = (
     "ContextBuilder",
     "AgentContext",
     "Message",
@@ -14,4 +14,4 @@ __all__ = [
     "PromptAssembler",
     "TokenBudgetManager",
     "TokenBudget",
-]
+)

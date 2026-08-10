@@ -3,48 +3,32 @@ import json
 import pytest
 
 from agent_runner.agent_definitions import loader as loader_module
-from agent_runner.config import CONFIG_DIR, get_env_file, get_settings
+from agent_runner.config import CONFIG_DIR, ConfigurationManager, Settings, get_env_file, get_settings
 from agent_runner.context import profile_adapter, rag_adapter
 from agent_runner.context.builder import ContextBuilder
 
 
-def test_context_builder_reads_current_context_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "agent_runner.context.builder.get_settings", lambda: type("S", (), {"max_context_tokens": 2048})()
-    )
-
-    builder = ContextBuilder()
+def test_context_builder_reads_current_context_budget() -> None:
+    builder = ContextBuilder(settings=Settings().model_copy(update={"max_context_tokens": 2048}))
 
     assert builder.token_budget_manager.max_tokens == 2048
 
 
-def test_profile_adapter_reads_current_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "agent_runner.context.profile_adapter.get_settings",
-        lambda: type("S", (), {"user_profiler_url": "http://profile-test"})(),
-    )
-
-    adapter = profile_adapter.ProfileAdapter()
+def test_profile_adapter_reads_current_service_url() -> None:
+    adapter = profile_adapter.ProfileAdapter(Settings().model_copy(update={"user_profiler_url": "http://profile-test"}))
 
     assert adapter.base_url == "http://profile-test"
 
 
-def test_rag_adapter_reads_current_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "agent_runner.context.rag_adapter.get_settings",
-        lambda: type("S", (), {"knowledge_service_url": "http://rag-test"})(),
-    )
-
-    adapter = rag_adapter.RAGAdapter()
+def test_rag_adapter_reads_current_service_url() -> None:
+    adapter = rag_adapter.RAGAdapter(Settings().model_copy(update={"knowledge_service_url": "http://rag-test"}))
 
     assert adapter.base_url == "http://rag-test"
 
 
-def test_agent_config_loader_reads_current_service_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_settings = type(
-        "S",
-        (),
-        {
+def test_agent_config_loader_reads_current_service_defaults() -> None:
+    fake_settings = Settings().model_copy(
+        update={
             "agent_config_center_url": "http://config-test",
             "agent_config_cache_enabled": False,
             "redis_host": "redis-test",
@@ -57,11 +41,10 @@ def test_agent_config_loader_reads_current_service_defaults(monkeypatch: pytest.
             "local_agent_config_enabled": False,
             "local_agent_config_path": "./config/custom.json",
             "max_output_tokens": 2048,
-        },
-    )()
-    monkeypatch.setattr("agent_runner.agent_definitions.loader.get_settings", lambda: fake_settings)
+        }
+    )
 
-    loader = loader_module.AgentConfigLoader()
+    loader = loader_module.AgentConfigLoader(fake_settings)
 
     assert loader.base_url == "http://config-test"
     assert loader.redis_client is None
@@ -85,6 +68,31 @@ def test_local_settings_do_not_require_manual_env_vars() -> None:
     assert settings.local_agent_config_enabled is True
     assert settings.lite_llm_base_url == "http://localhost:4000"
     assert settings.lite_llm_api_key
+
+
+def test_otel_priority_is_nacos_then_file_then_code_default(tmp_path) -> None:
+    env_file = tmp_path / "agent-runner.env"
+    env_file.write_text(
+        "OTEL_SERVICE_NAME=file-runner\n"
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://file-collector:4317\n"
+        "OTEL_TRACES_SAMPLER_ARG=0.5\n"
+        "NACOS_ENABLED=true\n",
+        encoding="utf-8",
+    )
+    file_settings = Settings(_env_file=env_file)
+    manager = ConfigurationManager(file_settings)
+    manager._nacos_loader = type(
+        "NacosSnapshot",
+        (),
+        {"cached_config": {"observability": {"otel_service_name": "nacos-runner"}}},
+    )()
+
+    merged = manager.get_settings()
+
+    assert merged.otel_service_name == "nacos-runner"
+    assert merged.otel_exporter_otlp_endpoint == "http://file-collector:4317"
+    assert merged.otel_sampling_ratio == 0.5
+    assert file_settings.otel_enabled is True
 
 
 def test_local_general_agent_uses_the_service_output_budget() -> None:

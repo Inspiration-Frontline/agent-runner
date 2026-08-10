@@ -188,6 +188,11 @@ class NacosConfigLoader:
 
         return self._cached_config
 
+    @property
+    def cached_config(self) -> dict[str, Any]:
+        """Return the latest parsed Nacos document used for synchronous settings reads."""
+        return self._cached_config
+
     async def close(self) -> None:
         """
         Close the Nacos configuration client and cleanup resources.
@@ -261,44 +266,3 @@ class NacosConfigLoader:
             username=os.getenv("NACOS_USERNAME", "nacos"),
             password=os.getenv("NACOS_PASSWORD", "nacos"),
         )
-
-
-# Global Nacos config loader instance
-_nacos_loader: NacosConfigLoader | None = None
-
-
-async def get_nacos_loader(settings: Settings | None = None) -> NacosConfigLoader:
-    """
-    Get or create the global Nacos configuration loader instance.
-
-    Returns:
-        NacosConfigLoader: The global Nacos configuration loader.
-    """
-    global _nacos_loader
-    if _nacos_loader is None:
-        _nacos_loader = NacosConfigLoader.from_settings(settings) if settings else NacosConfigLoader.from_env()
-        await _nacos_loader.initialize()
-    return _nacos_loader
-
-
-async def get_nacos_config() -> dict[str, Any]:
-    """
-    Get configuration from Nacos.
-
-    Returns:
-        dict[str, Any]: The configuration dictionary from Nacos.
-    """
-    loader = await get_nacos_loader()
-    return await loader.get_config()
-
-
-async def close_nacos_loader() -> None:
-    """
-    Close the global Nacos configuration loader.
-
-    This should be called during application shutdown.
-    """
-    global _nacos_loader
-    if _nacos_loader:
-        await _nacos_loader.close()
-        _nacos_loader = None

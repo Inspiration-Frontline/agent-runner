@@ -9,16 +9,14 @@ Configuration:
 - debug_endpoints_enabled: Explicit toggle for debug endpoints
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from agent_runner.api.responses import DebugConfigResponse
-from agent_runner.config import Settings, get_settings
+from agent_runner.application_services import ApplicationServices
+from agent_runner.config import Settings
 
-router = APIRouter(tags=["debug"])
 
-
-@router.get("/debug/config", response_model=DebugConfigResponse)
-async def debug_config() -> DebugConfigResponse:
+async def get_debug_config(request: Request) -> DebugConfigResponse:
     """
     Debug endpoint to view current configuration values.
 
@@ -35,7 +33,8 @@ async def debug_config() -> DebugConfigResponse:
             - environment
             - debug_endpoints_enabled
     """
-    settings: Settings = get_settings()
+    services: ApplicationServices = request.app.state.services
+    settings: Settings = services.get_settings()
     return DebugConfigResponse(
         lite_llm_base_url=settings.lite_llm_base_url,
         agent_config_center_url=settings.agent_config_center_url,
@@ -48,3 +47,15 @@ async def debug_config() -> DebugConfigResponse:
         environment=settings.environment,
         debug_endpoints_enabled=settings.debug_endpoints_enabled,
     )
+
+
+def create_debug_router() -> APIRouter:
+    """Create development-only routes for one application instance."""
+    router = APIRouter(tags=["debug"])
+    router.add_api_route(
+        "/debug/config",
+        get_debug_config,
+        methods=["GET"],
+        response_model=DebugConfigResponse,
+    )
+    return router

@@ -4,7 +4,6 @@ import pytest
 from agents import Model, ModelSettings
 
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory, TracedModel
-from agent_runner.observability.tracing import get_tracer
 
 
 def test_bare_proxy_model_uses_openai_provider_prefix() -> None:
@@ -46,7 +45,7 @@ def test_created_model_targets_external_proxy() -> None:
 def test_token_limit_takes_precedence_over_provider_stop_reason() -> None:
     response = type("Response", (), {"usage": type("Usage", (), {"output_tokens": 512})(), "output": []})()
 
-    assert TracedModel._finish_reason(response, ModelSettings(max_tokens=512)) == "length"
+    assert TracedModel._get_finish_reason(response, ModelSettings(max_tokens=512)) == "length"
 
 
 class HeaderCapturingModel:
@@ -63,9 +62,15 @@ async def test_traced_model_injects_current_llm_span_context() -> None:
     delegate = HeaderCapturingModel()
     model = TracedModel(delegate, "openai/test-model")  # type: ignore[arg-type]
 
-    with get_tracer().span("agent.run") as agent_span:
+    with model._tracer.span("agent.run") as agent_span:
         await model.get_response(None, [], ModelSettings(), [], None, [], None)
 
     assert delegate.model_settings is not None
     traceparent = dict(delegate.model_settings.extra_headers or {})["traceparent"]
     assert traceparent.split("-")[1] == agent_span.trace_id
+
+
+def test_traced_model_fulfils_both_sdk_model_operations() -> None:
+    assert not TracedModel.__abstractmethods__
+    assert callable(TracedModel.get_response)
+    assert callable(TracedModel.stream_response)

@@ -1,47 +1,25 @@
 from agent_runner.observability.logging import RequestContextFilter, get_logger, setup_logging
-from agent_runner.observability.metrics import (
-    ACTIVE_REQUESTS,
-    MODEL_CALLS,
-    REQUEST_COUNT,
-    REQUEST_LATENCY,
-    TOKENS_USED,
-    TOOL_CALLS,
-    MetricsCollector,
-    get_metrics_collector,
-    metrics_middleware,
-)
+from agent_runner.observability.metrics import MetricsCollector
 from agent_runner.observability.tracing import (
     Span,
     Tracer,
+    TracingManager,
     current_span_id,
     current_trace_id,
     extract_trace_context,
-    get_tracer,
-    init_tracer,
     inject_trace_context,
-    shutdown_tracer,
 )
 
-__all__ = [
+__all__ = (
     "setup_logging",
     "get_logger",
     "RequestContextFilter",
     "Tracer",
+    "TracingManager",
     "Span",
-    "get_tracer",
-    "init_tracer",
-    "shutdown_tracer",
     "current_trace_id",
     "current_span_id",
     "extract_trace_context",
     "inject_trace_context",
     "MetricsCollector",
-    "get_metrics_collector",
-    "metrics_middleware",
-    "REQUEST_COUNT",
-    "REQUEST_LATENCY",
-    "ACTIVE_REQUESTS",
-    "TOOL_CALLS",
-    "MODEL_CALLS",
-    "TOKENS_USED",
-]
+)

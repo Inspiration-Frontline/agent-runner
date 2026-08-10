@@ -22,11 +22,13 @@ from fastapi import HTTPException
 from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from agent_runner.api import routes
 from agent_runner.api.streaming import StreamEventType
-from agent_runner.config import AgentConfig, ChatRequest, ConversationReferenceRequest, get_settings
+from agent_runner.config import AgentConfig, ConversationReferenceRequest, ConversationRequest, get_settings
 from agent_runner.context.builder import AgentContext, Message
 from agent_runner.context.models import UserProfile
 from agent_runner.conversation import ConversationBusyError
-from agent_runner.runtime import orchestrator as orchestrator_module
+from agent_runner.observability.runtime_tracing import RuntimeTracing
+from agent_runner.observability.tracing import Tracer
+from agent_runner.runtime.cancellation import ConversationCancellationRegistry
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -222,7 +224,7 @@ async def test_second_round_uses_replay_and_persists_full_snapshot() -> None:
     events = [
         event
         async for event in orchestrator.run(
-            ChatRequest(conversation_id="conv_multi", message="What is my name?"), 1, FakeRequest()
+            ConversationRequest(conversation_id="conv_multi", message="What is my name?"), 1, FakeRequest()
         )
     ]
 
@@ -248,7 +250,7 @@ async def test_second_round_uses_replay_and_persists_full_snapshot() -> None:
 
 async def test_same_group_references_are_labelled_and_persist_the_frozen_boundary() -> None:
     orchestrator, client, context_builder = _orchestrator(SuccessRuntime())
-    request = ChatRequest(
+    request = ConversationRequest(
         conversation_id="conv_multi",
         message="Use the source",
         references=[
@@ -284,16 +286,14 @@ async def test_same_group_references_are_labelled_and_persist_the_frozen_boundar
     ]
 
 
-async def test_reference_context_overflow_returns_typed_error_before_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_reference_context_overflow_returns_typed_error_before_model() -> None:
     runtime = CountingRuntime()
     orchestrator, _, _ = _orchestrator(runtime)
     settings = get_settings().model_copy(
         update={"max_context_tokens": 8, "max_output_tokens": 7}
     )
-    monkeypatch.setattr(orchestrator_module, "get_settings", lambda: settings)
-    request = ChatRequest(
+    orchestrator.settings = settings
+    request = ConversationRequest(
         conversation_id="conv_multi",
         message="Use the source",
         references=[
@@ -318,7 +318,7 @@ async def test_model_failure_is_persisted_as_new_failed_round() -> None:
     events = [
         event
         async for event in orchestrator.run(
-            ChatRequest(conversation_id="conv_multi", message="Try this"), 1, FakeRequest()
+            ConversationRequest(conversation_id="conv_multi", message="Try this"), 1, FakeRequest()
         )
     ]
 
@@ -336,7 +336,7 @@ async def test_disconnect_is_persisted_as_cancelled_round() -> None:
     events = [
         event
         async for event in orchestrator.run(
-            ChatRequest(conversation_id="conv_multi", message="Stop this"), 1, DisconnectedRequest()
+            ConversationRequest(conversation_id="conv_multi", message="Stop this"), 1, DisconnectedRequest()
         )
     ]
 
@@ -349,6 +349,9 @@ async def test_disconnect_is_persisted_as_cancelled_round() -> None:
 
 async def test_busy_conversation_returns_http_409_before_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     class BusyOrchestrator:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
         async def acquire_conversation(self, conversation_id: str) -> None:
             raise ConversationBusyError("busy")
 
@@ -356,11 +359,25 @@ async def test_busy_conversation_returns_http_409_before_stream(monkeypatch: pyt
             pass
 
     monkeypatch.setattr(routes, "RuntimeOrchestrator", BusyOrchestrator)
+    services = type(
+        "Services",
+        (),
+        {
+            "tracing": type("Tracing", (), {"tracer": Tracer()})(),
+            "cancellations": ConversationCancellationRegistry(),
+            "get_settings": staticmethod(get_settings),
+        },
+    )()
+    route_request = type(
+        "RouteRequest",
+        (),
+        {"app": type("App", (), {"state": type("State", (), {"services": services})()})()},
+    )()
 
     with pytest.raises(HTTPException) as raised:
-        await routes.chat_stream(
-            cast(Any, FakeRequest()),
-            ChatRequest(conversation_id="conv_busy", message="hello"),
+        await routes.stream_conversation(
+            cast(Any, route_request),
+            ConversationRequest(conversation_id="conv_busy", message="hello"),
             "1",
         )
 
@@ -383,5 +400,9 @@ def _orchestrator(
     harness.cancellation_manager = FakeCancellationManager()
     harness.conversation_client = client
     harness.execution_lock = FakeLock()
+    harness.settings = get_settings()
+    harness.runtime_tracing = RuntimeTracing(Tracer())
+    harness.cancellation_registry = ConversationCancellationRegistry()
     orchestrator._lock_acquired = False
+    orchestrator._terminal_round_persisted = False
     return orchestrator, client, context_builder

@@ -19,19 +19,19 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
 )
 from fancy_grpc import GrpcRuntimeConfig, start_client
 
-from agent_runner.config import get_settings
+from agent_runner.config import Settings
 from agent_runner.observability.tracing import inject_trace_context
 
 
 class ConversationManagerClient:
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         """Create the request-scoped RPC client used for durable conversation state.
 
         Runner keeps this client thin because Conversation Manager owns authorization, Round
         numbering, file reservation, and PostgreSQL persistence; the client only translates the
         request-scoped calls and applies bounded retry/timeout settings.
         """
-        settings = get_settings()
+        settings = settings or Settings()
         config = GrpcRuntimeConfig(
             urls={"conversation-manager": [settings.conversation_rpc_url]},
             timeout=5.0,
@@ -42,7 +42,7 @@ class ConversationManagerClient:
         self._service: Any = self._runtime.service(ConversationRpcServiceClient)
 
     @staticmethod
-    def _trace_metadata() -> list[tuple[str, str]]:
+    def _get_trace_metadata() -> list[tuple[str, str]]:
         headers: dict[str, str] = {}
         inject_trace_context(headers)
         return list(headers.items())
@@ -59,7 +59,7 @@ class ConversationManagerClient:
         """
         response = await self._service.get_conversation_round_history(
             GetConversationRoundHistoryRequest(user_id=user_id, conversation_id=conversation_id),
-            metadata=self._trace_metadata(),
+            metadata=self._get_trace_metadata(),
         )
         return cast(GetConversationRoundHistoryResponse, response)
 
@@ -73,7 +73,7 @@ class ConversationManagerClient:
             Domain response envelope; validation conflicts are data, while transport failures raise.
         """
         response = await self._service.save_conversation_round(
-            request, timeout=10.0, metadata=self._trace_metadata()
+            request, timeout=10.0, metadata=self._get_trace_metadata()
         )
         return cast(SaveConversationRoundResponse, response)
 
@@ -106,7 +106,7 @@ class ConversationManagerClient:
                 file_ids=file_ids,
             ),
             timeout=10.0,
-            metadata=self._trace_metadata(),
+            metadata=self._get_trace_metadata(),
         )
         return cast(PrepareConversationFilesResponse, response)
 
@@ -130,7 +130,7 @@ class ConversationManagerClient:
                 end_round_number=end_round_number,
                 detail_level=ReplayDetailLevel.MODEL_CONTEXT,
             ),
-            metadata=self._trace_metadata(),
+            metadata=self._get_trace_metadata(),
         )
         return cast(GetConversationReplayResponse, response)
 
@@ -148,7 +148,7 @@ class ConversationManagerClient:
                 references=references,
             ),
             timeout=10.0,
-            metadata=self._trace_metadata(),
+            metadata=self._get_trace_metadata(),
         )
         return cast(PrepareConversationReferencesResponse, response)
 

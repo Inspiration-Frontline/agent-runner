@@ -245,7 +245,7 @@ def test_html_parsers_close_open_results_and_remove_hidden_content() -> None:
     page_parser = _VisibleTextParser()
     page_parser.feed("<main>Visible<script>hidden()</script><style>hidden</style> text</main>")
     page_parser.close()
-    assert page_parser.text() == "Visible\ntext"
+    assert page_parser.get_text() == "Visible\ntext"
 
 
 async def test_sdk_runner_executes_parallel_tools_and_continues_with_outputs() -> None:
@@ -382,7 +382,7 @@ def test_tool_stream_events_keep_call_identity_and_status() -> None:
         result='{"status":"error"}',
         status="FAILED",
     )
-    assert collector.calls() == [
+    assert collector.list_calls() == [
         CapturedToolCall(
             tool_call_id="call-1",
             tool_name="test_success",

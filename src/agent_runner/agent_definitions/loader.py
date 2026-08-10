@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import redis.asyncio as aioredis
 
-from agent_runner.config import PROJECT_ROOT, AgentConfig, MemoryPolicy, get_settings
+from agent_runner.config import PROJECT_ROOT, AgentConfig, MemoryPolicy, Settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +43,14 @@ class AgentConfigLoader:
         cache_ttl_seconds: TTL for cached configurations in Redis.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         """
         Initialize the agent configuration loader.
 
         Sets up HTTP client for remote calls, Redis client for caching,
         and resolves the local configuration file path.
         """
-        current_settings = get_settings()
+        current_settings = settings or Settings()
         self.base_url = current_settings.agent_config_center_url
         self.client = httpx.AsyncClient(timeout=30.0)
 

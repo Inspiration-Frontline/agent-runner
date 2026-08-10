@@ -1,152 +1,91 @@
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 
-from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
 
-REQUEST_COUNT = Counter(
-    "agent_runner_requests_total",
-    "Total number of requests",
-    ["method", "endpoint", "status"],
-)
-REQUEST_LATENCY = Histogram(
-    "agent_runner_request_latency_seconds",
-    "Request latency in seconds",
-    ["method", "endpoint"],
-)
-ACTIVE_REQUESTS = Gauge(
-    "agent_runner_active_requests",
-    "Number of active requests",
-    ["endpoint"],
-)
-TOOL_CALLS = Counter(
-    "agent_runner_tool_calls_total",
-    "Total number of tool calls",
-    ["tool_name", "status"],
-)
-MODEL_CALLS = Counter(
-    "agent_runner_model_calls_total",
-    "Total number of model calls",
-    ["model", "status"],
-)
-TOKENS_USED = Counter(
-    "agent_runner_tokens_total",
-    "Total tokens used",
-    ["model", "type"],
-)
 
-
-@dataclass
 class MetricsCollector:
-    """
-    Collector for application metrics.
+    """Application-scoped Prometheus instruments and HTTP metrics middleware."""
 
-    Provides methods to record various metrics including requests,
-    tool calls, model calls, and token usage.
-    """
-
-    def record_request(self, method: str, endpoint: str, status: int, latency: float) -> None:
-        """
-        Record request metrics.
-
-        Args:
-            method: HTTP method of the request.
-            endpoint: Endpoint path of the request.
-            status: HTTP status code of the response.
-            latency: Request latency in seconds.
-        """
-        REQUEST_COUNT.labels(method=method, endpoint=endpoint, status=str(status)).inc()
-        REQUEST_LATENCY.labels(method=method, endpoint=endpoint).observe(latency)
-
-    def record_tool_call(self, tool_name: str, status: str) -> None:
-        """
-        Record tool call metrics.
-
-        Args:
-            tool_name: Name of the tool called.
-            status: Status of the tool call (e.g., 'success', 'error').
-        """
-        TOOL_CALLS.labels(tool_name=tool_name, status=status).inc()
-
-    def record_model_call(self, model: str, status: str) -> None:
-        """
-        Record model call metrics.
-
-        Args:
-            model: Model identifier used.
-            status: Status of the model call (e.g., 'success', 'error').
-        """
-        MODEL_CALLS.labels(model=model, status=status).inc()
-
-    def record_tokens(self, model: str, token_type: str, count: int) -> None:
-        """
-        Record token usage metrics.
-
-        Args:
-            model: Model identifier used.
-            token_type: Type of tokens (e.g., 'input', 'output').
-            count: Number of tokens used.
-        """
-        TOKENS_USED.labels(model=model, type=token_type).inc(count)
-
-    def get_metrics(self) -> bytes:
-        """
-        Get all collected metrics in Prometheus format.
-
-        Returns:
-            bytes: Metrics data in Prometheus exposition format.
-        """
-        return generate_latest()
-
-
-_metrics_collector: MetricsCollector | None = None
-
-
-def get_metrics_collector() -> MetricsCollector:
-    """
-    Get the global metrics collector instance.
-
-    Returns:
-        MetricsCollector: The global metrics collector.
-    """
-    global _metrics_collector
-    if _metrics_collector is None:
-        _metrics_collector = MetricsCollector()
-    return _metrics_collector
-
-
-async def metrics_middleware(
-    request: Request,
-    call_next: Callable[[Request], Awaitable[Response]],
-) -> Response:
-    """
-    FastAPI middleware for collecting request metrics.
-
-    Args:
-        request: The incoming request.
-        call_next: The next middleware/handler in the chain.
-
-    Returns:
-        Response: The response from the handler.
-    """
-    start_time = time.time()
-
-    ACTIVE_REQUESTS.labels(endpoint=request.url.path).inc()
-
-    try:
-        response = await call_next(request)
-        latency = time.time() - start_time
-
-        get_metrics_collector().record_request(
-            method=request.method,
-            endpoint=request.url.path,
-            status=response.status_code,
-            latency=latency,
+    def __init__(self) -> None:
+        self._registry = CollectorRegistry()
+        self._request_count = Counter(
+            "agent_runner_requests_total",
+            "Total number of requests",
+            ["method", "endpoint", "status"],
+            registry=self._registry,
+        )
+        self._request_latency = Histogram(
+            "agent_runner_request_latency_seconds",
+            "Request latency in seconds",
+            ["method", "endpoint"],
+            registry=self._registry,
+        )
+        self._active_requests = Gauge(
+            "agent_runner_active_requests",
+            "Number of active requests",
+            ["endpoint"],
+            registry=self._registry,
+        )
+        self._tool_calls = Counter(
+            "agent_runner_tool_calls_total",
+            "Total number of tool calls",
+            ["tool_name", "status"],
+            registry=self._registry,
+        )
+        self._model_calls = Counter(
+            "agent_runner_model_calls_total",
+            "Total number of model calls",
+            ["model", "status"],
+            registry=self._registry,
+        )
+        self._tokens_used = Counter(
+            "agent_runner_tokens_total",
+            "Total tokens used",
+            ["model", "type"],
+            registry=self._registry,
         )
 
-        return response
+    def record_request(self, method: str, endpoint: str, status: int, latency: float) -> None:
+        """Record one completed HTTP request."""
+        self._request_count.labels(method=method, endpoint=endpoint, status=str(status)).inc()
+        self._request_latency.labels(method=method, endpoint=endpoint).observe(latency)
 
-    finally:
-        ACTIVE_REQUESTS.labels(endpoint=request.url.path).dec()
+    def record_tool_call(self, tool_name: str, status: str) -> None:
+        """Record one Tool terminal status."""
+        self._tool_calls.labels(tool_name=tool_name, status=status).inc()
+
+    def record_model_call(self, model: str, status: str) -> None:
+        """Record one model terminal status."""
+        self._model_calls.labels(model=model, status=status).inc()
+
+    def record_tokens(self, model: str, token_type: str, count: int) -> None:
+        """Record model token usage."""
+        self._tokens_used.labels(model=model, type=token_type).inc(count)
+
+    def get_metrics(self) -> bytes:
+        """Render only this application instance's Prometheus registry."""
+        return generate_latest(self._registry)
+
+    async def collect_http_metrics(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        """Collect request count, latency, and active-request metrics."""
+        start_time = time.monotonic()
+        endpoint = request.url.path
+        self._active_requests.labels(endpoint=endpoint).inc()
+        try:
+            response = await call_next(request)
+            self.record_request(
+                method=request.method,
+                endpoint=endpoint,
+                status=response.status_code,
+                latency=time.monotonic() - start_time,
+            )
+            return response
+        finally:
+            self._active_requests.labels(endpoint=endpoint).dec()

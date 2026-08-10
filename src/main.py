@@ -1,6 +1,6 @@
-from agent_runner.config import settings
+from agent_runner.config import Settings
 from agent_runner.local_startup import open_docs_when_ready
-from agent_runner.main import app
+from agent_runner.main import create_app
 
 if __name__ == "__main__":
     import asyncio
@@ -8,6 +8,8 @@ if __name__ == "__main__":
 
     import uvicorn
 
+    settings = Settings()
+    app = create_app()
     if settings.open_browser_on_startup and settings.environment in {"local", "dev"}:
         threading.Thread(
             target=open_docs_when_ready,

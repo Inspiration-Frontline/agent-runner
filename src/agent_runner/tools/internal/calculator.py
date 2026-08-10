@@ -1,19 +1,20 @@
 import ast
 import operator
 from collections.abc import Callable
+from types import MappingProxyType
 
 from agents import function_tool
 
-_BINARY_OPERATORS: dict[type[ast.operator], Callable[[float, float], float]] = {
+_BINARY_OPERATORS: MappingProxyType[type[ast.operator], Callable[[float, float], float]] = MappingProxyType({
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
     ast.Div: operator.truediv,
-}
-_UNARY_OPERATORS: dict[type[ast.unaryop], Callable[[float], float]] = {
+})
+_UNARY_OPERATORS: MappingProxyType[type[ast.unaryop], Callable[[float], float]] = MappingProxyType({
     ast.UAdd: operator.pos,
     ast.USub: operator.neg,
-}
+})
 
 
 @function_tool(failure_error_function=None)

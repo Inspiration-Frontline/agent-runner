@@ -1,7 +1,7 @@
 import logging
 from dataclasses import dataclass, field
 
-from agent_runner.config import AgentConfig, get_settings
+from agent_runner.config import AgentConfig, Settings
 from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
 from .models import RagChunk, UserProfile
@@ -207,16 +207,17 @@ class ContextBuilder:
         token_budget_manager: Manager for token budget and truncation.
     """
 
-    def __init__(self, tool_registry: ToolRegistry | None = None):
+    def __init__(self, tool_registry: ToolRegistry | None = None, settings: Settings | None = None):
         """Create adapters that assemble one request's model context.
 
         Args:
             tool_registry: Registry used to expose only configured Tool schemas to the agent.
         """
-        self.profile_adapter = ProfileAdapter()
-        self.rag_adapter = RAGAdapter()
+        current_settings = settings or Settings()
+        self.profile_adapter = ProfileAdapter(current_settings)
+        self.rag_adapter = RAGAdapter(current_settings)
         self.prompt_assembler = PromptAssembler()
-        self.token_budget_manager = TokenBudgetManager(max_tokens=get_settings().max_context_tokens)
+        self.token_budget_manager = TokenBudgetManager(max_tokens=current_settings.max_context_tokens)
         self.tool_registry = tool_registry or ToolRegistry()
 
     async def build(

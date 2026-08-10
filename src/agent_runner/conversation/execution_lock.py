@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import redis.asyncio as aioredis
 
-from agent_runner.config import get_settings
+from agent_runner.config import Settings
 
 
 class ConversationBusyError(RuntimeError):
@@ -29,14 +29,14 @@ end
 return 0
 """
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         """Create the Redis lease client used to serialize one Conversation at a time.
 
         The lease exists because Round numbers are allocated from a database high-water mark and
         two concurrent model runs could otherwise both persist the same next number. The token is
         unique per request so a stale worker cannot release a newer worker's lease.
         """
-        settings = get_settings()
+        settings = settings or Settings()
         self._redis = aioredis.Redis(
             host=settings.redis_host,
             port=settings.redis_port,

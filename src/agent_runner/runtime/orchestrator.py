@@ -67,7 +67,7 @@ from agent_runner.api.streaming import (
     ToolStartEvent,
     UsageEvent,
 )
-from agent_runner.config import AgentConfig, ChatRequest, get_settings
+from agent_runner.config import AgentConfig, ConversationRequest, Settings
 from agent_runner.context.builder import (
     AgentContext,
     CaptureContentPart,
@@ -86,11 +86,12 @@ from agent_runner.conversation import (
     ConversationExecutionLock,
     ConversationManagerClient,
 )
-from agent_runner.observability.tracing import Span, current_trace_id, get_tracer, trace_json
+from agent_runner.observability.runtime_tracing import RuntimeTracing
+from agent_runner.observability.tracing import Span, Tracer, current_trace_id, trace_json
 from agent_runner.runtime.cancellation import (
     CancellationManager,
     CancellationToken,
-    conversation_cancellation_registry,
+    ConversationCancellationRegistry,
 )
 from agent_runner.runtime.model_events import (
     ModelError,
@@ -261,7 +262,12 @@ class RuntimeOrchestrator:
         openai_runtime: Runtime wrapper for OpenAI Agents SDK.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        tracer: Tracer,
+        cancellation_registry: ConversationCancellationRegistry,
+    ) -> None:
         """
         Initialize the runtime orchestrator with all required components.
 
@@ -269,15 +275,18 @@ class RuntimeOrchestrator:
         including configuration loader, context builder, agent factory,
         tool executor, cancellation manager, and OpenAI runtime wrapper.
         """
-        self.config_loader = AgentConfigLoader()
+        self.settings = settings
+        self.runtime_tracing = RuntimeTracing(tracer)
+        self.cancellation_registry = cancellation_registry
+        self.config_loader = AgentConfigLoader(settings)
         tool_registry = build_internal_tool_registry()
         self.tool_registry = tool_registry
-        self.context_builder = ContextBuilder(tool_registry)
+        self.context_builder = ContextBuilder(tool_registry, settings)
         self.agent_factory = AgentFactory()
         self.cancellation_manager = CancellationManager()
-        self.openai_runtime = OpenAIAgentsSdkAdapter()
-        self.conversation_client = ConversationManagerClient()
-        self.execution_lock = ConversationExecutionLock()
+        self.openai_runtime = OpenAIAgentsSdkAdapter(settings=settings, tracer=tracer)
+        self.conversation_client = ConversationManagerClient(settings)
+        self.execution_lock = ConversationExecutionLock(settings)
         self._lock_acquired = False
         self._terminal_round_persisted = False
 
@@ -295,31 +304,31 @@ class RuntimeOrchestrator:
 
     async def run(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         http_request: DisconnectAwareRequest,
     ) -> AsyncGenerator[StreamEvent]:
         """Run one request while keeping terminal persistence and cleanup in one outer boundary."""
         state = RuntimeRequestState(
             cancellation_token=self.cancellation_manager.create_token(),
-            round_start=_epoch_millis(),
+            round_start=_get_epoch_millis(),
             attachment_request_id=str(uuid4()),
         )
 
         try:
-            async for event in self._execute_request(chat_request, user_id, http_request, state):
+            async for event in self._execute_request(conversation_request, user_id, http_request, state):
                 yield event
 
         except asyncio.CancelledError:
             logger.info("Request cancelled")
             await self._persist_unexpected_terminal(
-                chat_request, user_id, state, RoundStatus.CANCELLED, "Generation cancelled."
+                conversation_request, user_id, state, RoundStatus.CANCELLED, "Generation cancelled."
             )
             raise
 
         except GeneratorExit:
             await self._persist_unexpected_terminal(
-                chat_request, user_id, state, RoundStatus.CANCELLED, "Generation cancelled."
+                conversation_request, user_id, state, RoundStatus.CANCELLED, "Generation cancelled."
             )
             raise
 
@@ -329,14 +338,14 @@ class RuntimeOrchestrator:
         except Exception as error:
             logger.exception("Error during agent execution")
             message = str(error) or "Agent execution failed."
-            await self._persist_unexpected_terminal(chat_request, user_id, state, RoundStatus.FAILED, message)
+            await self._persist_unexpected_terminal(conversation_request, user_id, state, RoundStatus.FAILED, message)
             yield ErrorEvent(error_message=message, error_code="EXECUTION_FAILED", phase="execution")
         finally:
-            await self._finalize_request(chat_request, user_id, state)
+            await self._finalize_request(conversation_request, user_id, state)
 
     async def _execute_request(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         http_request: DisconnectAwareRequest,
         state: RuntimeRequestState,
@@ -344,7 +353,7 @@ class RuntimeOrchestrator:
         """Execute the successful lifecycle as explicit preparation, model, and save phases."""
 
         # Step 1: Prepare conversation references.
-        conversation_result = await self._prepare_conversation_context(chat_request, user_id, state)
+        conversation_result = await self._prepare_conversation_context(conversation_request, user_id, state)
         if isinstance(conversation_result, PreparationFailure):
             yield conversation_result.event
             return
@@ -352,11 +361,11 @@ class RuntimeOrchestrator:
 
         # Step 2: Prepare uploaded files.
         prepared_files: list[PreparedConversationFile] = []
-        if chat_request.file_ids:
+        if conversation_request.file_ids:
             try:
-                with get_tracer().span("file.prepare", {"file.count": len(chat_request.file_ids)}):
+                with self.runtime_tracing.trace_file_preparation(len(conversation_request.file_ids)):
                     async for result in self._prepare_files(
-                        chat_request,
+                        conversation_request,
                         user_id,
                         state.attachment_request_id,
                         http_request,
@@ -367,22 +376,19 @@ class RuntimeOrchestrator:
                         else:
                             yield result
             except FilePreparationError as error:
-                await self._persist_known_failure(chat_request, user_id, state, str(error))
+                await self._persist_known_failure(conversation_request, user_id, state, str(error))
                 yield ErrorEvent(str(error), error_code=error.error_code, phase="attachment_preparation")
                 return
 
         # Step 3: Prepare agent context (with referenced conversations, uploaded files, ...).
-        with get_tracer().span(
-            "context.build",
-            {
-                "conversation.id": chat_request.conversation_id,
-                "context.history_message_count": len(conversation_history),
-                "context.prepared_file_count": len(prepared_files),
-                "context.reference_count": len(chat_request.references),
-            },
+        with self.runtime_tracing.trace_context_build(
+            conversation_request.conversation_id,
+            len(conversation_history),
+            len(prepared_files),
+            len(conversation_request.references),
         ) as context_span:
             context_result = await self._create_agent_context(
-                chat_request, user_id, state, prepared_files, conversation_history
+                conversation_request, user_id, state, prepared_files, conversation_history
             )
             self._record_context_span(context_span, context_result, state)
         if isinstance(context_result, PreparationFailure):
@@ -393,7 +399,7 @@ class RuntimeOrchestrator:
         context = context_result.context
 
         model_result: ModelStreamComplete | None = None
-        with get_tracer().span("agent.run", self._agent_span_attributes(state.agent)) as agent_span:
+        with self.runtime_tracing.trace_agent_run(self._get_agent_span_attributes(state.agent)) as agent_span:
             async for model_event in self._stream_model(
                 state.agent,
                 context,
@@ -409,13 +415,13 @@ class RuntimeOrchestrator:
         if model_result is None:
             raise RuntimeError("Model stream completed without a terminal result.")
 
-        terminal_decision = await self._handle_model_terminal(chat_request, user_id, state, model_result)
+        terminal_decision = await self._handle_model_terminal(conversation_request, user_id, state, model_result)
         if terminal_decision.error_event is not None:
             yield terminal_decision.error_event
         if terminal_decision.should_stop:
             return
 
-        async for persistence_event in self._persist_completed_response(chat_request, user_id, state, model_result):
+        async for persistence_event in self._persist_completed_response(conversation_request, user_id, state, model_result):
             yield persistence_event
 
     @staticmethod
@@ -444,9 +450,7 @@ class RuntimeOrchestrator:
             span.set_attribute("gen_ai.request.model", state.agent.model)
         span.add_event("context.ready")
 
-    @staticmethod
-    def _agent_span_attributes(agent: AgentDefinition) -> dict[str, object]:
-        settings = get_settings()
+    def _get_agent_span_attributes(self, agent: AgentDefinition) -> dict[str, object]:
         return {
             "agent.id": agent.agent_id,
             "agent.name": agent.name,
@@ -455,7 +459,7 @@ class RuntimeOrchestrator:
             "gen_ai.request.max_tokens": agent.max_output_tokens,
             "gen_ai.request.temperature": agent.temperature,
             "agent.tool_count": len(agent.tools),
-            "agent.tools": trace_json(agent.tools, settings.otel_content_max_chars),
+            "agent.tools": trace_json(agent.tools, self.settings.otel_content_max_chars),
         }
 
     @staticmethod
@@ -477,25 +481,22 @@ class RuntimeOrchestrator:
 
     async def _prepare_conversation_context(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         state: RuntimeRequestState,
     ) -> ConversationContextReady | PreparationFailure:
         """Acquire request ownership, run preflight, then append authorized reference evidence."""
         if not getattr(self, "_lock_acquired", False):
-            await self.acquire_conversation(chat_request.conversation_id)
-        conversation_cancellation_registry.register(user_id, chat_request.conversation_id, state.cancellation_token)
+            await self.acquire_conversation(conversation_request.conversation_id)
+        self.cancellation_registry.register(user_id, conversation_request.conversation_id, state.cancellation_token)
 
         # Preflight happens before billable model/Tool work. Conversation Manager authorizes the
         # destination and returns the durable high-water/replay boundary used for this entire run.
-        with get_tracer().span(
-            "preflight",
-            {
-                "conversation.id": chat_request.conversation_id,
-                "conversation.reference_count": len(chat_request.references),
-            },
+        with self.runtime_tracing.trace_preflight(
+            conversation_request.conversation_id,
+            len(conversation_request.references),
         ) as preflight_span:
-            preflight_result = await self._load_conversation_preflight(chat_request, user_id)
+            preflight_result = await self._load_conversation_preflight(conversation_request, user_id)
             self._record_preflight_span(preflight_span, preflight_result)
         if isinstance(preflight_result, PreparationFailure):
             return preflight_result
@@ -504,16 +505,16 @@ class RuntimeOrchestrator:
         state.next_round_number = preflight.next_round_number
         state.preflight_completed = True
         conversation_history = list(preflight.conversation_history)
-        if not chat_request.references:
+        if not conversation_request.references:
             return ConversationContextReady(tuple(conversation_history))
 
-        with get_tracer().span("reference.prepare", {"reference.count": len(chat_request.references)}):
-            reference_result = await self._prepare_reference_context(chat_request, user_id)
+        with self.runtime_tracing.trace_reference_preparation(len(conversation_request.references)):
+            reference_result = await self._prepare_reference_context(conversation_request, user_id)
         if isinstance(reference_result, ReferenceContextReady):
             conversation_history.extend(reference_result.messages)
             return ConversationContextReady(tuple(conversation_history))
 
-        request_without_references = chat_request.model_copy(update={"references": []})
+        request_without_references = conversation_request.model_copy(update={"references": []})
         await self._persist_known_failure(
             request_without_references,
             user_id,
@@ -537,7 +538,7 @@ class RuntimeOrchestrator:
 
     async def _create_agent_context(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         state: RuntimeRequestState,
         prepared_files: list[PreparedConversationFile],
@@ -545,7 +546,7 @@ class RuntimeOrchestrator:
     ) -> AgentContextReady | PreparationFailure:
         """Build bounded context and instantiate the resolved Agent for this request only."""
         build_result = await self._build_agent_context(
-            chat_request,
+            conversation_request,
             user_id,
             prepared_files,
             conversation_history,
@@ -553,7 +554,7 @@ class RuntimeOrchestrator:
         )
         if isinstance(build_result, PreparationFailure):
             await self._persist_known_failure(
-                chat_request,
+                conversation_request,
                 user_id,
                 state,
                 build_result.event.error_message or "Context preparation failed.",
@@ -565,7 +566,7 @@ class RuntimeOrchestrator:
 
     async def _handle_model_terminal(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         state: RuntimeRequestState,
         model_result: ModelStreamComplete,
@@ -574,7 +575,7 @@ class RuntimeOrchestrator:
         if model_result.terminal_status is not None:
             await self._persist_terminal_round(
                 user_id,
-                chat_request,
+                conversation_request,
                 self._required_round_number(state),
                 state.round_start,
                 model_result.terminal_status,
@@ -588,7 +589,7 @@ class RuntimeOrchestrator:
             return ModelTerminalDecision(should_stop=False)
 
         message = "The model returned an empty response."
-        await self._persist_known_failure(chat_request, user_id, state, message, model_result.capture)
+        await self._persist_known_failure(conversation_request, user_id, state, message, model_result.capture)
         return ModelTerminalDecision(
             should_stop=True,
             error_event=ErrorEvent(message, error_code="EMPTY_MODEL_RESPONSE", phase="model"),
@@ -596,7 +597,7 @@ class RuntimeOrchestrator:
 
     async def _persist_completed_response(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         state: RuntimeRequestState,
         model_result: ModelStreamComplete,
@@ -606,8 +607,8 @@ class RuntimeOrchestrator:
             raise RuntimeError("A completed model response has no resolved Agent.")
         save_request = self._build_save_request(
             user_id=user_id,
-            conversation_id=chat_request.conversation_id,
-            chat_request=chat_request,
+            conversation_id=conversation_request.conversation_id,
+            conversation_request=conversation_request,
             response_text=model_result.response_text,
             agent=state.agent,
             capture=model_result.capture,
@@ -632,7 +633,7 @@ class RuntimeOrchestrator:
 
     async def _persist_known_failure(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         state: RuntimeRequestState,
         message: str,
@@ -641,7 +642,7 @@ class RuntimeOrchestrator:
         """Persist a phase failure after successful preflight established its Round number."""
         await self._persist_terminal_round(
             user_id,
-            chat_request,
+            conversation_request,
             self._required_round_number(state),
             state.round_start,
             RoundStatus.FAILED,
@@ -652,7 +653,7 @@ class RuntimeOrchestrator:
 
     async def _persist_unexpected_terminal(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         state: RuntimeRequestState,
         status: RoundStatus,
@@ -663,7 +664,7 @@ class RuntimeOrchestrator:
             return
         await self._persist_terminal_round(
             user_id,
-            chat_request,
+            conversation_request,
             state.next_round_number,
             state.round_start,
             status,
@@ -674,12 +675,12 @@ class RuntimeOrchestrator:
 
     async def _finalize_request(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         state: RuntimeRequestState,
     ) -> None:
         """Remove request-scoped cancellation state and release the execution lease exactly once."""
-        conversation_cancellation_registry.unregister(user_id, chat_request.conversation_id, state.cancellation_token)
+        self.cancellation_registry.unregister(user_id, conversation_request.conversation_id, state.cancellation_token)
         await self._cleanup(state.cancellation_token)
         if getattr(self, "_lock_acquired", False):
             await self.execution_lock.release()
@@ -703,7 +704,7 @@ class RuntimeOrchestrator:
         """Stream public model events while retaining one typed terminal capture."""
         response_text = ""
         usage: UsageEvent | None = None
-        call_start = _epoch_millis()
+        call_start = _get_epoch_millis()
         terminal_status: RoundStatus | None = None
         terminal_error = ""
 
@@ -754,14 +755,14 @@ class RuntimeOrchestrator:
             yield ModelStreamComplete(
                 response_text=response_text,
                 capture=capture,
-                call_end=capture.turns[-1].end_time if capture.turns else _epoch_millis(),
+                call_end=capture.turns[-1].end_time if capture.turns else _get_epoch_millis(),
                 terminal_status=terminal_status or RoundStatus.CANCELLED,
                 terminal_error=terminal_error or "Generation cancelled.",
             )
             return
 
         if not capture.turns:
-            legacy_end = _epoch_millis()
+            legacy_end = _get_epoch_millis()
             capture = AgentRunCapture(
                 turns=[
                     CapturedModelTurn(
@@ -791,19 +792,19 @@ class RuntimeOrchestrator:
         yield ModelStreamComplete(
             response_text=response_text,
             capture=capture,
-            call_end=capture.turns[-1].end_time if capture.turns else _epoch_millis(),
+            call_end=capture.turns[-1].end_time if capture.turns else _get_epoch_millis(),
         )
 
     async def _prepare_files(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         attachment_request_id: str,
         http_request: DisconnectAwareRequest,
         cancellation_token: CancellationToken,
     ) -> AsyncGenerator[AttachmentProcessingEvent | FilePreparationComplete]:
         """Poll one frozen file selection until it is ready, failed, timed out, or cancelled."""
-        settings = get_settings()
+        settings = self.settings
         preparation_started = monotonic()
         processing_event_emitted = False
 
@@ -814,9 +815,9 @@ class RuntimeOrchestrator:
 
             prepared = await self.conversation_client.prepare_files(
                 user_id,
-                chat_request.conversation_id,
+                conversation_request.conversation_id,
                 attachment_request_id,
-                chat_request.file_ids,
+                conversation_request.file_ids,
             )
             if prepared.base is None or not prepared.base.success or prepared.data is None:
                 message = prepared.base.message if prepared.base is not None else "File preparation RPC failed."
@@ -825,7 +826,7 @@ class RuntimeOrchestrator:
             prepared_files = list(prepared.data.files)
             if prepared.data.any_failed:
                 raise FilePreparationError(
-                    self._file_preparation_error(prepared_files),
+                    self._get_file_preparation_error(prepared_files),
                     "FILE_PREPARATION_FAILED",
                 )
             if prepared.data.all_ready:
@@ -843,11 +844,11 @@ class RuntimeOrchestrator:
                 yield AttachmentProcessingEvent(pending_files)
                 processing_event_emitted = True
 
-            await asyncio.sleep(self._file_poll_delay(elapsed))
+            await asyncio.sleep(self._get_file_poll_delay(elapsed))
 
     async def _build_agent_context(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
         prepared_files: list[PreparedConversationFile],
         conversation_history: list[Message],
@@ -857,16 +858,16 @@ class RuntimeOrchestrator:
         await self._resolve_replay_images(
             conversation_history,
             user_id,
-            chat_request.conversation_id,
+            conversation_request.conversation_id,
             attachment_request_id,
         )
-        settings = get_settings()
-        attachment_input = self._build_attachment_input(chat_request, prepared_files)
+        settings = self.settings
+        attachment_input = self._build_attachment_input(conversation_request, prepared_files)
         agent_config = await self.config_loader.load(settings.default_agent_id)
 
         context = await self.context_builder.build(
             agent_config=agent_config,
-            conversation_id=chat_request.conversation_id,
+            conversation_id=conversation_request.conversation_id,
             user_id=user_id,
             current_message=attachment_input.to_message(),
             conversation_history=conversation_history,
@@ -899,7 +900,7 @@ class RuntimeOrchestrator:
 
     async def _load_conversation_preflight(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
     ) -> ConversationPreflight | PreparationFailure:
         """Load the read-only state required before a request may execute.
@@ -913,7 +914,7 @@ class RuntimeOrchestrator:
         """
         # GetRoundHistory is both the destination authorization check and the authoritative source
         # of the Round high-water mark. Runner never derives the next number from local state.
-        history = await self.conversation_client.get_round_history(user_id, chat_request.conversation_id)
+        history = await self.conversation_client.get_round_history(user_id, conversation_request.conversation_id)
         if history.base is None or not history.base.success:
             message = history.base.message if history.base is not None else "Conversation history RPC failed."
             return PreparationFailure(
@@ -934,7 +935,7 @@ class RuntimeOrchestrator:
             # next Round cannot be based on two different snapshots inside this execution lease.
             replay = await self.conversation_client.get_model_context(
                 user_id,
-                chat_request.conversation_id,
+                conversation_request.conversation_id,
                 history.data.latest_round_number,
             )
             if replay.base is None or not replay.base.success:
@@ -957,14 +958,14 @@ class RuntimeOrchestrator:
 
     async def _prepare_reference_context(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         user_id: int,
     ) -> ReferenceContextReady | PreparationFailure:
         """Authorize frozen references and convert them into labelled untrusted evidence."""
         response = await self.conversation_client.prepare_references(
             user_id,
-            chat_request.conversation_id,
-            self._to_proto_references(chat_request),
+            conversation_request.conversation_id,
+            self._to_proto_references(conversation_request),
         )
         if response.base is None or not response.base.success:
             message = (
@@ -985,7 +986,7 @@ class RuntimeOrchestrator:
         *,
         user_id: int,
         conversation_id: str,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         response_text: str,
         agent: AgentDefinition,
         capture: AgentRunCapture,
@@ -998,7 +999,7 @@ class RuntimeOrchestrator:
         Args:
             user_id: Trusted authenticated owner.
             conversation_id: Destination Conversation.
-            chat_request: Original visible text and stable file references.
+            conversation_request: Original visible text and stable file references.
             response_text: Final assistant answer assembled from stream deltas.
             agent: Resolved agent identity persisted on every Turn.
             capture: Provider-neutral model and Tool evidence.
@@ -1016,13 +1017,13 @@ class RuntimeOrchestrator:
             user_id=user_id,
             conversation_id=conversation_id,
             round_number=round_number,
-            user_request=self._build_user_request(chat_request),
+            user_request=self._build_user_request(conversation_request),
             turns=turns,
             final_answer=AssistantAnswer(content=response_text, source_turn_number=len(turns)),
             status=RoundStatus.COMPLETED,
             start_time=round_start,
             end_time=call_end,
-            references=self._to_proto_references(chat_request),
+            references=self._to_proto_references(conversation_request),
             trace_id=current_trace_id(),
         )
 
@@ -1208,7 +1209,7 @@ class RuntimeOrchestrator:
     async def _persist_terminal_round(
         self,
         user_id: int,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         round_number: int,
         round_start: int,
         status: RoundStatus,
@@ -1221,7 +1222,7 @@ class RuntimeOrchestrator:
 
         Args:
             user_id: Trusted owner identity.
-            chat_request: Original request whose visible content must remain in history.
+            conversation_request: Original request whose visible content must remain in history.
             round_number: Number reserved during preflight.
             round_start: Epoch-millisecond start time.
             status: FAILED or CANCELLED terminal state.
@@ -1243,15 +1244,15 @@ class RuntimeOrchestrator:
                 turns.append(self._to_proto_turn(index + 1, captured, agent, turn_status, turn_error))
         request = SaveConversationRoundRequest(
             user_id=user_id,
-            conversation_id=chat_request.conversation_id,
+            conversation_id=conversation_request.conversation_id,
             round_number=round_number,
-            user_request=self._build_user_request(chat_request),
+            user_request=self._build_user_request(conversation_request),
             turns=turns,
             status=status,
             error_message=error_message,
             start_time=round_start,
-            end_time=max(round_start, _epoch_millis()),
-            references=self._to_proto_references(chat_request),
+            end_time=max(round_start, _get_epoch_millis()),
+            references=self._to_proto_references(conversation_request),
             trace_id=current_trace_id(),
         )
         try:
@@ -1276,7 +1277,7 @@ class RuntimeOrchestrator:
             "conversation.answer_chars": len(request.final_answer.content) if request.final_answer is not None else 0,
             "conversation.trace_id": request.trace_id,
         }
-        with get_tracer().span("round.persist", attributes) as span:
+        with self.runtime_tracing.trace_round_persistence(attributes) as span:
             span.add_event("round.persistence.started")
             response = await self.conversation_client.save_round(request)
             success = response.base is not None and response.base.success
@@ -1375,13 +1376,13 @@ class RuntimeOrchestrator:
         return messages
 
     @staticmethod
-    def _to_proto_references(chat_request: ChatRequest) -> list[ProtoConversationReference]:
+    def _to_proto_references(conversation_request: ConversationRequest) -> list[ProtoConversationReference]:
         return [
             ProtoConversationReference(
                 source_conversation_id=reference.source_conversation_id,
                 source_end_round_number=reference.source_end_round_number,
             )
-            for reference in chat_request.references
+            for reference in conversation_request.references
         ]
 
     async def _resolve_replay_images(
@@ -1452,7 +1453,7 @@ class RuntimeOrchestrator:
 
     def _build_attachment_input(
         self,
-        chat_request: ChatRequest,
+        conversation_request: ConversationRequest,
         prepared_files: list[PreparedConversationFile],
     ) -> AttachmentInput:
         """Convert authorized resources into provider-neutral model content and stable capture data.
@@ -1462,7 +1463,7 @@ class RuntimeOrchestrator:
         signed URLs instead of retaining expired credentials.
 
         Args:
-            chat_request: Visible text, locale, and stable file IDs selected by the browser.
+            conversation_request: Visible text, locale, and stable file IDs selected by the browser.
             prepared_files: Conversation Manager's ownership/state-checked file metadata.
 
         Returns:
@@ -1470,15 +1471,15 @@ class RuntimeOrchestrator:
             text, and the attachment-only language instruction.
         """
         if not prepared_files:
-            return AttachmentInput(chat_request.message, (), ())
+            return AttachmentInput(conversation_request.message, (), ())
 
         model_parts: list[ModelContentPart] = []
         capture_parts: list[CaptureContentPart] = []
-        if chat_request.message:
-            model_parts.append(ModelTextPart(text=chat_request.message))
-            capture_parts.append(CaptureTextPart(text=chat_request.message))
+        if conversation_request.message:
+            model_parts.append(ModelTextPart(text=conversation_request.message))
+            capture_parts.append(CaptureTextPart(text=conversation_request.message))
 
-        search_texts: list[str] = [chat_request.message] if chat_request.message else []
+        search_texts: list[str] = [conversation_request.message] if conversation_request.message else []
         for file in prepared_files:
             if file.kind == ConversationFileKind.IMAGE:
                 model_parts.append(
@@ -1500,10 +1501,10 @@ class RuntimeOrchestrator:
             search_texts.append(file_text)
 
         instruction = ""
-        if not chat_request.message:
+        if not conversation_request.message:
             instruction = (
                 "The user sent attachments without visible text. Analyze the supplied files and respond in Simplified Chinese."
-                if chat_request.ui_locale == "zh-CN"
+                if conversation_request.ui_locale == "zh-CN"
                 else "The user sent attachments without visible text. Analyze the supplied files and respond in English."
             )
         current_message = "\n\n".join(text for text in search_texts if text)
@@ -1514,21 +1515,21 @@ class RuntimeOrchestrator:
             additional_instruction=instruction,
         )
 
-    def _build_user_request(self, chat_request: ChatRequest) -> UserRequest:
+    def _build_user_request(self, conversation_request: ConversationRequest) -> UserRequest:
         """Persist visible text plus stable file identities without expiring OSS URLs.
 
         Args:
-            chat_request: Public request containing text and selected file IDs.
+            conversation_request: Public request containing text and selected file IDs.
 
         Returns:
             Scalar text for ordinary messages, or mutually exclusive content parts for attachments.
         """
-        if not chat_request.file_ids:
-            return UserRequest(content=chat_request.message)
+        if not conversation_request.file_ids:
+            return UserRequest(content=conversation_request.message)
         parts: list[ContentPart] = []
-        if chat_request.message:
-            parts.append(ContentPart(type="text", text=chat_request.message))
-        for file_id in chat_request.file_ids:
+        if conversation_request.message:
+            parts.append(ContentPart(type="text", text=conversation_request.message))
+        for file_id in conversation_request.file_ids:
             parts.append(
                 ContentPart(
                     type="file_url",
@@ -1551,7 +1552,7 @@ class RuntimeOrchestrator:
 
         file_url = part.file_url
         stable_url = file_url.url if file_url is not None else ""
-        file_id = self._stable_file_id(stable_url)
+        file_id = self._get_stable_file_id(stable_url)
         if not file_id:
             raise ValueError("Persisted file content must use an AgentBreaker stable reference.")
         return CaptureFilePart(
@@ -1559,7 +1560,7 @@ class RuntimeOrchestrator:
             detail=file_url.detail if file_url is not None and file_url.detail else "auto",
         )
 
-    def _stable_file_id(self, url: str) -> str | None:
+    def _get_stable_file_id(self, url: str) -> str | None:
         """Extract a file ID only from an AgentBreaker-owned stable reference URL.
 
         Args:
@@ -1571,7 +1572,7 @@ class RuntimeOrchestrator:
         prefix = "agentbreaker-file://"
         return url[len(prefix) :] if url.startswith(prefix) else None
 
-    def _file_preparation_error(self, files: list[PreparedConversationFile]) -> str:
+    def _get_file_preparation_error(self, files: list[PreparedConversationFile]) -> str:
         """Select the first actionable file failure for the SSE response.
 
         Args:
@@ -1592,7 +1593,7 @@ class RuntimeOrchestrator:
                 return f"{file.original_filename}: {detail}"
         return "One or more files could not be prepared."
 
-    def _file_poll_delay(self, elapsed_seconds: float) -> float:
+    def _get_file_poll_delay(self, elapsed_seconds: float) -> float:
         """Choose an adaptive readiness delay so slow parsing does not create an RPC hot loop.
 
         Args:
@@ -1693,16 +1694,16 @@ class RuntimeOrchestrator:
             )
         if event_type == "usage":
             return ModelUsage(
-                prompt_tokens=RuntimeOrchestrator._legacy_int(event, "prompt_tokens"),
-                completion_tokens=RuntimeOrchestrator._legacy_int(event, "completion_tokens"),
-                total_tokens=RuntimeOrchestrator._legacy_int(event, "total_tokens"),
+                prompt_tokens=RuntimeOrchestrator._get_legacy_int(event, "prompt_tokens"),
+                completion_tokens=RuntimeOrchestrator._get_legacy_int(event, "completion_tokens"),
+                total_tokens=RuntimeOrchestrator._get_legacy_int(event, "total_tokens"),
             )
         if event_type == "error":
             return ModelError(str(event.get("error_message", event.get("content", ""))))
         raise TypeError(f"Unsupported legacy model event type: {event_type!r}")
 
     @staticmethod
-    def _legacy_int(event: dict[str, object], key: str) -> int:
+    def _get_legacy_int(event: dict[str, object], key: str) -> int:
         """Read an integer from a legacy event without coercing arbitrary objects."""
         value = event.get(key, 0)
         if isinstance(value, bool):
@@ -1737,7 +1738,7 @@ class RuntimeOrchestrator:
         await self.execution_lock.close()
 
 
-def _epoch_millis() -> int:
+def _get_epoch_millis() -> int:
     """Return UTC epoch milliseconds used for durable Round/Turn timing boundaries.
 
     Returns:

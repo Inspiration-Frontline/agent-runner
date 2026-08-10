@@ -11,9 +11,12 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
 
 from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
 from agent_runner.api.streaming import StreamEvent, StreamEventType
-from agent_runner.config import AgentConfig, ChatRequest
+from agent_runner.config import AgentConfig, ConversationRequest, get_settings
 from agent_runner.context.builder import AgentContext
 from agent_runner.context.models import UserProfile
+from agent_runner.observability.runtime_tracing import RuntimeTracing
+from agent_runner.observability.tracing import Tracer
+from agent_runner.runtime.cancellation import ConversationCancellationRegistry
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -138,7 +141,7 @@ async def test_success_reports_done_only_after_persistence() -> None:
     events = [
         event
         async for event in orchestrator.run(
-            ChatRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
+            ConversationRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
         )
     ]
 
@@ -164,7 +167,7 @@ async def test_persistence_failure_never_reports_persisted_or_done() -> None:
     events: list[StreamEvent] = [
         event
         async for event in orchestrator.run(
-            ChatRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
+            ConversationRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
         )
     ]
 
@@ -179,7 +182,7 @@ async def test_persistence_failure_never_reports_persisted_or_done() -> None:
 def test_public_request_forbids_user_and_agent_identity() -> None:
     fields = {"conversation_id": "conv_persistence", "message": "Question", "user_id": 1, "agent_id": 1}
     try:
-        ChatRequest.model_validate(fields)
+        ConversationRequest.model_validate(fields)
     except ValueError:
         return
     raise AssertionError("Identity fields must not be accepted from the public request body.")
@@ -187,7 +190,7 @@ def test_public_request_forbids_user_and_agent_identity() -> None:
 
 def test_public_request_rejects_blank_messages() -> None:
     try:
-        ChatRequest(conversation_id="conv_persistence", message="   ")
+        ConversationRequest(conversation_id="conv_persistence", message="   ")
     except ValueError:
         return
     raise AssertionError("Blank messages must be rejected before model execution.")
@@ -205,4 +208,9 @@ def _orchestrator(save_success: bool) -> tuple[RuntimeOrchestrator, FakeConversa
     harness.cancellation_manager = FakeCancellationManager()
     harness.conversation_client = client
     harness.execution_lock = lock
+    harness.settings = get_settings()
+    harness.runtime_tracing = RuntimeTracing(Tracer())
+    harness.cancellation_registry = ConversationCancellationRegistry()
+    harness._lock_acquired = False
+    harness._terminal_round_persisted = False
     return orchestrator, client, lock

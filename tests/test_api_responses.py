@@ -1,10 +1,10 @@
 from typing import Any
 
-from agent_runner.api.debug_routes import debug_config
-from agent_runner.api.responses import DebugConfigResponse, HealthResponse
-from agent_runner.api.routes import ChatTraceStats
+from fastapi.testclient import TestClient
+
 from agent_runner.api.streaming import DoneEvent, TokenDeltaEvent, UsageEvent
-from agent_runner.main import app, health_check, root
+from agent_runner.main import create_app
+from agent_runner.observability.conversation_tracing import ConversationTraceStats
 
 
 class TraceSpanRecorder:
@@ -22,47 +22,41 @@ class TraceSpanRecorder:
 
 
 def test_api_version_matches_project_version() -> None:
+    app = create_app()
     assert app.version == "0.0.1"
 
 
-async def test_health_check_returns_typed_response() -> None:
-    response = await health_check()
+def test_health_root_and_debug_routes() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        health_response = client.get("/health")
+        root_response = client.get("/", follow_redirects=False)
+        debug_response = client.get("/v1/agent/debug/config")
 
-    assert response == HealthResponse(status="healthy")
-
-
-async def test_root_redirects_to_swagger_docs() -> None:
-    response = await root()
-
-    assert response.status_code == 307
-    assert response.headers["location"] == "/docs"
-
-
-async def test_debug_config_returns_typed_response() -> None:
-    response = await debug_config()
-
-    assert isinstance(response, DebugConfigResponse)
-    assert response.lite_llm_base_url == "http://localhost:4000"
-    assert response.nacos_enabled is False
+    assert health_response.json() == {"status": "healthy"}
+    assert root_response.status_code == 307
+    assert root_response.headers["location"] == "/docs"
+    assert debug_response.status_code == 200
+    assert debug_response.json()["nacos_enabled"] is False
 
 
-def test_chat_trace_stats_aggregates_multi_turn_usage_and_lifecycle() -> None:
+def test_conversation_trace_stats_aggregates_multi_turn_usage_and_lifecycle() -> None:
     span = TraceSpanRecorder()
-    stats = ChatTraceStats()
+    stats = ConversationTraceStats()
 
-    stats.record(span, UsageEvent(579, 35, 614))
-    stats.record(span, TokenDeltaEvent("complete answer"))
-    stats.record(span, UsageEvent(660, 34, 694))
-    stats.record(span, DoneEvent())
+    stats.record_event(span, UsageEvent(579, 35, 614))
+    stats.record_event(span, TokenDeltaEvent("complete answer"))
+    stats.record_event(span, UsageEvent(660, 34, 694))
+    stats.record_event(span, DoneEvent())
     stats.finish(span)
 
     assert span.attributes["gen_ai.usage.input_tokens"] == 1239
     assert span.attributes["gen_ai.usage.output_tokens"] == 69
     assert span.attributes["gen_ai.usage.total_tokens"] == 1308
-    assert span.attributes["chat.response_chars"] == 15
-    assert span.attributes["chat.outcome"] == "completed"
+    assert span.attributes["conversation.response_chars"] == 15
+    assert span.attributes["conversation.outcome"] == "completed"
     assert span.events[0] == (
-        "chat.usage",
+        "conversation.usage",
         {
             "gen_ai.usage.input_tokens": 579,
             "gen_ai.usage.output_tokens": 35,

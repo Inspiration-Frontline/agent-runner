@@ -5,14 +5,14 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     PreparedConversationFile,
 )
 
-from agent_runner.config import ChatRequest
+from agent_runner.config import ConversationRequest
 from agent_runner.context.builder import CaptureFilePart, Message, ModelImagePart
 from agent_runner.runtime.openai_agents_sdk_adapter import OpenAIAgentsSdkAdapter
 from agent_runner.runtime.orchestrator import RuntimeOrchestrator
 
 
-def test_chat_request_accepts_attachment_only_and_rejects_duplicate_files() -> None:
-    request = ChatRequest(
+def test_conversation_request_accepts_attachment_only_and_rejects_duplicate_files() -> None:
+    request = ConversationRequest(
         conversation_id="conv_attachments",
         file_ids=["file_one"],
         ui_locale="en-US",
@@ -22,7 +22,7 @@ def test_chat_request_accepts_attachment_only_and_rejects_duplicate_files() -> N
     assert request.file_ids == ["file_one"]
 
     with pytest.raises(ValueError):
-        ChatRequest(
+        ConversationRequest(
             conversation_id="conv_attachments",
             file_ids=["file_one", "file_one"],
         )
@@ -30,7 +30,7 @@ def test_chat_request_accepts_attachment_only_and_rejects_duplicate_files() -> N
 
 def test_attachment_input_separates_signed_sdk_urls_from_stable_capture() -> None:
     orchestrator = object.__new__(RuntimeOrchestrator)
-    request = ChatRequest(
+    request = ConversationRequest(
         conversation_id="conv_attachments",
         message="Compare the files",
         file_ids=["file_image", "file_document"],
@@ -74,7 +74,7 @@ def test_attachment_input_separates_signed_sdk_urls_from_stable_capture() -> Non
 
 def test_attachment_only_instruction_uses_the_ui_locale_without_visible_fake_text() -> None:
     orchestrator = object.__new__(RuntimeOrchestrator)
-    request = ChatRequest(
+    request = ConversationRequest(
         conversation_id="conv_attachments",
         file_ids=["file_document"],
         ui_locale="zh-CN",
@@ -109,7 +109,7 @@ def test_plain_text_capture_uses_scalar_content() -> None:
 
 def test_plain_text_attachment_input_uses_empty_typed_parts() -> None:
     orchestrator = object.__new__(RuntimeOrchestrator)
-    request = ChatRequest(
+    request = ConversationRequest(
         conversation_id="conv_plain_text",
         message="Continue from the previous answer",
     )

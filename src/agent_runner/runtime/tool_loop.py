@@ -4,16 +4,16 @@ from dataclasses import dataclass, field
 from time import time_ns
 
 from agents.tool_context import ToolContext
-from opentelemetry.trace import SpanKind
 
-from agent_runner.config import get_settings
+from agent_runner.config import Settings
 from agent_runner.context.builder import CapturedMessage
-from agent_runner.observability.tracing import get_tracer, trace_json
+from agent_runner.observability.tool_tracing import ToolTracing
+from agent_runner.observability.tracing import Tracer
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.tools.registry import ToolDefinition
 
 
-def epoch_millis() -> int:
+def get_epoch_millis() -> int:
     """Return epoch milliseconds used for LLM/Tool audit boundaries.
 
     Returns:
@@ -72,7 +72,7 @@ class AgentRunCapture:
 class ToolExecutionCollector:
     """Request-scoped audit collector used by concurrently executing SDK Tool handlers."""
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings | None = None, tracer: Tracer | None = None) -> None:
         """Create a request-scoped collector for Tool calls and terminal outcomes.
 
         The SDK may invoke sibling Tools concurrently and may discard raw response objects during
@@ -81,6 +81,8 @@ class ToolExecutionCollector:
         """
         self._executions: dict[str, CapturedToolExecution] = {}
         self._calls: dict[str, CapturedToolCall] = {}
+        current_settings = settings or Settings()
+        self._tracing = ToolTracing(tracer or Tracer(current_settings.otel_service_name), current_settings)
 
     def record_call(self, tool_call: CapturedToolCall) -> None:
         """Retain a model-emitted call before its handler starts or SDK output is discarded.
@@ -114,21 +116,8 @@ class ToolExecutionCollector:
         Raises:
             asyncio.CancelledError: When cancellation interrupts the Tool invocation.
         """
-        attributes = {
-            "tool.key": definition.tool_key,
-            "tool.name": definition.tool_name,
-            "tool.source": definition.source_type.value,
-            "gen_ai.tool.call.id": tool_call_id,
-            "gen_ai.tool.name": definition.tool_name,
-        }
-        with get_tracer().span("tool.call", attributes, kind=SpanKind.CLIENT) as span:
-            settings = get_settings()
-            if settings.otel_capture_content:
-                span.set_attribute(
-                    "gen_ai.tool.call.arguments",
-                    trace_json(arguments_json, settings.otel_content_max_chars),
-                )
-            start_time = epoch_millis()
+        with self._tracing.trace_call(definition, tool_call_id, arguments_json) as trace:
+            start_time = get_epoch_millis()
             try:
                 if cancellation_token is not None and cancellation_token.is_cancelled():
                     raise asyncio.CancelledError("Tool execution cancelled")
@@ -139,20 +128,13 @@ class ToolExecutionCollector:
                 self._record_execution(
                     tool_call_id, definition, arguments_json, "COMPLETED", result_content, "", start_time
                 )
-                span.set_attribute("tool.status", "COMPLETED")
-                if settings.otel_capture_content:
-                    span.set_attribute(
-                        "gen_ai.tool.call.result",
-                        trace_json(result_content, settings.otel_content_max_chars),
-                    )
+                trace.record_result("COMPLETED", result_content)
                 return result_content
             except asyncio.CancelledError:
                 self._record_execution(
                     tool_call_id, definition, arguments_json, "CANCELLED", "", "Generation cancelled.", start_time
                 )
-                span.set_attribute("tool.status", "CANCELLED")
-                if settings.otel_capture_content:
-                    span.set_attribute("gen_ai.tool.call.result", "Generation cancelled.")
+                trace.record_result("CANCELLED", "Generation cancelled.")
                 raise
             except Exception as error:
                 # A Tool failure becomes a model-visible result so sibling calls can continue.
@@ -166,13 +148,7 @@ class ToolExecutionCollector:
                 self._record_execution(
                     tool_call_id, definition, arguments_json, "FAILED", result_content, error_message, start_time
                 )
-                span.set_attribute("tool.status", "FAILED")
-                span.set_attribute("error.type", type(error).__name__)
-                if settings.otel_capture_content:
-                    span.set_attribute(
-                        "gen_ai.tool.call.result",
-                        trace_json(result_content, settings.otel_content_max_chars),
-                    )
+                trace.record_result("FAILED", result_content, type(error).__name__)
                 return result_content
 
     def _record_execution(
@@ -196,7 +172,7 @@ class ToolExecutionCollector:
             raw_result=result_content,
             error_message=error_message,
             start_time=start_time,
-            end_time=max(start_time, epoch_millis()),
+            end_time=max(start_time, get_epoch_millis()),
         )
 
     def get(self, tool_call_id: str) -> CapturedToolExecution | None:
@@ -210,7 +186,7 @@ class ToolExecutionCollector:
         """
         return self._executions.get(tool_call_id)
 
-    def values(self) -> list[CapturedToolExecution]:
+    def list_executions(self) -> list[CapturedToolExecution]:
         """Return recorded executions in observation order for persistence mapping.
 
         Returns:
@@ -218,7 +194,7 @@ class ToolExecutionCollector:
         """
         return list(self._executions.values())
 
-    def calls(self) -> list[CapturedToolCall]:
+    def list_calls(self) -> list[CapturedToolCall]:
         """Return model-emitted calls in observation order.
 
         Returns:

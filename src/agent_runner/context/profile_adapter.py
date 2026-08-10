@@ -3,7 +3,7 @@ from collections.abc import Mapping
 
 import httpx
 
-from agent_runner.config import get_settings
+from agent_runner.config import Settings
 from agent_runner.context.models import UserProfile
 
 logger = logging.getLogger(__name__)
@@ -21,11 +21,11 @@ class ProfileAdapter:
         client: Async HTTP client for service communication.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         """
         Initialize the profile adapter with service URL and HTTP client.
         """
-        current_settings = get_settings()
+        current_settings = settings or Settings()
         self.base_url = current_settings.user_profiler_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
