@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator
 from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic, time_ns
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import AgentIdentity
@@ -87,7 +87,7 @@ from agent_runner.conversation import (
     ConversationManagerClient,
 )
 from agent_runner.observability.runtime_tracing import RuntimeTracing
-from agent_runner.observability.tracing import Span, Tracer, current_trace_id, trace_json
+from agent_runner.observability.tracing import Tracer
 from agent_runner.runtime.cancellation import (
     CancellationManager,
     CancellationToken,
@@ -390,7 +390,13 @@ class RuntimeOrchestrator:
             context_result = await self._create_agent_context(
                 conversation_request, user_id, state, prepared_files, conversation_history
             )
-            self._record_context_span(context_span, context_result, state)
+            if isinstance(context_result, PreparationFailure):
+                self.runtime_tracing.record_context_failure(
+                    context_span,
+                    context_result.event.error_code or "CONTEXT_PREPARATION_FAILED",
+                )
+            else:
+                self.runtime_tracing.record_context_ready(context_span, context_result.context, state.agent)
         if isinstance(context_result, PreparationFailure):
             yield context_result.event
             return
@@ -399,7 +405,10 @@ class RuntimeOrchestrator:
         context = context_result.context
 
         model_result: ModelStreamComplete | None = None
-        with self.runtime_tracing.trace_agent_run(self._get_agent_span_attributes(state.agent)) as agent_span:
+        with self.runtime_tracing.trace_agent_run(
+            state.agent,
+            self.settings.otel_content_max_chars,
+        ) as agent_span:
             async for model_event in self._stream_model(
                 state.agent,
                 context,
@@ -411,7 +420,14 @@ class RuntimeOrchestrator:
                     model_result = model_event
                 else:
                     yield model_event
-            self._record_agent_result_span(agent_span, model_result)
+            self.runtime_tracing.record_agent_result(
+                agent_span,
+                model_result.response_text if model_result is not None else None,
+                model_result.capture.turns if model_result is not None else (),
+                model_result.terminal_status.name
+                if model_result is not None and model_result.terminal_status is not None
+                else None,
+            )
         if model_result is None:
             raise RuntimeError("Model stream completed without a terminal result.")
 
@@ -423,61 +439,6 @@ class RuntimeOrchestrator:
 
         async for persistence_event in self._persist_completed_response(conversation_request, user_id, state, model_result):
             yield persistence_event
-
-    @staticmethod
-    def _record_context_span(
-        span: Span,
-        result: AgentContextReady | PreparationFailure,
-        state: RuntimeRequestState,
-    ) -> None:
-        """Attach the resolved context shape without duplicating its full LLM payload."""
-        if isinstance(result, PreparationFailure):
-            span.set_attribute("context.status", "failed")
-            span.set_attribute("error.type", result.event.error_code or "CONTEXT_PREPARATION_FAILED")
-            span.add_event("context.failed")
-            return
-
-        context = result.context
-        span.set_attribute("context.status", "ready")
-        span.set_attribute("context.system_prompt_chars", len(context.system_prompt))
-        span.set_attribute("context.history_message_count", len(context.conversation_history))
-        span.set_attribute("context.rag_chunk_count", len(context.rag_chunks))
-        span.set_attribute("context.tool_count", len(context.tool_specs))
-        span.set_attribute("context.current_message_chars", len(context.current_message.content))
-        if state.agent is not None:
-            span.set_attribute("agent.id", state.agent.agent_id)
-            span.set_attribute("agent.name", state.agent.name)
-            span.set_attribute("gen_ai.request.model", state.agent.model)
-        span.add_event("context.ready")
-
-    def _get_agent_span_attributes(self, agent: AgentDefinition) -> dict[str, object]:
-        return {
-            "agent.id": agent.agent_id,
-            "agent.name": agent.name,
-            "agent.version": agent.version,
-            "gen_ai.request.model": agent.model,
-            "gen_ai.request.max_tokens": agent.max_output_tokens,
-            "gen_ai.request.temperature": agent.temperature,
-            "agent.tool_count": len(agent.tools),
-            "agent.tools": trace_json(agent.tools, self.settings.otel_content_max_chars),
-        }
-
-    @staticmethod
-    def _record_agent_result_span(span: Span, result: ModelStreamComplete | None) -> None:
-        """Summarize final model and Tool evidence on the owning Agent span."""
-        if result is None:
-            span.set_attribute("agent.status", "missing_result")
-            span.add_event("agent.result.missing")
-            return
-        turns = result.capture.turns
-        span.set_attribute("agent.status", result.terminal_status.name if result.terminal_status else "COMPLETED")
-        span.set_attribute("agent.response_chars", len(result.response_text))
-        span.set_attribute("agent.turn_count", len(turns))
-        span.set_attribute("agent.tool_execution_count", sum(len(turn.tool_executions) for turn in turns))
-        span.set_attribute("gen_ai.usage.input_tokens", sum(turn.prompt_tokens for turn in turns))
-        span.set_attribute("gen_ai.usage.output_tokens", sum(turn.completion_tokens for turn in turns))
-        span.set_attribute("gen_ai.usage.total_tokens", sum(turn.total_tokens for turn in turns))
-        span.add_event("agent.completed")
 
     async def _prepare_conversation_context(
         self,
@@ -497,7 +458,17 @@ class RuntimeOrchestrator:
             len(conversation_request.references),
         ) as preflight_span:
             preflight_result = await self._load_conversation_preflight(conversation_request, user_id)
-            self._record_preflight_span(preflight_span, preflight_result)
+            if isinstance(preflight_result, PreparationFailure):
+                self.runtime_tracing.record_preflight_failure(
+                    preflight_span,
+                    preflight_result.event.error_code or "PREFLIGHT_FAILED",
+                )
+            else:
+                self.runtime_tracing.record_preflight_ready(
+                    preflight_span,
+                    preflight_result.next_round_number,
+                    len(preflight_result.conversation_history),
+                )
         if isinstance(preflight_result, PreparationFailure):
             return preflight_result
         preflight = preflight_result
@@ -522,19 +493,6 @@ class RuntimeOrchestrator:
             reference_result.event.error_message or "Conversation reference preparation failed.",
         )
         return reference_result
-
-    @staticmethod
-    def _record_preflight_span(span: Span, result: ConversationPreflight | PreparationFailure) -> None:
-        """Record authorization/replay boundaries selected before billable work."""
-        if isinstance(result, PreparationFailure):
-            span.set_attribute("preflight.status", "failed")
-            span.set_attribute("error.type", result.event.error_code or "PREFLIGHT_FAILED")
-            span.add_event("preflight.failed")
-            return
-        span.set_attribute("preflight.status", "ready")
-        span.set_attribute("conversation.next_round_number", result.next_round_number)
-        span.set_attribute("conversation.history_message_count", len(result.conversation_history))
-        span.add_event("preflight.ready")
 
     async def _create_agent_context(
         self,
@@ -775,7 +733,7 @@ class RuntimeOrchestrator:
                         response_tool_calls=[],
                         tool_executions=[],
                         request_id=str(uuid4()),
-                        trace_id=current_trace_id(),
+                        trace_id=self.runtime_tracing.get_current_trace_id(),
                         start_time=call_start,
                         llm_end_time=legacy_end,
                         end_time=legacy_end,
@@ -1024,7 +982,7 @@ class RuntimeOrchestrator:
             start_time=round_start,
             end_time=call_end,
             references=self._to_proto_references(conversation_request),
-            trace_id=current_trace_id(),
+            trace_id=self.runtime_tracing.get_current_trace_id(),
         )
 
     def _to_proto_turn(
@@ -1253,7 +1211,7 @@ class RuntimeOrchestrator:
             start_time=round_start,
             end_time=max(round_start, _get_epoch_millis()),
             references=self._to_proto_references(conversation_request),
-            trace_id=current_trace_id(),
+            trace_id=self.runtime_tracing.get_current_trace_id(),
         )
         try:
             response = await self._save_round(request)
@@ -1266,24 +1224,9 @@ class RuntimeOrchestrator:
 
     async def _save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         """Persist one terminal Round inside the shared tracing phase."""
-        tool_execution_count = sum(len(turn.tool_call_executions) for turn in request.turns)
-        attributes = {
-            "conversation.id": request.conversation_id,
-            "conversation.round_number": request.round_number,
-            "conversation.round_status": request.status.name,
-            "conversation.turn_count": len(request.turns),
-            "conversation.tool_execution_count": tool_execution_count,
-            "conversation.reference_count": len(request.references),
-            "conversation.answer_chars": len(request.final_answer.content) if request.final_answer is not None else 0,
-            "conversation.trace_id": request.trace_id,
-        }
-        with self.runtime_tracing.trace_round_persistence(attributes) as span:
-            span.add_event("round.persistence.started")
+        with self.runtime_tracing.trace_round_persistence(request) as span:
             response = await self.conversation_client.save_round(request)
-            success = response.base is not None and response.base.success
-            span.set_attribute("rpc.success", success)
-            span.set_attribute("rpc.code", response.base.code if response.base is not None else -1)
-            span.add_event("round.persisted" if success else "round.persistence.rejected")
+            self.runtime_tracing.record_round_persistence_result(span, response)
             return response
 
     def _to_context_messages(self, messages: list[LlmConversationMessage]) -> list[Message]:
@@ -1557,8 +1500,19 @@ class RuntimeOrchestrator:
             raise ValueError("Persisted file content must use an AgentBreaker stable reference.")
         return CaptureFilePart(
             file_id=file_id,
-            detail=file_url.detail if file_url is not None and file_url.detail else "auto",
+            detail=self._get_image_detail(file_url.detail if file_url is not None else ""),
         )
+
+    @staticmethod
+    def _get_image_detail(detail: str) -> Literal["low", "high", "auto", "original"]:
+        """Validate persisted image detail before using it at a provider boundary."""
+        if detail == "low":
+            return "low"
+        if detail == "high":
+            return "high"
+        if detail == "original":
+            return "original"
+        return "auto"
 
     def _get_stable_file_id(self, url: str) -> str | None:
         """Extract a file ID only from an AgentBreaker-owned stable reference URL.

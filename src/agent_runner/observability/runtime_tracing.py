@@ -1,7 +1,15 @@
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 
-from agent_runner.observability.tracing import Span, Tracer
+from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    SaveConversationRoundRequest,
+    SaveConversationRoundResponse,
+)
+
+from agent_runner.agent_definitions.config_models import AgentDefinition
+from agent_runner.context.builder import AgentContext
+from agent_runner.observability.tracing import Span, Tracer, current_trace_id, trace_json
+from agent_runner.runtime.tool_loop import CapturedModelTurn
 
 
 class RuntimeTracing:
@@ -9,6 +17,11 @@ class RuntimeTracing:
 
     def __init__(self, tracer: Tracer) -> None:
         self._tracer = tracer
+
+    @staticmethod
+    def get_current_trace_id() -> str:
+        """Return the active trace ID used for durable request correlation."""
+        return current_trace_id()
 
     @contextmanager
     def trace_file_preparation(self, file_count: int) -> Generator[Span]:
@@ -35,9 +48,62 @@ class RuntimeTracing:
             yield span
 
     @contextmanager
-    def trace_agent_run(self, attributes: dict[str, object]) -> Generator[Span]:
+    def trace_agent_run(self, agent: AgentDefinition, content_max_chars: int) -> Generator[Span]:
+        attributes: dict[str, object] = {
+            "agent.id": agent.agent_id,
+            "agent.name": agent.name,
+            "agent.version": agent.version,
+            "gen_ai.request.model": agent.model,
+            "gen_ai.request.max_tokens": agent.max_output_tokens,
+            "gen_ai.request.temperature": agent.temperature,
+            "agent.tool_count": len(agent.tools),
+            "agent.tools": trace_json(agent.tools, content_max_chars),
+        }
         with self._tracer.span("agent.run", attributes) as span:
             yield span
+
+    @staticmethod
+    def record_context_failure(span: Span, error_type: str) -> None:
+        """Record a failed context-build outcome without exposing tag policy to the orchestrator."""
+        span.set_attribute("context.status", "failed")
+        span.set_attribute("error.type", error_type)
+        span.add_event("context.failed")
+
+    @staticmethod
+    def record_context_ready(span: Span, context: AgentContext, agent: AgentDefinition | None) -> None:
+        """Record the resolved context shape without its full LLM payload."""
+        span.set_attribute("context.status", "ready")
+        span.set_attribute("context.system_prompt_chars", len(context.system_prompt))
+        span.set_attribute("context.history_message_count", len(context.conversation_history))
+        span.set_attribute("context.rag_chunk_count", len(context.rag_chunks))
+        span.set_attribute("context.tool_count", len(context.tool_specs))
+        span.set_attribute("context.current_message_chars", len(context.current_message.content))
+        if agent is not None:
+            span.set_attribute("agent.id", agent.agent_id)
+            span.set_attribute("agent.name", agent.name)
+            span.set_attribute("gen_ai.request.model", agent.model)
+        span.add_event("context.ready")
+
+    @staticmethod
+    def record_agent_result(
+        span: Span,
+        response_text: str | None,
+        turns: Sequence[CapturedModelTurn],
+        terminal_status: str | None,
+    ) -> None:
+        """Summarize final model and Tool evidence on the owning Agent span."""
+        if response_text is None:
+            span.set_attribute("agent.status", "missing_result")
+            span.add_event("agent.result.missing")
+            return
+        span.set_attribute("agent.status", terminal_status or "COMPLETED")
+        span.set_attribute("agent.response_chars", len(response_text))
+        span.set_attribute("agent.turn_count", len(turns))
+        span.set_attribute("agent.tool_execution_count", sum(len(turn.tool_executions) for turn in turns))
+        span.set_attribute("gen_ai.usage.input_tokens", sum(turn.prompt_tokens for turn in turns))
+        span.set_attribute("gen_ai.usage.output_tokens", sum(turn.completion_tokens for turn in turns))
+        span.set_attribute("gen_ai.usage.total_tokens", sum(turn.total_tokens for turn in turns))
+        span.add_event("agent.completed")
 
     @contextmanager
     def trace_preflight(self, conversation_id: str, reference_count: int) -> Generator[Span]:
@@ -47,12 +113,47 @@ class RuntimeTracing:
         ) as span:
             yield span
 
+    @staticmethod
+    def record_preflight_failure(span: Span, error_type: str) -> None:
+        """Record a failed authorization/replay preflight."""
+        span.set_attribute("preflight.status", "failed")
+        span.set_attribute("error.type", error_type)
+        span.add_event("preflight.failed")
+
+    @staticmethod
+    def record_preflight_ready(span: Span, next_round_number: int, history_message_count: int) -> None:
+        """Record the durable boundary selected by a successful preflight."""
+        span.set_attribute("preflight.status", "ready")
+        span.set_attribute("conversation.next_round_number", next_round_number)
+        span.set_attribute("conversation.history_message_count", history_message_count)
+        span.add_event("preflight.ready")
+
     @contextmanager
     def trace_reference_preparation(self, reference_count: int) -> Generator[Span]:
         with self._tracer.span("reference.prepare", {"reference.count": reference_count}) as span:
             yield span
 
     @contextmanager
-    def trace_round_persistence(self, attributes: dict[str, object]) -> Generator[Span]:
+    def trace_round_persistence(self, request: SaveConversationRoundRequest) -> Generator[Span]:
+        tool_execution_count = sum(len(turn.tool_call_executions) for turn in request.turns)
+        attributes = {
+            "conversation.id": request.conversation_id,
+            "conversation.round_number": request.round_number,
+            "conversation.round_status": request.status.name,
+            "conversation.turn_count": len(request.turns),
+            "conversation.tool_execution_count": tool_execution_count,
+            "conversation.reference_count": len(request.references),
+            "conversation.answer_chars": len(request.final_answer.content) if request.final_answer is not None else 0,
+            "conversation.trace_id": request.trace_id,
+        }
         with self._tracer.span("round.persist", attributes) as span:
+            span.add_event("round.persistence.started")
             yield span
+
+    @staticmethod
+    def record_round_persistence_result(span: Span, response: SaveConversationRoundResponse) -> None:
+        """Record the typed Conversation Manager persistence outcome."""
+        success = response.base is not None and response.base.success
+        span.set_attribute("rpc.success", success)
+        span.set_attribute("rpc.code", response.base.code if response.base is not None else -1)
+        span.add_event("round.persisted" if success else "round.persistence.rejected")

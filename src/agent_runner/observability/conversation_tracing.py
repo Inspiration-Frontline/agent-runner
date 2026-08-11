@@ -10,7 +10,7 @@ from agent_runner.observability.tracing import Span, Tracer, extract_trace_conte
 
 
 @dataclass
-class ConversationTraceStats:
+class ConversationStreamTraceStats:
     """Aggregate stream evidence without creating a span per token delta."""
 
     event_count: int = 0
@@ -82,7 +82,7 @@ class ConversationTrace:
 
     def __init__(self, span: Span) -> None:
         self._span = span
-        self._stats = ConversationTraceStats()
+        self._stats = ConversationStreamTraceStats()
 
     def record_event(self, event: object) -> None:
         """Record one emitted SSE event."""

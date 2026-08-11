@@ -3,7 +3,8 @@ from typing import Any
 import pytest
 from agents import Model, ModelSettings
 
-from agent_runner.gateway.litellm_client import LiteLLMModelFactory, TracedModel
+from agent_runner.gateway.litellm_client import LiteLLMModelFactory
+from agent_runner.observability.litellm_tracing import TracedModel
 
 
 def test_bare_proxy_model_uses_openai_provider_prefix() -> None:

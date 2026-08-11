@@ -3,7 +3,7 @@ import json
 import logging
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from agents import Agent, FunctionTool, Model, ModelSettings, Runner
@@ -13,7 +13,13 @@ from agents.retry import ModelRetrySettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
 from agents.tool import Tool
 from agents.tool_context import ToolContext
+from openai.types.responses.easy_input_message_param import EasyInputMessageParam
 from openai.types.responses.response_completed_event import ResponseCompletedEvent
+from openai.types.responses.response_function_tool_call_param import ResponseFunctionToolCallParam
+from openai.types.responses.response_input_image_param import ResponseInputImageParam
+from openai.types.responses.response_input_item_param import FunctionCallOutput
+from openai.types.responses.response_input_message_content_list_param import ResponseInputMessageContentListParam
+from openai.types.responses.response_input_text_param import ResponseInputTextParam
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
 
 from agent_runner.agent_definitions.config_models import AgentDefinition
@@ -381,7 +387,7 @@ class OpenAIAgentsSdkAdapter:
             Responses API input items with transient signed URLs confined to the current run.
         """
 
-        def provider_content(message: Message) -> Any:
+        def provider_content(message: Message) -> str | ResponseInputMessageContentListParam:
             """Translate one neutral content list into provider-bound Responses parts.
 
             Args:
@@ -393,69 +399,70 @@ class OpenAIAgentsSdkAdapter:
             if not message.model_content:
                 return message.content
 
-            converted: list[dict[str, Any]] = []
+            converted: ResponseInputMessageContentListParam = []
             for part in message.model_content:
                 if isinstance(part, ModelTextPart):
-                    converted.append({"type": "input_text", "text": part.text})
+                    text_part: ResponseInputTextParam = {"type": "input_text", "text": part.text}
+                    converted.append(text_part)
                 elif isinstance(part, ModelImagePart):
-                    converted.append(
-                        {
-                            "type": "input_image",
-                            "image_url": part.url,
-                            "detail": part.detail,
-                        }
-                    )
+                    image_part: ResponseInputImageParam = {
+                        "type": "input_image",
+                        "image_url": part.url,
+                        "detail": part.detail,
+                    }
+                    converted.append(image_part)
             return converted
 
         input_items: list[TResponseInputItem] = []
         for message in context.conversation_history:
             if message.role == "assistant" and message.tool_calls:
                 if message.content:
-                    input_items.append(cast(TResponseInputItem, {"role": "assistant", "content": message.content}))
+                    assistant_message: EasyInputMessageParam = {
+                        "role": "assistant",
+                        "content": message.content,
+                    }
+                    input_items.append(assistant_message)
                 for tool_call in message.tool_calls:
-                    input_items.append(
-                        cast(
-                            TResponseInputItem,
-                            {
-                                "type": "function_call",
-                                "call_id": tool_call.call_id,
-                                "name": tool_call.function_name,
-                                "arguments": tool_call.arguments,
-                            },
-                        )
-                    )
+                    function_call: ResponseFunctionToolCallParam = {
+                        "type": "function_call",
+                        "call_id": tool_call.call_id,
+                        "name": tool_call.function_name,
+                        "arguments": tool_call.arguments,
+                    }
+                    input_items.append(function_call)
             elif message.role == "tool":
-                input_items.append(
-                    cast(
-                        TResponseInputItem,
-                        {
-                            "type": "function_call_output",
-                            "call_id": message.tool_call_id or "",
-                            "output": message.content,
-                        },
-                    )
-                )
+                function_output: FunctionCallOutput = {
+                    "type": "function_call_output",
+                    "call_id": message.tool_call_id or "",
+                    "output": message.content,
+                }
+                input_items.append(function_output)
             else:
-                input_items.append(
-                    cast(
-                        TResponseInputItem,
-                        {
-                            "role": message.role,
-                            "content": provider_content(message),
-                        },
-                    )
-                )
+                sdk_message: EasyInputMessageParam = {
+                    "role": self._get_sdk_message_role(message.role),
+                    "content": provider_content(message),
+                }
+                input_items.append(sdk_message)
 
-        input_items.append(
-            cast(
-                TResponseInputItem,
-                {
-                    "role": "user",
-                    "content": provider_content(context.current_message),
-                },
-            )
-        )
+        current_message: EasyInputMessageParam = {
+            "role": "user",
+            "content": provider_content(context.current_message),
+        }
+        input_items.append(current_message)
         return input_items
+
+    @staticmethod
+    def _get_sdk_message_role(role: str) -> Literal["user", "assistant", "system", "developer"]:
+        """Validate a provider-neutral role before crossing the OpenAI SDK boundary."""
+        if role == "user":
+            return "user"
+        if role == "assistant":
+            return "assistant"
+        if role == "system":
+            return "system"
+        if role == "developer":
+            return "developer"
+        raise ValueError(f"Unsupported OpenAI input message role: {role}")
 
     def _to_capture_message(self, message: Message) -> CapturedMessage:
         """Keep stable provider-neutral content while excluding transient signed SDK URLs.

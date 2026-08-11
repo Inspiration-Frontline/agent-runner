@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from agent_runner.api.streaming import DoneEvent, TokenDeltaEvent, UsageEvent
 from agent_runner.main import create_app
-from agent_runner.observability.conversation_tracing import ConversationTraceStats
+from agent_runner.observability.conversation_tracing import ConversationStreamTraceStats
 
 
 class TraceSpanRecorder:
@@ -42,7 +42,7 @@ def test_health_root_and_debug_routes() -> None:
 
 def test_conversation_trace_stats_aggregates_multi_turn_usage_and_lifecycle() -> None:
     span = TraceSpanRecorder()
-    stats = ConversationTraceStats()
+    stats = ConversationStreamTraceStats()
 
     stats.record_event(span, UsageEvent(579, 35, 614))
     stats.record_event(span, TokenDeltaEvent("complete answer"))

@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass, field
+from typing import Literal
 
 from agent_runner.config import AgentConfig, Settings
 from agent_runner.tools.registry import ToolDefinition, ToolRegistry
@@ -26,7 +27,7 @@ class ModelImagePart:
 
     file_id: str
     url: str
-    detail: str = "auto"
+    detail: Literal["low", "high", "auto", "original"] = "auto"
 
 
 ModelContentPart = ModelTextPart | ModelImagePart
@@ -44,7 +45,7 @@ class CaptureFilePart:
     """Durable AgentBreaker file reference that can be re-signed during replay."""
 
     file_id: str
-    detail: str = "auto"
+    detail: Literal["low", "high", "auto", "original"] = "auto"
 
 
 CaptureContentPart = CaptureTextPart | CaptureFilePart

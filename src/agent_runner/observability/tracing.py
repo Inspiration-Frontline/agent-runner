@@ -2,6 +2,7 @@ import json
 import logging
 from collections.abc import Generator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
+from contextvars import Token
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any
@@ -219,9 +220,9 @@ def inject_trace_context(headers: MutableMapping[str, str]) -> None:
     propagate.inject(carrier=headers)
 
 
-def attach_trace_context(trace_context: Context) -> object:
+def attach_trace_context(trace_context: Context) -> Token[Context]:
     return context.attach(trace_context)
 
 
-def detach_trace_context(token: object) -> None:
+def detach_trace_context(token: Token[Context]) -> None:
     context.detach(token)
