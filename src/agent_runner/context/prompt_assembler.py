@@ -55,7 +55,8 @@ class PromptAssembler:
 
         return assembled_prompt
 
-    def _format_profile(self, profile: UserProfile) -> str:
+    @staticmethod
+    def _format_profile(profile: UserProfile) -> str:
         """
         Format user profile data as a markdown-style string.
 
@@ -74,7 +75,8 @@ class PromptAssembler:
 
         return "\n".join(lines)
 
-    def _format_rag_chunks(self, chunks: list[RagChunk]) -> str:
+    @staticmethod
+    def _format_rag_chunks(chunks: list[RagChunk]) -> str:
         """
         Format RAG chunks as a markdown-style string.
 

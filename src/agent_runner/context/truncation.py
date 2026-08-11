@@ -93,7 +93,8 @@ class TokenBudgetManager:
         """
         return TokenBudget(max_tokens=self.max_tokens)
 
-    def estimate_tokens(self, text: str) -> int:
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
         """
         Estimate the number of tokens in a text string.
 

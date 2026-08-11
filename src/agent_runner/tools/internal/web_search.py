@@ -115,7 +115,8 @@ class _WebSearchClient:
                 )
         raise ValueError("Page exceeded the redirect limit.")
 
-    async def _require_public_http_url(self, url: str) -> None:
+    @staticmethod
+    async def _require_public_http_url(url: str) -> None:
         """Reject non-HTTP, private, loopback, or otherwise non-public result destinations."""
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:

@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator
 from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic, time_ns
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import uuid4
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import AgentIdentity
@@ -75,11 +75,13 @@ from agent_runner.context.builder import (
     CaptureFilePart,
     CaptureTextPart,
     ContextBuilder,
+    ImageDetail,
     Message,
     ModelContentPart,
     ModelImagePart,
     ModelTextPart,
     RuntimeToolCall,
+    is_image_detail,
 )
 from agent_runner.conversation import (
     ConversationBusyError,
@@ -1086,7 +1088,8 @@ class RuntimeOrchestrator:
             ),
         )
 
-    def _to_captured_message(self, message: Message) -> CapturedMessage:
+    @staticmethod
+    def _to_captured_message(message: Message) -> CapturedMessage:
         """Create a typed capture message for the compatibility fallback path."""
         return CapturedMessage(
             role=message.role,
@@ -1108,15 +1111,17 @@ class RuntimeOrchestrator:
         role = MessageRole[message.role.upper()]
         tool_calls = [self._runtime_tool_call_to_proto(call) for call in message.tool_calls]
         content_parts = self._captured_content_parts_to_proto(message.capture_content)
+        tool_call_id = message.tool_call_id if message.tool_call_id is not None else ""
         return LlmConversationMessage(
             role=role,
             content="" if content_parts else message.content,
             content_parts=content_parts,
             tool_calls=tool_calls,
-            tool_call_id=message.tool_call_id or "",
+            tool_call_id=tool_call_id,
         )
 
-    def _captured_content_parts_to_proto(self, content: tuple[CaptureContentPart, ...]) -> list[ContentPart]:
+    @staticmethod
+    def _captured_content_parts_to_proto(content: tuple[CaptureContentPart, ...]) -> list[ContentPart]:
         """Convert neutral text/image/file parts into stable AgentBreaker content parts.
 
         Args:
@@ -1141,7 +1146,8 @@ class RuntimeOrchestrator:
             )
         return parts
 
-    def _captured_tool_call_to_proto(self, call: CapturedToolCall) -> ToolCall:
+    @staticmethod
+    def _captured_tool_call_to_proto(call: CapturedToolCall) -> ToolCall:
         """Convert one SDK Tool call evidence object into the persistence protobuf type.
 
         Args:
@@ -1156,7 +1162,8 @@ class RuntimeOrchestrator:
             function=FunctionCall(name=call.tool_name, arguments=call.arguments),
         )
 
-    def _runtime_tool_call_to_proto(self, call: RuntimeToolCall) -> ToolCall:
+    @staticmethod
+    def _runtime_tool_call_to_proto(call: RuntimeToolCall) -> ToolCall:
         """Convert a provider-neutral replay Tool Call into the persistence protobuf type."""
         return ToolCall(
             id=call.call_id,
@@ -1282,7 +1289,8 @@ class RuntimeOrchestrator:
             )
         return context_messages
 
-    def _build_reference_context(self, references: list[PreparedConversationReference]) -> list[Message]:
+    @staticmethod
+    def _build_reference_context(references: list[PreparedConversationReference]) -> list[Message]:
         """Label server-authorized source transcripts as untrusted, read-only evidence."""
         messages = [
             Message(
@@ -1394,8 +1402,8 @@ class RuntimeOrchestrator:
                     )
             message.model_content = tuple(model_parts)
 
+    @staticmethod
     def _build_attachment_input(
-        self,
         conversation_request: ConversationRequest,
         prepared_files: list[PreparedConversationFile],
     ) -> AttachmentInput:
@@ -1458,7 +1466,8 @@ class RuntimeOrchestrator:
             additional_instruction=instruction,
         )
 
-    def _build_user_request(self, conversation_request: ConversationRequest) -> UserRequest:
+    @staticmethod
+    def _build_user_request(conversation_request: ConversationRequest) -> UserRequest:
         """Persist visible text plus stable file identities without expiring OSS URLs.
 
         Args:
@@ -1504,17 +1513,12 @@ class RuntimeOrchestrator:
         )
 
     @staticmethod
-    def _get_image_detail(detail: str) -> Literal["low", "high", "auto", "original"]:
+    def _get_image_detail(detail: str) -> ImageDetail:
         """Validate persisted image detail before using it at a provider boundary."""
-        if detail == "low":
-            return "low"
-        if detail == "high":
-            return "high"
-        if detail == "original":
-            return "original"
-        return "auto"
+        return detail if is_image_detail(detail) else "auto"
 
-    def _get_stable_file_id(self, url: str) -> str | None:
+    @staticmethod
+    def _get_stable_file_id(url: str) -> str | None:
         """Extract a file ID only from an AgentBreaker-owned stable reference URL.
 
         Args:
@@ -1526,7 +1530,8 @@ class RuntimeOrchestrator:
         prefix = "agentbreaker-file://"
         return url[len(prefix) :] if url.startswith(prefix) else None
 
-    def _get_file_preparation_error(self, files: list[PreparedConversationFile]) -> str:
+    @staticmethod
+    def _get_file_preparation_error(files: list[PreparedConversationFile]) -> str:
         """Select the first actionable file failure for the SSE response.
 
         Args:
@@ -1547,7 +1552,8 @@ class RuntimeOrchestrator:
                 return f"{file.original_filename}: {detail}"
         return "One or more files could not be prepared."
 
-    def _get_file_poll_delay(self, elapsed_seconds: float) -> float:
+    @staticmethod
+    def _get_file_poll_delay(elapsed_seconds: float) -> float:
         """Choose an adaptive readiness delay so slow parsing does not create an RPC hot loop.
 
         Args:
@@ -1562,7 +1568,8 @@ class RuntimeOrchestrator:
             return 2.0
         return 5.0
 
-    def _to_llm_message(self, message: Message) -> LlmConversationMessage:
+    @staticmethod
+    def _to_llm_message(message: Message) -> LlmConversationMessage:
         """Map a runtime message into the legacy normalized LLM protobuf.
 
         Args:

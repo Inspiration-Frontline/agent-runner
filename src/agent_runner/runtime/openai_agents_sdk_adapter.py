@@ -2,16 +2,15 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator, Sequence
-from dataclasses import dataclass, replace
-from typing import Any, Literal, Protocol
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal, Protocol, TypeIs
 from uuid import uuid4
 
 from agents import Agent, FunctionTool, Model, ModelSettings, Runner
-from agents.items import TResponseInputItem
+from agents.items import ModelResponse, TResponseInputItem
 from agents.result import RunResultStreaming
 from agents.retry import ModelRetrySettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
-from agents.tool import Tool
 from agents.tool_context import ToolContext
 from openai.types.responses.easy_input_message_param import EasyInputMessageParam
 from openai.types.responses.response_completed_event import ResponseCompletedEvent
@@ -57,6 +56,13 @@ from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+SdkMessageRole = Literal["user", "assistant", "system", "developer"]
+_SDK_MESSAGE_ROLES: frozenset[SdkMessageRole] = frozenset({"user", "assistant", "system", "developer"})
+
+
+def _is_sdk_message_role(role: str) -> TypeIs[SdkMessageRole]:
+    return role in _SDK_MESSAGE_ROLES
+
 
 class AgentModelFactory(Protocol):
     """Small model-factory boundary used by the SDK adapter and its tests."""
@@ -93,6 +99,40 @@ class PreparedSdkExecution:
     collector: ToolExecutionCollector
 
 
+@dataclass
+class StreamingSdkExecution:
+    """Mutable evidence collected while one SDK stream is active."""
+
+    prepared: PreparedSdkExecution
+    result: RunResultStreaming
+    run_start: int
+    trace_id: str
+    model_completed_times: list[int] = field(default_factory=list)
+    model_completed_usages: list[tuple[int, int, int]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CapturedTurnEvidence:
+    """Normalized output, Tool audit, and timing for one model response."""
+
+    response_content: str
+    tool_calls: list[CapturedToolCall]
+    executions: list[CapturedToolExecution]
+    llm_end: int
+    turn_end: int
+
+
+@dataclass(frozen=True)
+class CaptureBuildOptions:
+    """Shared immutable inputs used while reconstructing persisted model Turns."""
+
+    definitions: list[ToolDefinition]
+    collector: ToolExecutionCollector
+    trace_id: str
+    model_completed_times: list[int]
+    cancelled: bool
+
+
 class OpenAIAgentsSdkAdapter:
     """
     Adapter between AgentBreaker's runtime contracts and openai-agents-python.
@@ -127,90 +167,103 @@ class OpenAIAgentsSdkAdapter:
         cancellation_token: CancellationToken | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> AsyncGenerator[ModelStreamEvent]:
-        """Run one request through the SDK Tool loop and yield AgentBreaker semantic events.
-
-        The SDK owns repeated model/Tool scheduling. AgentBreaker wraps the configured decorated
-        FunctionTools only to collect persistence evidence and translate SDK events to SSE.
-        ``last_capture`` is finalized even when streaming fails or is cancelled.
-
-        Args:
-            agent: Resolved AgentBreaker definition.
-            context: Prompt, replay history, attachment metadata, and Tool context for this run.
-            cancellation_token: Optional request token that cancels SDK streaming and Tool work.
-            tool_registry: Registry containing the configured decorated Tools.
-
-        Yields:
-            Typed AgentBreaker runtime events consumed by the orchestrator.
-        """
-        # Agents SDK agents are declarative; Runner owns execution and streaming.
+        """Stream one SDK Agent run and always retain its durable capture evidence."""
         self.last_capture = AgentRunCapture()
+        execution = self._start_streaming_execution(agent, context, cancellation_token, tool_registry)
+        try:
+            async for event in self._stream_sdk_events(execution, cancellation_token):
+                yield event
+        finally:
+            self._finalize_stream_capture(execution, context, cancellation_token)
+
+    def _start_streaming_execution(
+        self,
+        agent: AgentDefinition,
+        context: AgentContext,
+        cancellation_token: CancellationToken | None,
+        tool_registry: ToolRegistry | None,
+    ) -> StreamingSdkExecution:
+        """Create the SDK run and its request-scoped evidence accumulator."""
         prepared = self._prepare_sdk_execution(
             agent=agent,
             context=context,
             cancellation_token=cancellation_token,
             tool_registry=tool_registry,
         )
-        sdk_input = self._build_input(context)
-        run_start = get_epoch_millis()
         trace_id = current_trace_id()
         if not trace_id:
             raise RuntimeError("Agent execution requires an active OpenTelemetry trace.")
-        model_completed_times: list[int] = []
-        model_completed_usages: list[tuple[int, int, int]] = []
-        # Runner recognizes model Tool Calls, invokes the FunctionTools attached to sdk_agent,
-        # appends their outputs to the next model input, and repeats until a final output.
+        run_start = get_epoch_millis()
         result = Runner.run_streamed(
             starting_agent=prepared.agent,
-            input=sdk_input,
+            input=self._build_input(context),
             max_turns=10,
         )
         if cancellation_token is not None:
             cancellation_token.add_callback(result.cancel)
+        return StreamingSdkExecution(prepared, result, run_start, trace_id)
 
+    async def _stream_sdk_events(
+        self,
+        execution: StreamingSdkExecution,
+        cancellation_token: CancellationToken | None,
+    ) -> AsyncGenerator[ModelStreamEvent]:
+        """Consume SDK events with normalized cancellation and error behavior."""
         try:
-            async for event in result.stream_events():
+            async for event in execution.result.stream_events():
                 if cancellation_token and cancellation_token.is_cancelled():
                     logger.info("Stream cancelled by token")
-                    result.cancel()
+                    execution.result.cancel()
                     break
-
-                converted = self._convert_stream_event(event, prepared.collector)
-                if isinstance(event, RawResponsesStreamEvent) and isinstance(event.data, ResponseCompletedEvent):
-                    model_completed_times.append(get_epoch_millis())
-                    usage = getattr(event.data.response, "usage", None)
-                    model_completed_usages.append(
-                        (
-                            getattr(usage, "input_tokens", 0) if usage is not None else 0,
-                            getattr(usage, "output_tokens", 0) if usage is not None else 0,
-                            getattr(usage, "total_tokens", 0) if usage is not None else 0,
-                        )
-                    )
+                self._record_stream_completion(execution, event)
+                converted = self._convert_stream_event(event, execution.prepared.collector)
                 if converted is not None:
                     yield converted
-
         except asyncio.CancelledError:
             logger.info("Stream cancelled")
-            result.cancel()
+            execution.result.cancel()
             raise
-        except TimeoutError as exc:
-            result.cancel()
+        except TimeoutError as error:
+            execution.result.cancel()
             logger.exception("SDK streaming timed out")
-            yield ModelError(str(exc))
-        except Exception as exc:
+            yield ModelError(str(error))
+        except Exception as error:
             logger.exception("Error during SDK streaming")
-            yield ModelError(str(exc))
-        finally:
-            self.last_capture = self._build_capture(
-                result=result,
-                context=context,
-                definitions=prepared.definitions,
-                collector=prepared.collector,
-                run_start=run_start,
-                trace_id=trace_id,
-                model_completed_times=model_completed_times,
-                model_completed_usages=model_completed_usages,
-                cancellation_token=cancellation_token,
+            yield ModelError(str(error))
+
+    @staticmethod
+    def _record_stream_completion(execution: StreamingSdkExecution, event: StreamEvent) -> None:
+        """Retain completion time and usage for each raw model response."""
+        if not isinstance(event, RawResponsesStreamEvent) or not isinstance(event.data, ResponseCompletedEvent):
+            return
+        usage = event.data.response.usage
+        execution.model_completed_times.append(get_epoch_millis())
+        execution.model_completed_usages.append(
+            (
+                usage.input_tokens if usage is not None else 0,
+                usage.output_tokens if usage is not None else 0,
+                usage.total_tokens if usage is not None else 0,
             )
+        )
+
+    def _finalize_stream_capture(
+        self,
+        execution: StreamingSdkExecution,
+        context: AgentContext,
+        cancellation_token: CancellationToken | None,
+    ) -> None:
+        """Build durable evidence after success, failure, or cancellation."""
+        self.last_capture = self._build_capture(
+            result=execution.result,
+            context=context,
+            definitions=execution.prepared.definitions,
+            collector=execution.prepared.collector,
+            run_start=execution.run_start,
+            trace_id=execution.trace_id,
+            model_completed_times=execution.model_completed_times,
+            model_completed_usages=execution.model_completed_usages,
+            cancellation_token=cancellation_token,
+        )
 
     async def run(
         self,
@@ -284,7 +337,6 @@ class OpenAIAgentsSdkAdapter:
         Returns:
             SDK Agent configured with provider timeout, retry, and parallel Tool policy.
         """
-        sdk_tools: list[Tool] = list(tools or ())
         return Agent(
             name=agent.name,
             instructions=system_prompt,
@@ -297,10 +349,11 @@ class OpenAIAgentsSdkAdapter:
                 retry=ModelRetrySettings(max_retries=self.settings.lite_llm_max_retries),
                 parallel_tool_calls=True,
             ),
-            tools=sdk_tools,
+            tools=[*tools] if tools else [],
         )
 
-    def _resolve_tool_definitions(self, agent: AgentDefinition, registry: ToolRegistry) -> list[ToolDefinition]:
+    @staticmethod
+    def _resolve_tool_definitions(agent: AgentDefinition, registry: ToolRegistry) -> list[ToolDefinition]:
         """Resolve configured Tool keys before model invocation.
 
         Args:
@@ -321,25 +374,13 @@ class OpenAIAgentsSdkAdapter:
             definitions.append(definition)
         return definitions
 
+    @staticmethod
     def _build_sdk_tools(
-        self,
         definitions: list[ToolDefinition],
         collector: ToolExecutionCollector,
         cancellation_token: CancellationToken | None,
     ) -> list[FunctionTool]:
-        """Wrap decorated SDK Tools with auditing while preserving their generated metadata.
-
-        ``dataclasses.replace`` keeps schema, strict mode, timeout, approval, guardrail, and future
-        FunctionTool options produced by ``@function_tool``. Only the invocation hook changes.
-
-        Args:
-            definitions: Frozen Tool definitions selected by the Agent.
-            collector: Request-scoped audit collector.
-            cancellation_token: Token propagated into each Tool invocation.
-
-        Returns:
-            SDK FunctionTools with auditing hooks attached.
-        """
+        """Wrap SDK Tools with auditing while preserving generated metadata."""
         tools: list[FunctionTool] = []
         for definition in definitions:
             if definition.function_tool is None:
@@ -374,97 +415,68 @@ class OpenAIAgentsSdkAdapter:
         return tools
 
     def _build_input(self, context: AgentContext) -> list[TResponseInputItem]:
-        """Convert provider-neutral messages into this SDK's Responses API input shapes.
-
-        Conversation Manager stores assistant Tool Calls and Tool results as neutral messages.
-        Responses input represents them as separate ``function_call`` and
-        ``function_call_output`` items, so this conversion remains at the SDK boundary.
-
-        Args:
-            context: Neutral typed history/current message including Tool Calls and model-only parts.
-
-        Returns:
-            Responses API input items with transient signed URLs confined to the current run.
-        """
-
-        def provider_content(message: Message) -> str | ResponseInputMessageContentListParam:
-            """Translate one neutral content list into provider-bound Responses parts.
-
-            Args:
-                message: Neutral runtime message with optional typed model-only content.
-
-            Returns:
-                Scalar text or Responses-compatible text/image parts.
-            """
-            if not message.model_content:
-                return message.content
-
-            converted: ResponseInputMessageContentListParam = []
-            for part in message.model_content:
-                if isinstance(part, ModelTextPart):
-                    text_part: ResponseInputTextParam = {"type": "input_text", "text": part.text}
-                    converted.append(text_part)
-                elif isinstance(part, ModelImagePart):
-                    image_part: ResponseInputImageParam = {
-                        "type": "input_image",
-                        "image_url": part.url,
-                        "detail": part.detail,
-                    }
-                    converted.append(image_part)
-            return converted
-
+        """Convert neutral messages into Responses API input items."""
         input_items: list[TResponseInputItem] = []
         for message in context.conversation_history:
-            if message.role == "assistant" and message.tool_calls:
-                if message.content:
-                    assistant_message: EasyInputMessageParam = {
-                        "role": "assistant",
-                        "content": message.content,
-                    }
-                    input_items.append(assistant_message)
-                for tool_call in message.tool_calls:
-                    function_call: ResponseFunctionToolCallParam = {
-                        "type": "function_call",
-                        "call_id": tool_call.call_id,
-                        "name": tool_call.function_name,
-                        "arguments": tool_call.arguments,
-                    }
-                    input_items.append(function_call)
-            elif message.role == "tool":
-                function_output: FunctionCallOutput = {
-                    "type": "function_call_output",
-                    "call_id": message.tool_call_id or "",
-                    "output": message.content,
-                }
-                input_items.append(function_output)
-            else:
-                sdk_message: EasyInputMessageParam = {
-                    "role": self._get_sdk_message_role(message.role),
-                    "content": provider_content(message),
-                }
-                input_items.append(sdk_message)
-
-        current_message: EasyInputMessageParam = {
-            "role": "user",
-            "content": provider_content(context.current_message),
-        }
-        input_items.append(current_message)
+            input_items.extend(self._build_message_input_items(message))
+        input_items.extend(self._build_message_input_items(context.current_message))
         return input_items
 
+    def _build_message_input_items(self, message: Message) -> list[TResponseInputItem]:
+        """Convert one neutral message, including Tool linkage, into SDK items."""
+        if message.role == "assistant" and message.tool_calls:
+            items: list[TResponseInputItem] = []
+            if message.content:
+                items.append({"role": "assistant", "content": message.content})
+            items.extend(
+                ResponseFunctionToolCallParam(
+                    type="function_call",
+                    call_id=call.call_id,
+                    name=call.function_name,
+                    arguments=call.arguments,
+                )
+                for call in message.tool_calls
+            )
+            return items
+        if message.role == "tool":
+            if not message.tool_call_id:
+                raise ValueError("A Tool result message requires a non-empty tool_call_id.")
+            output = FunctionCallOutput(
+                type="function_call_output",
+                call_id=message.tool_call_id,
+                output=message.content,
+            )
+            return [output]
+        sdk_message = EasyInputMessageParam(
+            role=self._get_sdk_message_role(message.role),
+            content=self._convert_provider_content(message),
+        )
+        return [sdk_message]
+
     @staticmethod
-    def _get_sdk_message_role(role: str) -> Literal["user", "assistant", "system", "developer"]:
+    def _convert_provider_content(message: Message) -> str | ResponseInputMessageContentListParam:
+        """Translate neutral content into provider-bound text/image parts."""
+        if not message.model_content:
+            return message.content
+        converted: ResponseInputMessageContentListParam = []
+        for part in message.model_content:
+            if isinstance(part, ModelTextPart):
+                converted.append(ResponseInputTextParam(type="input_text", text=part.text))
+            elif isinstance(part, ModelImagePart):
+                converted.append(
+                    ResponseInputImageParam(type="input_image", image_url=part.url, detail=part.detail)
+                )
+        return converted
+
+    @staticmethod
+    def _get_sdk_message_role(role: str) -> SdkMessageRole:
         """Validate a provider-neutral role before crossing the OpenAI SDK boundary."""
-        if role == "user":
-            return "user"
-        if role == "assistant":
-            return "assistant"
-        if role == "system":
-            return "system"
-        if role == "developer":
-            return "developer"
+        if _is_sdk_message_role(role):
+            return role
         raise ValueError(f"Unsupported OpenAI input message role: {role}")
 
-    def _to_capture_message(self, message: Message) -> CapturedMessage:
+    @staticmethod
+    def _to_capture_message(message: Message) -> CapturedMessage:
         """Keep stable provider-neutral content while excluding transient signed SDK URLs.
 
         Args:
@@ -480,55 +492,54 @@ class OpenAIAgentsSdkAdapter:
         event: StreamEvent,
         collector: ToolExecutionCollector | None = None,
     ) -> ModelStreamEvent | None:
-        """Map SDK raw/run-item events to the small event vocabulary exposed over SSE.
-
-        Args:
-            event: SDK stream event.
-            collector: Collector used to enrich Tool result events with audit status.
-
-        Returns:
-            Typed runtime event, or ``None`` for SDK bookkeeping events.
-        """
+        """Map SDK events to the small event vocabulary exposed over SSE."""
         if isinstance(event, RawResponsesStreamEvent):
-            if isinstance(event.data, ResponseTextDeltaEvent):
-                if not event.data.delta:
-                    return None
-                return ModelTokenDelta(event.data.delta)
-
-            if isinstance(event.data, ResponseCompletedEvent):
-                return self._convert_response_completed_usage(event.data)
-
-            return None
-
+            return self._convert_raw_response_event(event)
         if isinstance(event, RunItemStreamEvent):
-            if event.name == "tool_called":
-                raw_item = getattr(event.item, "raw_item", None)
-                captured_call = CapturedToolCall(
-                    tool_call_id=str(getattr(event.item, "call_id", None) or ""),
-                    tool_name=str(getattr(raw_item, "name", "")) if raw_item is not None else "",
-                    arguments=str(getattr(raw_item, "arguments", "{}")) if raw_item is not None else "{}",
-                )
-                if collector is not None:
-                    collector.record_call(captured_call)
-                return ModelToolStarted(
-                    tool_name=captured_call.tool_name,
-                    tool_call_id=captured_call.tool_call_id,
-                    arguments_json=captured_call.arguments,
-                )
-
-            if event.name == "tool_output":
-                tool_call_id = str(getattr(event.item, "call_id", None) or "")
-                execution = collector.get(tool_call_id) if collector is not None else None
-                return ModelToolCompleted(
-                    tool_name=execution.tool_name if execution is not None else "",
-                    tool_call_id=tool_call_id,
-                    result=getattr(event.item, "output", None),
-                    status=execution.status if execution is not None else "COMPLETED",
-                )
-
+            return self._convert_run_item_event(event, collector)
         return None
 
-    def _convert_response_completed_usage(self, event_data: ResponseCompletedEvent) -> ModelUsage | None:
+    def _convert_raw_response_event(self, event: RawResponsesStreamEvent) -> ModelStreamEvent | None:
+        """Convert raw token and usage events while ignoring SDK bookkeeping."""
+        if isinstance(event.data, ResponseTextDeltaEvent):
+            return ModelTokenDelta(event.data.delta) if event.data.delta else None
+        if isinstance(event.data, ResponseCompletedEvent):
+            return self._convert_response_completed_usage(event.data)
+        return None
+
+    @staticmethod
+    def _convert_run_item_event(
+        event: RunItemStreamEvent,
+        collector: ToolExecutionCollector | None,
+    ) -> ModelStreamEvent | None:
+        """Convert SDK Tool events and update request-scoped audit evidence."""
+        if event.name == "tool_called":
+            raw_item = getattr(event.item, "raw_item", None)
+            captured_call = CapturedToolCall(
+                tool_call_id=str(getattr(event.item, "call_id", None) or ""),
+                tool_name=str(getattr(raw_item, "name", "")) if raw_item is not None else "",
+                arguments=str(getattr(raw_item, "arguments", "{}")) if raw_item is not None else "{}",
+            )
+            if collector is not None:
+                collector.record_call(captured_call)
+            return ModelToolStarted(
+                tool_name=captured_call.tool_name,
+                tool_call_id=captured_call.tool_call_id,
+                arguments_json=captured_call.arguments,
+            )
+        if event.name == "tool_output":
+            tool_call_id = str(getattr(event.item, "call_id", None) or "")
+            execution = collector.get(tool_call_id) if collector is not None else None
+            return ModelToolCompleted(
+                tool_name=execution.tool_name if execution is not None else "",
+                tool_call_id=tool_call_id,
+                result=getattr(event.item, "output", None),
+                status=execution.status if execution is not None else "COMPLETED",
+            )
+        return None
+
+    @staticmethod
+    def _convert_response_completed_usage(event_data: ResponseCompletedEvent) -> ModelUsage | None:
         """Extract provider usage when a completed response reports it.
 
         Args:
@@ -560,39 +571,10 @@ class OpenAIAgentsSdkAdapter:
         model_completed_usages: list[tuple[int, int, int]],
         cancellation_token: CancellationToken | None,
     ) -> AgentRunCapture:
-        """Reconstruct durable provider-neutral Turns from one completed or interrupted SDK run.
-
-        One SDK raw response corresponds to one LLM Call/Turn. The first request stores a complete
-        snapshot; later requests store only the assistant Tool Calls and Tool results appended by
-        the preceding Turn.
-
-        Args:
-            result: SDK run result containing raw responses.
-            context: Initial provider-neutral execution context.
-            definitions: Frozen Tool definitions.
-            collector: Observed Tool calls and executions.
-            run_start: Epoch-millisecond request start.
-            trace_id: Request trace identifier.
-            model_completed_times: Completion timestamps observed from SDK events.
-            model_completed_usages: Provider usage tuples in response order.
-            cancellation_token: Optional token indicating interrupted capture.
-
-        Returns:
-            Durable provider-neutral capture for Conversation Manager persistence.
-        """
-        # Rebuild the normalized context supplied to the first model call. System instructions are
-        # stored for audit even though the SDK receives them through Agent.instructions.
-        initial_messages = [CapturedMessage(role="system", content=context.system_prompt)]
-        initial_messages.extend(self._to_capture_message(message) for message in context.conversation_history)
-        initial_messages.append(self._to_capture_message(context.current_message))
-
-        turns: list[CapturedModelTurn] = []
-        request_messages = initial_messages
-        full_model_input = list(initial_messages)
-        previous_turn_end = run_start
+        """Reconstruct durable provider-neutral Turns from one SDK run."""
+        initial_messages = self._build_initial_capture_messages(context)
         raw_responses = list(result.raw_responses)
-        # Cancellation can remove SDK raw_responses after tool_called was already emitted. Preserve
-        # that observed evidence as a partial Turn instead of losing the Tool Call entirely.
+        cancelled = cancellation_token is not None and cancellation_token.is_cancelled()
         if not raw_responses and collector.list_calls():
             return self._build_observed_partial_capture(
                 initial_messages=initial_messages,
@@ -602,95 +584,159 @@ class OpenAIAgentsSdkAdapter:
                 trace_id=trace_id,
                 model_completed_times=model_completed_times,
                 model_completed_usages=model_completed_usages,
-                cancelled=cancellation_token is not None and cancellation_token.is_cancelled(),
+                cancelled=cancelled,
             )
-        assigned_tool_call_ids: set[str] = set()
-        # Normalize every actual model response independently so one Tool loop becomes multiple
-        # persisted Turns rather than one flattened request/answer pair.
-        for index, response in enumerate(raw_responses):
-            event_llm_end = (
-                model_completed_times[index]
-                if index < len(model_completed_times)
-                else max(previous_turn_end, get_epoch_millis())
-            )
-            normalized_output = self._normalize_response_output(response.output)
-            response_content = normalized_output.content
-            tool_calls = list(normalized_output.tool_calls)
-            if not tool_calls and index == len(raw_responses) - 1:
-                # The SDK may clear a cancelled response's output after already publishing
-                # tool_called events. Those events remain authoritative audit evidence.
-                tool_calls = [call for call in collector.list_calls() if call.tool_call_id not in assigned_tool_call_ids]
-            assigned_tool_call_ids.update(call.tool_call_id for call in tool_calls)
-            executions = self._complete_execution_audit(
-                tool_calls=tool_calls,
-                definitions=definitions,
-                collector=collector,
-                fallback_time=event_llm_end,
-                cancelled=cancellation_token is not None and cancellation_token.is_cancelled(),
-            )
-            # Some providers begin scheduling Tool handlers before the SDK publishes the response
-            # completed event. Persist the LLM boundary no later than the first observed Tool start.
-            llm_end = min([event_llm_end, *(execution.start_time for execution in executions)])
-            llm_end = max(previous_turn_end, llm_end)
-            turn_end = max([llm_end, *(execution.end_time for execution in executions)])
-            # Raw payloads are audit snapshots assembled from SDK objects. Logical replay uses the
-            # normalized messages above and never depends on these provider-oriented JSON strings.
-            raw_request = json.dumps(
-                {
-                    "messages": [captured_message_to_dict(message) for message in full_model_input],
-                    "tools": [self._convert_definition_to_dict(definition) for definition in definitions],
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            raw_response = json.dumps(
-                {
-                    "output": [self._dump_model(item) for item in response.output],
-                    "observed_tool_calls": [
-                        {
-                            "id": call.tool_call_id,
-                            "name": call.tool_name,
-                            "arguments": call.arguments,
-                        }
-                        for call in tool_calls
-                    ],
-                    "response_id": getattr(response, "response_id", None),
-                    "request_id": getattr(response, "request_id", None),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-                default=str,
+        options = CaptureBuildOptions(
+            definitions, collector, trace_id, model_completed_times, cancelled
+        )
+        turns = self._build_captured_turns(raw_responses, initial_messages, run_start, options)
+        return AgentRunCapture(turns=turns, final_output=str(result.final_output or ""))
+
+    def _build_initial_capture_messages(self, context: AgentContext) -> list[CapturedMessage]:
+        """Build the complete stable message snapshot supplied to the first model call."""
+        messages = [CapturedMessage(role="system", content=context.system_prompt)]
+        messages.extend(self._to_capture_message(item) for item in context.conversation_history)
+        messages.append(self._to_capture_message(context.current_message))
+        return messages
+
+    def _build_captured_turns(
+        self,
+        responses: list[ModelResponse],
+        initial_messages: list[CapturedMessage],
+        run_start: int,
+        options: CaptureBuildOptions,
+    ) -> list[CapturedModelTurn]:
+        """Build one persisted Turn per actual SDK model response."""
+        turns: list[CapturedModelTurn] = []
+        request_messages = initial_messages
+        full_model_input = list(initial_messages)
+        previous_turn_end = run_start
+        assigned_ids: set[str] = set()
+        for index, response in enumerate(responses):
+            evidence = self._build_turn_evidence(
+                response, index, len(responses), previous_turn_end, assigned_ids, options
             )
             turns.append(
-                CapturedModelTurn(
-                    request_messages=request_messages,
-                    message_storage_mode="FULL_SNAPSHOT" if index == 0 else "APPEND_DELTA",
-                    tools=definitions,
-                    response_content=response_content,
-                    response_tool_calls=tool_calls,
-                    tool_executions=executions,
-                    request_id=(
-                        getattr(response, "request_id", None) or getattr(response, "response_id", None) or str(uuid4())
-                    ),
-                    trace_id=trace_id,
-                    start_time=previous_turn_end,
-                    llm_end_time=llm_end,
-                    end_time=turn_end,
-                    prompt_tokens=response.usage.input_tokens,
-                    completion_tokens=response.usage.output_tokens,
-                    total_tokens=response.usage.total_tokens,
-                    raw_request=raw_request,
-                    raw_response=raw_response,
+                self._build_captured_turn(
+                    response, evidence, request_messages, full_model_input,
+                    previous_turn_end, index, options,
                 )
             )
-            # Only Tool-producing responses have a following LLM request. Persist precisely the
-            # assistant call plus ordered execution outputs required for that next request.
-            request_messages = self._next_turn_delta(response_content, tool_calls, executions)
+            request_messages = self._next_turn_delta(
+                evidence.response_content, evidence.tool_calls, evidence.executions
+            )
             full_model_input.extend(request_messages)
-            previous_turn_end = turn_end
-        return AgentRunCapture(turns=turns, final_output=str(result.final_output or ""))
+            previous_turn_end = evidence.turn_end
+        return turns
+
+    def _build_turn_evidence(
+        self,
+        response: ModelResponse,
+        index: int,
+        response_count: int,
+        previous_turn_end: int,
+        assigned_ids: set[str],
+        options: CaptureBuildOptions,
+    ) -> CapturedTurnEvidence:
+        """Normalize response output, fill cancelled calls, and derive Turn timing."""
+        event_end = (
+            options.model_completed_times[index]
+            if index < len(options.model_completed_times)
+            else max(previous_turn_end, get_epoch_millis())
+        )
+        normalized = self._normalize_response_output(response.output)
+        tool_calls = list(normalized.tool_calls)
+        if not tool_calls and index == response_count - 1:
+            tool_calls = [
+                call for call in options.collector.list_calls()
+                if call.tool_call_id not in assigned_ids
+            ]
+        assigned_ids.update(call.tool_call_id for call in tool_calls)
+        executions = self._complete_execution_audit(
+            tool_calls=tool_calls,
+            definitions=options.definitions,
+            collector=options.collector,
+            fallback_time=event_end,
+            cancelled=options.cancelled,
+        )
+        llm_end = max(previous_turn_end, min([event_end, *(item.start_time for item in executions)]))
+        turn_end = max([llm_end, *(item.end_time for item in executions)])
+        return CapturedTurnEvidence(normalized.content, tool_calls, executions, llm_end, turn_end)
+
+    def _build_captured_turn(
+        self,
+        response: ModelResponse,
+        evidence: CapturedTurnEvidence,
+        request_messages: list[CapturedMessage],
+        full_model_input: list[CapturedMessage],
+        start_time: int,
+        index: int,
+        options: CaptureBuildOptions,
+    ) -> CapturedModelTurn:
+        """Create one durable model Turn from normalized response evidence."""
+        request_id = (
+            getattr(response, "request_id", None)
+            or getattr(response, "response_id", None)
+            or str(uuid4())
+        )
+        return CapturedModelTurn(
+            request_messages=request_messages,
+            message_storage_mode="FULL_SNAPSHOT" if index == 0 else "APPEND_DELTA",
+            tools=options.definitions,
+            response_content=evidence.response_content,
+            response_tool_calls=evidence.tool_calls,
+            tool_executions=evidence.executions,
+            request_id=request_id,
+            trace_id=options.trace_id,
+            start_time=start_time,
+            llm_end_time=evidence.llm_end,
+            end_time=evidence.turn_end,
+            prompt_tokens=response.usage.input_tokens,
+            completion_tokens=response.usage.output_tokens,
+            total_tokens=response.usage.total_tokens,
+            raw_request=self._build_raw_request(full_model_input, options.definitions),
+            raw_response=self._build_raw_response(response, evidence.tool_calls),
+        )
+
+    def _build_raw_request(
+        self,
+        messages: list[CapturedMessage],
+        definitions: list[ToolDefinition],
+    ) -> str:
+        """Serialize deterministic request audit data."""
+        return json.dumps(
+            {
+                "messages": [captured_message_to_dict(message) for message in messages],
+                "tools": [self._convert_definition_to_dict(item) for item in definitions],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    def _build_raw_response(
+        self,
+        response: ModelResponse,
+        tool_calls: list[CapturedToolCall],
+    ) -> str:
+        """Serialize provider response data and normalized Tool Calls for audit."""
+        return json.dumps(
+            {
+                "output": [self._dump_model(item) for item in response.output],
+                "observed_tool_calls": [self._captured_tool_call_to_dict(call) for call in tool_calls],
+                "response_id": getattr(response, "response_id", None),
+                "request_id": getattr(response, "request_id", None),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
+
+    @staticmethod
+    def _captured_tool_call_to_dict(call: CapturedToolCall) -> dict[str, str]:
+        """Serialize one captured Tool Call for raw audit JSON."""
+        return {"id": call.tool_call_id, "name": call.tool_name, "arguments": call.arguments}
 
     def _build_observed_partial_capture(
         self,
@@ -704,24 +750,7 @@ class OpenAIAgentsSdkAdapter:
         model_completed_usages: list[tuple[int, int, int]],
         cancelled: bool,
     ) -> AgentRunCapture:
-        """Build a cancellable audit Turn when SDK raw output is no longer available.
-
-        This path uses model-emitted ``tool_called`` events and collected executions. It does not
-        invent a successful response; the owning Round/Turn remains FAILED or CANCELLED.
-
-        Args:
-            initial_messages: Messages supplied to the first model call.
-            definitions: Frozen Tool definitions.
-            collector: Calls observed before cancellation.
-            run_start: Epoch-millisecond request start.
-            trace_id: Request trace identifier.
-            model_completed_times: Observed model completion timestamps.
-            model_completed_usages: Observed provider usage tuples.
-            cancelled: Whether cancellation caused the missing raw response.
-
-        Returns:
-            Partial capture preserving observed Tool evidence.
-        """
+        """Preserve observed Tool evidence when cancellation removes SDK raw output."""
         initial_messages = [self._coerce_capture_message(message) for message in initial_messages]
         tool_calls = collector.list_calls()
         event_llm_end = model_completed_times[-1] if model_completed_times else get_epoch_millis()
@@ -737,30 +766,30 @@ class OpenAIAgentsSdkAdapter:
         prompt_tokens, completion_tokens, total_tokens = (
             model_completed_usages[-1] if model_completed_usages else (0, 0, 0)
         )
-        raw_request = json.dumps(
-            {
-                "messages": [captured_message_to_dict(message) for message in initial_messages],
-                "tools": [self._convert_definition_to_dict(definition) for definition in definitions],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
+        turn = self._build_partial_turn(
+            initial_messages, definitions, tool_calls, executions, trace_id, run_start,
+            llm_end, turn_end, prompt_tokens, completion_tokens, total_tokens, cancelled,
         )
-        raw_response = json.dumps(
-            {
-                "output": [],
-                "observed_tool_calls": [
-                    {"id": call.tool_call_id, "name": call.tool_name, "arguments": call.arguments}
-                    for call in tool_calls
-                ],
-                "raw_response_removed_by_sdk_cancellation": cancelled,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        turn = CapturedModelTurn(
-            request_messages=initial_messages,
+        return AgentRunCapture(turns=[turn], final_output="")
+
+    def _build_partial_turn(
+        self,
+        messages: list[CapturedMessage],
+        definitions: list[ToolDefinition],
+        tool_calls: list[CapturedToolCall],
+        executions: list[CapturedToolExecution],
+        trace_id: str,
+        run_start: int,
+        llm_end: int,
+        turn_end: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        cancelled: bool,
+    ) -> CapturedModelTurn:
+        """Create the single failed or cancelled Turn for partial SDK evidence."""
+        return CapturedModelTurn(
+            request_messages=messages,
             message_storage_mode="FULL_SNAPSHOT",
             tools=definitions,
             response_content="",
@@ -774,10 +803,26 @@ class OpenAIAgentsSdkAdapter:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
-            raw_request=raw_request,
-            raw_response=raw_response,
+            raw_request=self._build_raw_request(messages, definitions),
+            raw_response=self._build_partial_raw_response(tool_calls, cancelled),
         )
-        return AgentRunCapture(turns=[turn], final_output="")
+
+    def _build_partial_raw_response(
+        self,
+        tool_calls: list[CapturedToolCall],
+        cancelled: bool,
+    ) -> str:
+        """Serialize observed Tool Calls when no provider response survives."""
+        return json.dumps(
+            {
+                "output": [],
+                "observed_tool_calls": [self._captured_tool_call_to_dict(call) for call in tool_calls],
+                "raw_response_removed_by_sdk_cancellation": cancelled,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
 
     def _complete_execution_audit(
         self,
@@ -788,21 +833,7 @@ class OpenAIAgentsSdkAdapter:
         fallback_time: int,
         cancelled: bool,
     ) -> list[CapturedToolExecution]:
-        """Guarantee one terminal execution record for every model-emitted Tool Call.
-
-        Missing outcomes can occur when cancellation wins before a Tool coroutine starts. The
-        synthesized FAILED/CANCELLED record makes the one-to-one persistence invariant explicit.
-
-        Args:
-            tool_calls: Model-emitted calls observed by the collector.
-            definitions: Frozen definitions used to resolve Tool keys.
-            collector: Existing successful/failed executions.
-            fallback_time: Timestamp used for synthesized records.
-            cancelled: Whether missing executions should be marked CANCELLED.
-
-        Returns:
-            Complete execution list aligned with model-emitted calls.
-        """
+        """Guarantee one terminal execution record per model-emitted Tool Call."""
         definitions_by_name = {definition.tool_name: definition for definition in definitions}
         executions: list[CapturedToolExecution] = []
         for tool_call in tool_calls:
@@ -810,41 +841,50 @@ class OpenAIAgentsSdkAdapter:
             if execution is not None:
                 executions.append(execution)
                 continue
-
-            definition = definitions_by_name.get(tool_call.tool_name)
-            status = "CANCELLED" if cancelled else "FAILED"
-            error_message = (
-                "Generation cancelled before the Tool produced a result."
-                if cancelled
-                else "Tool execution did not produce an auditable result."
-            )
-            result_content = (
-                ""
-                if cancelled
-                else json.dumps(
-                    {"status": "error", "error": error_message},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
-            )
             executions.append(
-                CapturedToolExecution(
-                    tool_call_id=tool_call.tool_call_id,
-                    tool_key=definition.tool_key if definition is not None else "unknown",
-                    tool_name=tool_call.tool_name,
-                    arguments=tool_call.arguments,
-                    status=status,
-                    result_content=result_content,
-                    raw_result=result_content,
-                    error_message=error_message,
-                    start_time=fallback_time,
-                    end_time=fallback_time,
+                self._build_missing_tool_execution(
+                    tool_call,
+                    definitions_by_name.get(tool_call.tool_name),
+                    fallback_time,
+                    cancelled,
                 )
             )
         return executions
 
-    def _normalize_response_output(self, outputs: list[Any]) -> NormalizedModelOutput:
+    @staticmethod
+    def _build_missing_tool_execution(
+        tool_call: CapturedToolCall,
+        definition: ToolDefinition | None,
+        fallback_time: int,
+        cancelled: bool,
+    ) -> CapturedToolExecution:
+        """Build explicit failed/cancelled evidence when no Tool result exists."""
+        error_message = (
+            "Generation cancelled before the Tool produced a result."
+            if cancelled
+            else "Tool execution did not produce an auditable result."
+        )
+        result_content = "" if cancelled else json.dumps(
+            {"status": "error", "error": error_message},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return CapturedToolExecution(
+            tool_call_id=tool_call.tool_call_id,
+            tool_key=definition.tool_key if definition is not None else "unknown",
+            tool_name=tool_call.tool_name,
+            arguments=tool_call.arguments,
+            status="CANCELLED" if cancelled else "FAILED",
+            result_content=result_content,
+            raw_result=result_content,
+            error_message=error_message,
+            start_time=fallback_time,
+            end_time=fallback_time,
+        )
+
+    @staticmethod
+    def _normalize_response_output(outputs: list[Any]) -> NormalizedModelOutput:
         """Extract assistant text and Tool calls from heterogeneous SDK response items.
 
         Args:
@@ -872,7 +912,8 @@ class OpenAIAgentsSdkAdapter:
                 )
         return NormalizedModelOutput(content="".join(text_parts), tool_calls=tuple(tool_calls))
 
-    def _coerce_capture_message(self, message: CapturedMessage | dict[str, Any]) -> CapturedMessage:
+    @staticmethod
+    def _coerce_capture_message(message: CapturedMessage | dict[str, Any]) -> CapturedMessage:
         """Accept legacy test/provider snapshots at the JSON boundary before internal capture."""
         if isinstance(message, CapturedMessage):
             return message
@@ -892,8 +933,8 @@ class OpenAIAgentsSdkAdapter:
             tool_call_id=str(message.get("tool_call_id", "")) or None,
         )
 
+    @staticmethod
     def _next_turn_delta(
-        self,
         response_content: str,
         tool_calls: list[CapturedToolCall],
         executions: list[CapturedToolExecution],
@@ -937,7 +978,8 @@ class OpenAIAgentsSdkAdapter:
             )
         return messages
 
-    def _convert_definition_to_dict(self, definition: ToolDefinition) -> dict[str, Any]:
+    @staticmethod
+    def _convert_definition_to_dict(definition: ToolDefinition) -> dict[str, Any]:
         """Serialize a Tool definition into deterministic raw-request audit JSON.
 
         Args:
@@ -956,7 +998,8 @@ class OpenAIAgentsSdkAdapter:
             "definition_hash": definition.definition_hash,
         }
 
-    def _dump_model(self, value: Any) -> Any:
+    @staticmethod
+    def _dump_model(value: Any) -> Any:
         """Convert an SDK response item, not an LLM model, into JSON-compatible audit data.
 
         SDK output items are usually Pydantic models, while provider adapters may already return

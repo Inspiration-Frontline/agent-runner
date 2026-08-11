@@ -106,6 +106,40 @@ def test_build_input_converts_provider_neutral_tool_history_to_responses_items()
     ]
 
 
+def test_build_input_rejects_tool_result_without_call_id() -> None:
+    runtime = OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory())
+    context = AgentContext(
+        agent_config=_agent_config(),
+        system_prompt="system",
+        conversation_history=[Message(role="tool", content='{"result":42}')],
+        user_profile=UserProfile(),
+        rag_chunks=[],
+        current_message=Message(role="user", content="continue"),
+        tool_specs=(),
+    )
+
+    with pytest.raises(ValueError, match="non-empty tool_call_id"):
+        runtime._build_input(context)
+
+
+@pytest.mark.parametrize("role", ["user", "assistant", "system", "developer"])
+def test_sdk_message_role_accepts_supported_roles(role: str) -> None:
+    assert OpenAIAgentsSdkAdapter._get_sdk_message_role(role) == role
+
+
+def test_sdk_message_role_rejects_unsupported_role() -> None:
+    with pytest.raises(ValueError, match="Unsupported OpenAI input message role"):
+        OpenAIAgentsSdkAdapter._get_sdk_message_role("tool")
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [("low", "low"), ("high", "high"), ("auto", "auto"), ("original", "original"), ("", "auto")],
+)
+def test_orchestrator_normalizes_image_detail(detail: str, expected: str) -> None:
+    assert RuntimeOrchestrator._get_image_detail(detail) == expected
+
+
 def test_build_sdk_agent_uses_agents_sdk_model() -> None:
     model_factory = DummyModelFactory()
     runtime = OpenAIAgentsSdkAdapter(model_factory=model_factory)

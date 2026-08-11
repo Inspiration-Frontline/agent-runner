@@ -166,8 +166,8 @@ class MCPManager:
             if connection:
                 await self.release_connection(server_id, connection)
 
+    @staticmethod
     async def _execute_tool_call(
-        self,
         connection: Any,
         tool_name: str,
         arguments: dict[str, Any],

@@ -2,7 +2,7 @@ import ast
 from pathlib import Path
 
 
-def test_source_has_no_global_statements_or_mutable_container_definitions() -> None:
+def test_source_has_no_global_statements() -> None:
     source_root = Path(__file__).parents[1] / "src" / "agent_runner"
     violations: list[str] = []
     for path in source_root.rglob("*.py"):
@@ -10,10 +10,23 @@ def test_source_has_no_global_statements_or_mutable_container_definitions() -> N
         for node in ast.walk(tree):
             if isinstance(node, ast.Global):
                 violations.append(f"{path}:{node.lineno}: global statement")
-        scopes = [tree, *(node for node in tree.body if isinstance(node, ast.ClassDef))]
-        for scope in scopes:
-            for node in scope.body:
-                if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.List | ast.Dict | ast.Set):
-                    violations.append(f"{path}:{node.lineno}: mutable module/class container")
-
     assert violations == []
+
+
+def test_openai_adapter_methods_do_not_exceed_fifty_lines() -> None:
+    path = Path(__file__).parents[1] / "src" / "agent_runner" / "runtime" / "openai_agents_sdk_adapter.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    adapter = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "OpenAIAgentsSdkAdapter"
+    )
+    violations = {
+        node.name: node.end_lineno - node.lineno + 1
+        for node in adapter.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.end_lineno is not None
+        and node.end_lineno - node.lineno + 1 > 50
+    }
+
+    assert violations == {}

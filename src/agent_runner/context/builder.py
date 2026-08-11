@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypeIs
 
 from agent_runner.config import AgentConfig, Settings
 from agent_runner.tools.registry import ToolDefinition, ToolRegistry
@@ -12,6 +12,14 @@ from .rag_adapter import RAGAdapter
 from .truncation import TokenBudgetManager
 
 logger = logging.getLogger(__name__)
+
+ImageDetail = Literal["low", "high", "auto", "original"]
+_IMAGE_DETAILS: frozenset[ImageDetail] = frozenset({"low", "high", "auto", "original"})
+
+
+def is_image_detail(value: str) -> TypeIs[ImageDetail]:
+    """Return whether a string is a supported provider image detail."""
+    return value in _IMAGE_DETAILS
 
 
 @dataclass
@@ -27,7 +35,7 @@ class ModelImagePart:
 
     file_id: str
     url: str
-    detail: Literal["low", "high", "auto", "original"] = "auto"
+    detail: ImageDetail = "auto"
 
 
 ModelContentPart = ModelTextPart | ModelImagePart
@@ -45,7 +53,7 @@ class CaptureFilePart:
     """Durable AgentBreaker file reference that can be re-signed during replay."""
 
     file_id: str
-    detail: Literal["low", "high", "auto", "original"] = "auto"
+    detail: ImageDetail = "auto"
 
 
 CaptureContentPart = CaptureTextPart | CaptureFilePart
@@ -281,7 +289,8 @@ class ContextBuilder:
             ),
         )
 
-    async def _load_conversation_history(self, conversation_id: str | None) -> list[Message]:
+    @staticmethod
+    async def _load_conversation_history(conversation_id: str | None) -> list[Message]:
         """
         Load conversation history from storage.
 
