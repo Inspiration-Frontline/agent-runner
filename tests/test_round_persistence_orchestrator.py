@@ -1,9 +1,16 @@
+import asyncio
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
+import pytest
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import ResponseBase
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
     ConversationRoundHistory,
+    ConversationRoundMutationResult,
+    CreateConversationRoundCheckpointRequest,
+    CreateConversationRoundCheckpointResponse,
+    FinalizeConversationRoundRequest,
+    FinalizeConversationRoundResponse,
     GetConversationRoundHistoryResponse,
     SaveConversationRoundRequest,
     SaveConversationRoundResponse,
@@ -59,6 +66,27 @@ class FakeConversationClient:
                 success=self.save_success,
                 message="" if self.save_success else "save failed",
             )
+        )
+
+
+class CheckpointConversationClient(FakeConversationClient):
+    def __init__(self) -> None:
+        super().__init__(save_success=True)
+        self.finalize_request: FinalizeConversationRoundRequest | None = None
+
+    async def create_round_checkpoint(
+        self, request: CreateConversationRoundCheckpointRequest
+    ) -> CreateConversationRoundCheckpointResponse:
+        return CreateConversationRoundCheckpointResponse(
+            base=ResponseBase(code=0, success=True),
+            data=ConversationRoundMutationResult(committed_revision=0),
+        )
+
+    async def finalize_round(self, request: FinalizeConversationRoundRequest) -> FinalizeConversationRoundResponse:
+        self.finalize_request = request
+        return FinalizeConversationRoundResponse(
+            base=ResponseBase(code=0, success=True),
+            data=ConversationRoundMutationResult(committed_revision=1),
         )
 
 
@@ -119,6 +147,21 @@ class FakeRuntime:
         yield {"type": "usage", "prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
 
 
+class BlockingRuntime:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def run_streamed(
+        self,
+        agent: AgentDefinition,
+        context: AgentContext,
+        token: "FakeToken",
+    ) -> AsyncGenerator[dict[str, object]]:
+        self.started.set()
+        await asyncio.Event().wait()
+        yield {"type": "token_delta", "content": "unreachable"}
+
+
 class FakeToken:
     def is_cancelled(self) -> bool:
         return False
@@ -177,6 +220,31 @@ async def test_persistence_failure_never_reports_persisted_or_done() -> None:
     assert StreamEventType.PERSISTED not in [event.type for event in events]
     assert StreamEventType.DONE not in [event.type for event in events]
     assert lock.released is True
+
+
+async def test_task_cancellation_finalizes_an_existing_checkpoint() -> None:
+    orchestrator, _, _ = _orchestrator(save_success=True)
+    runtime = BlockingRuntime()
+    client = CheckpointConversationClient()
+    harness = cast(Any, orchestrator)
+    harness.openai_runtime = runtime
+    harness.conversation_client = client
+
+    async def consume() -> None:
+        async for _ in orchestrator.run(
+            ConversationRequest(conversation_id="conv_persistence", message="Question"), 1, FakeRequest()
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await runtime.started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert client.finalize_request is not None
+    assert client.finalize_request.status.name == "CANCELLED"
 
 
 def test_public_request_forbids_user_and_agent_identity() -> None:

@@ -1,0 +1,124 @@
+{
+  "agents": [
+    {
+      "agent_id": 1201,
+      "version": 1,
+      "name": "phase12-deepwiki",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Use read_wiki_structure once for openai/openai-python, then answer with the first top-level page title.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "deepwiki", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1202,
+      "version": 1,
+      "name": "phase12-microsoft-learn",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Use microsoft_docs_search once for Azure OpenAI Python quickstart, then answer with one returned title.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "microsoft-learn", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1203,
+      "version": 1,
+      "name": "phase12-context7",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Use resolve-library-id once for HTTPX and async HTTP client usage, then answer with the best library ID.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "context7", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1204,
+      "version": 1,
+      "name": "phase12-openai-docs",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Use list_openai_docs once with limit 3, then answer with the first returned URL.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "openai-docs", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1210,
+      "version": 1,
+      "name": "phase12-local-success",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Call the echo tool exactly once with value PHASE12_LOCAL_OK, then answer with that value only.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "phase12-fixture", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1211,
+      "version": 1,
+      "name": "phase12-local-failure",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Call explicit_failure exactly once with message PHASE12_EXPECTED_FAILURE, then state that the tool failed.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "phase12-fixture", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1212,
+      "version": 1,
+      "name": "phase12-local-unknown",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Call commit_then_drop exactly once with key phase12_unknown, never retry it, then explain that its outcome cannot be confirmed.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "phase12-fixture", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1213,
+      "version": 1,
+      "name": "phase12-local-parallel",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "In one parallel tool batch call parallel_probe twice: probe_id first with delay_seconds 0.2 and probe_id second with delay_seconds 0.1. Then answer PHASE12_PARALLEL_OK.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "phase12-fixture", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1214,
+      "version": 1,
+      "name": "phase12-local-timeout",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Call slow_pre_commit exactly once with key phase12_slow and delay_seconds 3, never retry it, then explain that its outcome cannot be confirmed.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "phase12-fixture-short", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    },
+    {
+      "agent_id": 1215,
+      "version": 1,
+      "name": "phase12-local-auth",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "Call echo exactly once with value PHASE12_AUTH_OK, then answer with that value only.",
+      "tools": [],
+      "mcp_servers": [{"server_id": "phase12-fixture-auth", "required": true}],
+      "memory_policy": {"profile": false, "rag": false},
+      "temperature": 0,
+      "max_output_tokens": 256
+    }
+  ]
+}

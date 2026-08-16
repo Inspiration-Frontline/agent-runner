@@ -12,25 +12,30 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from time import monotonic, time_ns
 from typing import Protocol
 from uuid import uuid4
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import AgentIdentity
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    AppendConversationRoundProgressRequest,
     AssistantAnswer,
     AssistantMessage,
     ContentPart,
     ConversationFileKind,
     ConversationFileStatus,
     ConversationTurn,
+    CreateConversationRoundCheckpointRequest,
     FileUrl,
+    FinalizeConversationRoundRequest,
     FunctionCall,
     LlmCall,
     LlmConversationMessage,
     LlmMessageStorageMode,
     LlmRequest,
     LlmResponse,
+    McpServerBindingSnapshot,
     MessageRole,
     PreparedConversationFile,
     PreparedConversationReference,
@@ -88,6 +93,8 @@ from agent_runner.conversation import (
     ConversationExecutionLock,
     ConversationManagerClient,
 )
+from agent_runner.mcps.catalog import McpServerCatalog
+from agent_runner.mcps.sdk_runtime import SdkMcpRuntime
 from agent_runner.observability.runtime_tracing import RuntimeTracing
 from agent_runner.observability.tracing import Tracer
 from agent_runner.runtime.cancellation import (
@@ -95,6 +102,7 @@ from agent_runner.runtime.cancellation import (
     CancellationToken,
     ConversationCancellationRegistry,
 )
+from agent_runner.runtime.mcp_dispatch import ConversationDispatchRecorder
 from agent_runner.runtime.model_events import (
     ModelError,
     ModelStreamEvent,
@@ -229,6 +237,8 @@ class RuntimeRequestState:
     next_round_number: int | None = None
     preflight_completed: bool = False
     agent: AgentDefinition | None = None
+    checkpoint_created: bool = False
+    checkpoint_revision: int = 0
 
 
 class FilePreparationError(RuntimeError):
@@ -284,9 +294,15 @@ class RuntimeOrchestrator:
         tool_registry = build_internal_tool_registry()
         self.tool_registry = tool_registry
         self.context_builder = ContextBuilder(tool_registry, settings)
-        self.agent_factory = AgentFactory()
+        mcp_catalog = (
+            McpServerCatalog.from_json(settings.mcp_catalog_json)
+            if settings.mcp_catalog_json
+            else McpServerCatalog.from_file(Path(settings.mcp_catalog_path))
+        )
+        mcp_runtime = SdkMcpRuntime(mcp_catalog, tracer)
+        self.agent_factory = AgentFactory(mcp_catalog)
         self.cancellation_manager = CancellationManager()
-        self.openai_runtime = OpenAIAgentsSdkAdapter(settings=settings, tracer=tracer)
+        self.openai_runtime = OpenAIAgentsSdkAdapter(settings=settings, tracer=tracer, mcp_runtime=mcp_runtime)
         self.conversation_client = ConversationManagerClient(settings)
         self.execution_lock = ConversationExecutionLock(settings)
         self._lock_acquired = False
@@ -323,13 +339,13 @@ class RuntimeOrchestrator:
 
         except asyncio.CancelledError:
             logger.info("Request cancelled")
-            await self._persist_unexpected_terminal(
+            await self._persist_terminal_after_cancellation(
                 conversation_request, user_id, state, RoundStatus.CANCELLED, "Generation cancelled."
             )
             raise
 
         except GeneratorExit:
-            await self._persist_unexpected_terminal(
+            await self._persist_terminal_after_cancellation(
                 conversation_request, user_id, state, RoundStatus.CANCELLED, "Generation cancelled."
             )
             raise
@@ -417,6 +433,13 @@ class RuntimeOrchestrator:
                 conversation_history,
                 http_request,
                 state.cancellation_token,
+                ConversationDispatchRecorder(
+                    self.conversation_client,
+                    state,
+                    user_id,
+                    conversation_request.conversation_id,
+                    self._required_round_number(state),
+                ) if state.checkpoint_created else None,
             ):
                 if isinstance(model_event, ModelStreamComplete):
                     model_result = model_event
@@ -522,7 +545,113 @@ class RuntimeOrchestrator:
             return build_result
 
         state.agent = await self.agent_factory.create(build_result.agent_config)
+        await self._create_round_checkpoint(conversation_request, user_id, state)
         return AgentContextReady(build_result.context)
+
+    async def _create_round_checkpoint(
+        self,
+        conversation_request: ConversationRequest,
+        user_id: int,
+        state: RuntimeRequestState,
+    ) -> None:
+        if not hasattr(self.conversation_client, "create_round_checkpoint"):
+            return
+        if state.agent is None:
+            raise RuntimeError("Cannot checkpoint an unresolved Agent.")
+        request = CreateConversationRoundCheckpointRequest(
+            user_id=user_id,
+            conversation_id=conversation_request.conversation_id,
+            round_number=self._required_round_number(state),
+            mutation_id=str(uuid4()),
+            user_request=self._build_user_request(conversation_request),
+            references=self._to_proto_references(conversation_request),
+            trace_id=self.runtime_tracing.get_current_trace_id(),
+            start_time=state.round_start,
+            agent_identity=AgentIdentity(
+                agent_id=state.agent.agent_id,
+                name=state.agent.name,
+                version=state.agent.version,
+            ),
+            mcp_server_bindings=[
+                McpServerBindingSnapshot(server_id=binding.server_id, required=binding.required)
+                for binding in state.agent.mcp_servers
+            ],
+        )
+        with self.runtime_tracing.trace_round_checkpoint(request) as span:
+            response = await self.conversation_client.create_round_checkpoint(request)
+            self.runtime_tracing.record_round_mutation_result(span, response, "round.checkpoint.created")
+        if response.base is None or not response.base.success or response.data is None:
+            message = response.base.message if response.base is not None else "Round checkpoint RPC failed."
+            raise RuntimeError(message)
+        state.checkpoint_created = True
+        state.checkpoint_revision = response.data.committed_revision
+
+    async def _append_round_capture(
+        self,
+        user_id: int,
+        conversation_request: ConversationRequest,
+        state: RuntimeRequestState,
+        capture: AgentRunCapture,
+        status: RoundStatus,
+        error_message: str,
+    ) -> None:
+        if state.agent is None or not capture.turns:
+            return
+        turns = []
+        for index, captured in enumerate(capture.turns):
+            is_last = index == len(capture.turns) - 1
+            turn_status = TurnStatus.COMPLETED
+            turn_error = ""
+            if is_last and status != RoundStatus.COMPLETED:
+                turn_status = TurnStatus.CANCELLED if status == RoundStatus.CANCELLED else TurnStatus.FAILED
+                turn_error = error_message
+            turns.append(self._to_proto_turn(index + 1, captured, state.agent, turn_status, turn_error))
+        request = AppendConversationRoundProgressRequest(
+            user_id=user_id,
+            conversation_id=conversation_request.conversation_id,
+            round_number=self._required_round_number(state),
+            mutation_id=str(uuid4()),
+            expected_revision=state.checkpoint_revision,
+            turns=turns,
+        )
+        with self.runtime_tracing.trace_round_progress(request) as span:
+            response = await self.conversation_client.append_round_progress(request)
+            self.runtime_tracing.record_round_mutation_result(span, response, "round.progress.appended")
+        if response.base is None or not response.base.success or response.data is None:
+            message = response.base.message if response.base is not None else "Round progress RPC failed."
+            raise RuntimeError(message)
+        state.checkpoint_revision = response.data.committed_revision
+
+    async def _finalize_checkpoint(
+        self,
+        user_id: int,
+        conversation_request: ConversationRequest,
+        state: RuntimeRequestState,
+        status: RoundStatus,
+        error_message: str,
+        end_time: int,
+        final_answer: AssistantAnswer | None = None,
+    ) -> None:
+        request = FinalizeConversationRoundRequest(
+            user_id=user_id,
+            conversation_id=conversation_request.conversation_id,
+            round_number=self._required_round_number(state),
+            mutation_id=str(uuid4()),
+            expected_revision=state.checkpoint_revision,
+            status=status,
+            error_message=error_message,
+            end_time=end_time,
+        )
+        if final_answer is not None:
+            request.final_answer = final_answer
+        with self.runtime_tracing.trace_round_finalize(request) as span:
+            response = await self.conversation_client.finalize_round(request)
+            self.runtime_tracing.record_round_mutation_result(span, response, "round.finalized")
+        if response.base is None or not response.base.success or response.data is None:
+            message = response.base.message if response.base is not None else "Round finalize RPC failed."
+            raise RuntimeError(message)
+        state.checkpoint_revision = response.data.committed_revision
+        self._terminal_round_persisted = True
 
     async def _handle_model_terminal(
         self,
@@ -542,6 +671,7 @@ class RuntimeOrchestrator:
                 model_result.terminal_error,
                 agent=state.agent,
                 capture=model_result.capture,
+                state=state,
             )
             return ModelTerminalDecision(should_stop=True)
 
@@ -565,25 +695,48 @@ class RuntimeOrchestrator:
         """Persist a completed Round and expose success only after Conversation Manager commits it."""
         if state.agent is None:
             raise RuntimeError("A completed model response has no resolved Agent.")
-        save_request = self._build_save_request(
-            user_id=user_id,
-            conversation_id=conversation_request.conversation_id,
-            conversation_request=conversation_request,
-            response_text=model_result.response_text,
-            agent=state.agent,
-            capture=model_result.capture,
-            round_start=state.round_start,
-            call_end=model_result.call_end,
-            round_number=self._required_round_number(state),
-        )
         yield SavingEvent()
         try:
-            saved = await self._save_round(save_request)
+            if state.checkpoint_created:
+                await self._append_round_capture(
+                    user_id,
+                    conversation_request,
+                    state,
+                    model_result.capture,
+                    RoundStatus.COMPLETED,
+                    "",
+                )
+                await self._finalize_checkpoint(
+                    user_id,
+                    conversation_request,
+                    state,
+                    RoundStatus.COMPLETED,
+                    "",
+                    model_result.call_end,
+                    AssistantAnswer(
+                        content=model_result.response_text,
+                        source_turn_number=len(model_result.capture.turns),
+                    ),
+                )
+                saved = None
+            else:
+                save_request = self._build_save_request(
+                    user_id=user_id,
+                    conversation_id=conversation_request.conversation_id,
+                    conversation_request=conversation_request,
+                    response_text=model_result.response_text,
+                    agent=state.agent,
+                    capture=model_result.capture,
+                    round_start=state.round_start,
+                    call_end=model_result.call_end,
+                    round_number=self._required_round_number(state),
+                )
+                saved = await self._save_round(save_request)
         except Exception as error:
             logger.exception("Failed to persist completed round")
             yield ErrorEvent(str(error), error_code="PERSISTENCE_FAILED", phase="persistence")
             return
-        if saved.base is None or not saved.base.success:
+        if saved is not None and (saved.base is None or not saved.base.success):
             message = saved.base.message if saved.base is not None else "Round persistence RPC failed."
             yield ErrorEvent(message, error_code="PERSISTENCE_FAILED", phase="persistence")
             return
@@ -609,6 +762,7 @@ class RuntimeOrchestrator:
             message,
             agent=state.agent,
             capture=capture or AgentRunCapture(),
+            state=state,
         )
 
     async def _persist_unexpected_terminal(
@@ -631,7 +785,35 @@ class RuntimeOrchestrator:
             message,
             agent=state.agent,
             capture=getattr(self.openai_runtime, "last_capture", AgentRunCapture()),
+            state=state,
         )
+
+    async def _persist_terminal_after_cancellation(
+        self,
+        conversation_request: ConversationRequest,
+        user_id: int,
+        state: RuntimeRequestState,
+        status: RoundStatus,
+        message: str,
+    ) -> None:
+        """Finish the durable Round even when ASGI has cancelled the stream coroutine.
+
+        A browser Stop action can cancel the SSE producer while the SDK is unwinding.  The terminal
+        mutation must not share that cancellation scope: otherwise the checkpoint remains
+        ``IN_PROGRESS`` and a subsequent history reload cannot represent the user's action.
+        """
+        persistence_task = asyncio.create_task(
+            self._persist_unexpected_terminal(conversation_request, user_id, state, status, message)
+        )
+        while not persistence_task.done():
+            try:
+                await asyncio.shield(persistence_task)
+            except asyncio.CancelledError:
+                if persistence_task.cancelled():
+                    raise
+                logger.info("Waiting for cancelled request terminal persistence")
+
+        await persistence_task
 
     async def _finalize_request(
         self,
@@ -660,6 +842,7 @@ class RuntimeOrchestrator:
         conversation_history: list[Message],
         http_request: DisconnectAwareRequest,
         cancellation_token: CancellationToken,
+        dispatch_recorder: ConversationDispatchRecorder | None = None,
     ) -> AsyncGenerator[StreamEvent | ModelStreamComplete]:
         """Stream public model events while retaining one typed terminal capture."""
         response_text = ""
@@ -674,6 +857,7 @@ class RuntimeOrchestrator:
                 context,
                 cancellation_token,
                 getattr(self, "tool_registry", None),
+                dispatch_recorder,
             )
         else:
             runtime_stream = self.openai_runtime.run_streamed(agent, context, cancellation_token)
@@ -1182,6 +1366,7 @@ class RuntimeOrchestrator:
         *,
         agent: AgentDefinition | None = None,
         capture: AgentRunCapture | None = None,
+        state: RuntimeRequestState | None = None,
     ) -> None:
         """Persist a failed/cancelled Round exactly once when execution ends prematurely.
 
@@ -1196,6 +1381,28 @@ class RuntimeOrchestrator:
             capture: Partial model/Tool evidence, if available.
         """
         if getattr(self, "_terminal_round_persisted", False):
+            return
+        if state is not None and state.checkpoint_created:
+            try:
+                effective_capture = capture or AgentRunCapture()
+                await self._append_round_capture(
+                    user_id,
+                    conversation_request,
+                    state,
+                    effective_capture,
+                    status,
+                    error_message,
+                )
+                await self._finalize_checkpoint(
+                    user_id,
+                    conversation_request,
+                    state,
+                    status,
+                    error_message,
+                    max(round_start, _get_epoch_millis()),
+                )
+            except Exception:
+                logger.exception("Failed to finalize incremental terminal Round")
             return
         turns = []
         if agent is not None and capture is not None:

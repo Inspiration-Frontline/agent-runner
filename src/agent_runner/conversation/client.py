@@ -1,7 +1,13 @@
 from typing import Any, cast
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    AppendConversationRoundProgressRequest,
+    AppendConversationRoundProgressResponse,
     ConversationReference,
+    CreateConversationRoundCheckpointRequest,
+    CreateConversationRoundCheckpointResponse,
+    FinalizeConversationRoundRequest,
+    FinalizeConversationRoundResponse,
     GetConversationReplayRequest,
     GetConversationReplayResponse,
     GetConversationRoundHistoryRequest,
@@ -76,6 +82,28 @@ class ConversationManagerClient:
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
         return cast(SaveConversationRoundResponse, response)
+
+    async def create_round_checkpoint(
+        self, request: CreateConversationRoundCheckpointRequest
+    ) -> CreateConversationRoundCheckpointResponse:
+        response = await self._service.create_conversation_round_checkpoint(
+            request, timeout=10.0, metadata=self._get_trace_metadata()
+        )
+        return cast(CreateConversationRoundCheckpointResponse, response)
+
+    async def append_round_progress(
+        self, request: AppendConversationRoundProgressRequest
+    ) -> AppendConversationRoundProgressResponse:
+        response = await self._service.append_conversation_round_progress(
+            request, timeout=10.0, metadata=self._get_trace_metadata()
+        )
+        return cast(AppendConversationRoundProgressResponse, response)
+
+    async def finalize_round(self, request: FinalizeConversationRoundRequest) -> FinalizeConversationRoundResponse:
+        response = await self._service.finalize_conversation_round(
+            request, timeout=10.0, metadata=self._get_trace_metadata()
+        )
+        return cast(FinalizeConversationRoundResponse, response)
 
     async def prepare_files(
         self,

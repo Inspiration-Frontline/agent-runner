@@ -1,7 +1,8 @@
 import logging
 
-from agent_runner.agent_definitions.config_models import AgentDefinition, MemoryPolicy
+from agent_runner.agent_definitions.config_models import AgentDefinition, MCPServerBinding, MemoryPolicy
 from agent_runner.config import AgentConfig
+from agent_runner.mcps.catalog import McpServerCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,12 @@ class AgentFactory:
         _agent_registry: In-memory registry mapping agent_id to AgentDefinition instances.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, mcp_catalog: McpServerCatalog | None = None) -> None:
         """
         Initialize the agent factory with an empty registry.
         """
         self._agent_registry: dict[int, AgentDefinition] = {}
+        self._mcp_catalog = mcp_catalog or McpServerCatalog.empty()
 
     async def create(self, config: AgentConfig) -> AgentDefinition:
         """
@@ -46,7 +48,10 @@ class AgentFactory:
             model=config.model,
             system_prompt=config.system_prompt,
             tools=config.tools,
-            mcp_servers=config.mcp_servers,
+            mcp_servers=[
+                MCPServerBinding(server_id=binding.server_id, required=binding.required)
+                for binding in config.mcp_servers
+            ],
             memory_policy=MemoryPolicy(
                 profile=config.memory_policy.profile,
                 rag=config.memory_policy.rag,
@@ -54,6 +59,12 @@ class AgentFactory:
             max_output_tokens=config.max_output_tokens,
             temperature=config.temperature,
         )
+
+        unknown_servers = [
+            binding.server_id for binding in agent.mcp_servers if not self._mcp_catalog.contains(binding.server_id)
+        ]
+        if unknown_servers:
+            raise ValueError(f"Agent references unknown MCP servers: {', '.join(unknown_servers)}")
 
         self._agent_registry[config.agent_id] = agent
         logger.info(f"Created agent: {config.agent_id} v{config.version}")

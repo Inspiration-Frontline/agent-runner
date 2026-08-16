@@ -175,6 +175,29 @@ class ToolExecutionCollector:
             end_time=max(start_time, get_epoch_millis()),
         )
 
+    def record_external_execution(
+        self,
+        tool_call_id: str,
+        definition: ToolDefinition,
+        arguments_json: str,
+        status: str,
+        result: object,
+        error_message: str,
+    ) -> None:
+        """Record the terminal result of an SDK-owned MCP Tool invocation."""
+        result_content = result if isinstance(result, str) else json.dumps(
+            result, ensure_ascii=False, separators=(",", ":"), default=str
+        )
+        self._record_execution(
+            tool_call_id,
+            definition,
+            arguments_json,
+            status,
+            result_content,
+            error_message,
+            get_epoch_millis(),
+        )
+
     def get(self, tool_call_id: str) -> CapturedToolExecution | None:
         """Return terminal evidence for one Tool call when a handler recorded it.
 

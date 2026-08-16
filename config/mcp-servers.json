@@ -1,0 +1,39 @@
+{
+  "mcpServers": {
+    "deepwiki": {
+      "url": "https://mcp.deepwiki.com/mcp",
+      "display_name": "DeepWiki"
+    },
+    "microsoft-learn": {
+      "url": "https://learn.microsoft.com/api/mcp",
+      "display_name": "Microsoft Learn"
+    },
+    "context7": {
+      "url": "https://mcp.context7.com/mcp",
+      "display_name": "Context7"
+    },
+    "openai-docs": {
+      "url": "https://developers.openai.com/mcp",
+      "display_name": "OpenAI Developer Docs"
+    },
+    "phase12-fixture": {
+      "url": "http://127.0.0.1:8765/mcp",
+      "display_name": "Phase 12 Local Fixture",
+      "schema_cache_ttl_seconds": 60
+    },
+    "phase12-fixture-short": {
+      "url": "http://127.0.0.1:8765/mcp",
+      "display_name": "Phase 12 Local Timeout Fixture",
+      "request_timeout_seconds": 1,
+      "schema_cache_ttl_seconds": 60
+    },
+    "phase12-fixture-auth": {
+      "url": "http://127.0.0.1:8766/mcp",
+      "display_name": "Phase 12 Authenticated Fixture",
+      "headers": {
+        "Authorization": "${secret:PHASE12_MCP_AUTHORIZATION}"
+      },
+      "schema_cache_ttl_seconds": 60
+    }
+  }
+}

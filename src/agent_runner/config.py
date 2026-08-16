@@ -70,7 +70,7 @@ class Settings(BaseSettings):
 
     # Server configuration
     server_host: str = Field(default="0.0.0.0", validation_alias="SERVER_HOST")
-    server_port: int = Field(default=8000, validation_alias="SERVER_PORT")
+    server_port: int = Field(default=8001, validation_alias="SERVER_PORT")
     open_browser_on_startup: bool = Field(default=True, validation_alias="OPEN_BROWSER_ON_STARTUP")
 
     # LiteLLM gateway configuration
@@ -90,6 +90,8 @@ class Settings(BaseSettings):
     # Local agent configuration settings
     local_agent_config_enabled: bool = True
     local_agent_config_path: str = str(CONFIG_DIR / "agents.json")
+    mcp_catalog_path: str = Field(default=str(CONFIG_DIR / "mcp-servers.json"), validation_alias="MCP_CATALOG_PATH")
+    mcp_catalog_json: str = Field(default="", validation_alias="MCP_CATALOG_JSON")
 
     # Context and output token limits
     max_context_tokens: int = 128000
@@ -209,6 +211,7 @@ class ConfigurationManager:
             },
             "agent": {"default_agent_id": "default_agent_id"},
             "local_agent_config": {"enabled": "local_agent_config_enabled", "path": "local_agent_config_path"},
+            "mcp": {"catalog_path": "mcp_catalog_path", "catalog_json": "mcp_catalog_json"},
             "context": {"max_context_tokens": "max_context_tokens", "max_output_tokens": "max_output_tokens"},
             "redis": {
                 "host": "redis_host",
@@ -404,7 +407,14 @@ class AgentConfig(BaseModel):
     model: str
     system_prompt: str
     tools: list[str] = Field(default_factory=list)
-    mcp_servers: list[str] = Field(default_factory=list)
+    mcp_servers: list["MCPServerBindingConfig"] = Field(default_factory=list)
     memory_policy: MemoryPolicy = Field(default_factory=MemoryPolicy)
     max_output_tokens: int = 4096
     temperature: float = 0.7
+
+
+class MCPServerBindingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    server_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
+    required: bool = True

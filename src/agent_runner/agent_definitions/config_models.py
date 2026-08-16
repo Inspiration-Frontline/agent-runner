@@ -27,6 +27,14 @@ class MemoryPolicy:
     rag_knowledge_base_ids: list[int] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class MCPServerBinding:
+    """One typed Agent-to-Catalog binding."""
+
+    server_id: str
+    required: bool = True
+
+
 @dataclass
 class AgentDefinition:
     """
@@ -57,29 +65,9 @@ class AgentDefinition:
     model: str
     system_prompt: str
     tools: list[str] = field(default_factory=list)
-    mcp_servers: list[str] = field(default_factory=list)
+    mcp_servers: list[MCPServerBinding] = field(default_factory=list)
     memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
     max_output_tokens: int = 4096
     temperature: float = 0.7
     metadata: dict[str, Any] = field(default_factory=dict)
 
-
-@dataclass
-class MCPServerSpec:
-    """
-    Specification of an MCP (Model Context Protocol) server.
-
-    Defines the server's identity, transport mechanism, and configuration
-    for establishing connections and accessing tools/resources.
-
-    Attributes:
-        server_id: Unique identifier for this MCP server.
-        name: Human-readable name for this MCP server.
-        transport: Transport mechanism: 'stdio', 'sse', or 'websocket'.
-        config: Server-specific configuration parameters.
-    """
-
-    server_id: str
-    name: str
-    transport: str
-    config: dict[str, Any]

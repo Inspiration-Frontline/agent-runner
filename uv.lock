@@ -41,7 +41,7 @@ wheels = [
 
 [[package]]
 name = "agent-breaker-conversation-manager-protos"
-version = "0.0.2"
+version = "0.0.3"
 source = { registry = "https://packages.aliyun.com/6284861a3e81781f3ad0f3e9/pypi/repo-dawn" }
 dependencies = [
     { name = "agent-breaker-commons" },
@@ -50,7 +50,7 @@ dependencies = [
     { name = "grpclib" },
 ]
 wheels = [
-    { url = "https://packages.aliyun.com/6284861a3e81781f3ad0f3e9/pypi/repo-dawn/agent-breaker-conversation-manager-protos/agent_breaker_conversation_manager_protos-0.0.2-py3-none-any.whl" },
+    { url = "https://packages.aliyun.com/6284861a3e81781f3ad0f3e9/pypi/repo-dawn/agent-breaker-conversation-manager-protos/agent_breaker_conversation_manager_protos-0.0.3-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -94,7 +94,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agent-breaker-commons", specifier = "==0.0.1", index = "https://packages.aliyun.com/6284861a3e81781f3ad0f3e9/pypi/repo-dawn" },
-    { name = "agent-breaker-conversation-manager-protos", specifier = "==0.0.2", index = "https://packages.aliyun.com/6284861a3e81781f3ad0f3e9/pypi/repo-dawn" },
+    { name = "agent-breaker-conversation-manager-protos", specifier = "==0.0.3", index = "https://packages.aliyun.com/6284861a3e81781f3ad0f3e9/pypi/repo-dawn" },
     { name = "fancy-grpc-py", specifier = "==0.1.0", index = "https://packages.aliyun.com/6284861a3e81781f3ad0f3e9/pypi/repo-dawn" },
     { name = "fastapi", specifier = ">=0.136.1" },
     { name = "httpx", specifier = ">=0.28.1" },

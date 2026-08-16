@@ -38,7 +38,7 @@ debug: false
 
 server:
   host: 0.0.0.0
-  port: 8000
+  port: 8001
 
 lite_llm:
   base_url: http://localhost:4000

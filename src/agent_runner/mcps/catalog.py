@@ -1,0 +1,131 @@
+import json
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+SECRET_PATTERN = re.compile(r"^\$\{secret:([A-Za-z_][A-Za-z0-9_]*)}$")
+
+
+class SecretProvider(Protocol):
+    def resolve(self, reference: str) -> str:
+        """Resolve one secret reference at the outbound boundary."""
+
+
+class EnvironmentSecretProvider:
+    def resolve(self, reference: str) -> str:
+        match = SECRET_PATTERN.fullmatch(reference)
+        if match is None:
+            raise ValueError("MCP credentials must use ${secret:ENV_NAME} references")
+        value = os.getenv(match.group(1))
+        if not value:
+            raise ValueError(f"MCP secret is unavailable: {match.group(1)}")
+        return value
+
+
+class McpServerProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    display_name: str = ""
+    enabled: bool = True
+    disabled_tools: frozenset[str] = Field(default_factory=frozenset)
+    connection_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    request_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    max_retry_attempts: int = Field(default=0, ge=0, le=5)
+    retry_backoff_seconds: float = Field(default=1.0, gt=0, le=30)
+    schema_cache_ttl_seconds: int = Field(default=300, ge=0, le=86400)
+    policy: str = "FULL_ACCESS"
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("MCP Streamable HTTP URL must use http or https")
+        if parsed.username or parsed.password:
+            raise ValueError("MCP URL must not contain literal credentials")
+        for token in re.findall(r"\$\{secret:[^}]+}", value):
+            if SECRET_PATTERN.fullmatch(token) is None:
+                raise ValueError("MCP URL contains an invalid secret reference")
+        return value
+
+    @field_validator("headers")
+    @classmethod
+    def validate_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for name, header_value in value.items():
+            clean_name = name.strip()
+            if not clean_name or any(char in clean_name for char in "\r\n:"):
+                raise ValueError("MCP header name is invalid")
+            if SECRET_PATTERN.fullmatch(header_value) is None:
+                raise ValueError("MCP header values must be secret references")
+            normalized[clean_name] = header_value
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_policy(self) -> "McpServerProfile":
+        if self.policy != "FULL_ACCESS":
+            raise ValueError("Phase 12 MCP servers support only FULL_ACCESS")
+        return self
+
+
+class McpCatalogEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    mcp_servers: dict[str, McpServerProfile] = Field(alias="mcpServers")
+
+    @field_validator("mcp_servers", mode="before")
+    @classmethod
+    def reject_process_servers(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            for server_id, profile in value.items():
+                if isinstance(profile, dict) and "command" in profile:
+                    raise ValueError(f"MCP server {server_id} uses process transport; Phase 12 requires Streamable HTTP")
+        return value
+
+
+@dataclass(frozen=True)
+class ResolvedMcpServer:
+    server_id: str
+    profile: McpServerProfile
+    url: str
+    headers: dict[str, str]
+
+
+class McpServerCatalog:
+    def __init__(self, envelope: McpCatalogEnvelope, secrets: SecretProvider | None = None) -> None:
+        self._profiles = dict(envelope.mcp_servers)
+        self._secrets = secrets or EnvironmentSecretProvider()
+
+    @classmethod
+    def from_file(cls, path: Path, secrets: SecretProvider | None = None) -> "McpServerCatalog":
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        return cls(McpCatalogEnvelope.model_validate(payload), secrets)
+
+    @classmethod
+    def from_json(cls, payload: str, secrets: SecretProvider | None = None) -> "McpServerCatalog":
+        return cls(McpCatalogEnvelope.model_validate_json(payload), secrets)
+
+    @classmethod
+    def empty(cls) -> "McpServerCatalog":
+        return cls(McpCatalogEnvelope.model_validate({"mcpServers": {}}))
+
+    def contains(self, server_id: str) -> bool:
+        return server_id in self._profiles
+
+    def resolve(self, server_id: str) -> ResolvedMcpServer:
+        profile = self._profiles.get(server_id)
+        if profile is None:
+            raise ValueError(f"Unknown MCP server: {server_id}")
+        url = self._resolve_template(profile.url)
+        headers = {name: self._secrets.resolve(value) for name, value in profile.headers.items()}
+        return ResolvedMcpServer(server_id, profile, url, headers)
+
+    def _resolve_template(self, value: str) -> str:
+        return re.sub(r"\$\{secret:[^}]+}", lambda match: self._secrets.resolve(match.group(0)), value)

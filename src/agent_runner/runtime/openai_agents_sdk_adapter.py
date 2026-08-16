@@ -3,11 +3,13 @@ import json
 import logging
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Literal, Protocol, TypeIs
 from uuid import uuid4
 
 from agents import Agent, FunctionTool, Model, ModelSettings, Runner
 from agents.items import ModelResponse, TResponseInputItem
+from agents.mcp import MCPServer
 from agents.result import RunResultStreaming
 from agents.retry import ModelRetrySettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
@@ -34,6 +36,8 @@ from agent_runner.context.builder import (
     message_to_capture,
 )
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
+from agent_runner.mcps.catalog import McpServerCatalog
+from agent_runner.mcps.sdk_runtime import DispatchEvidenceRecorder, SdkMcpRuntime
 from agent_runner.observability.tracing import Tracer, current_trace_id
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.runtime.model_events import (
@@ -148,6 +152,7 @@ class OpenAIAgentsSdkAdapter:
         model_factory: AgentModelFactory | None = None,
         settings: Settings | None = None,
         tracer: Tracer | None = None,
+        mcp_runtime: SdkMcpRuntime | None = None,
     ) -> None:
         """Create the SDK adapter and an empty durable capture snapshot.
 
@@ -158,6 +163,8 @@ class OpenAIAgentsSdkAdapter:
         self.settings = settings or Settings()
         self.tracer = tracer or Tracer(self.settings.otel_service_name)
         self.model_factory = model_factory or LiteLLMModelFactory(settings=self.settings, tracer=self.tracer)
+        catalog = McpServerCatalog.from_file(Path(self.settings.mcp_catalog_path))
+        self.mcp_runtime = mcp_runtime or SdkMcpRuntime(catalog, self.tracer)
         self.last_capture = AgentRunCapture()
 
     async def run_streamed(
@@ -166,15 +173,25 @@ class OpenAIAgentsSdkAdapter:
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
         tool_registry: ToolRegistry | None = None,
+        dispatch_recorder: DispatchEvidenceRecorder | None = None,
     ) -> AsyncGenerator[ModelStreamEvent]:
         """Stream one SDK Agent run and always retain its durable capture evidence."""
         self.last_capture = AgentRunCapture()
-        execution = self._start_streaming_execution(agent, context, cancellation_token, tool_registry)
-        try:
-            async for event in self._stream_sdk_events(execution, cancellation_token):
-                yield event
-        finally:
-            self._finalize_stream_capture(execution, context, cancellation_token)
+        async with self.mcp_runtime.session(agent.mcp_servers, dispatch_recorder) as mcp_session:
+            execution = self._start_streaming_execution(
+                agent,
+                context,
+                cancellation_token,
+                tool_registry,
+                mcp_session.servers,
+                list(mcp_session.definitions),
+                mcp_session.dispatch_hooks,
+            )
+            try:
+                async for event in self._stream_sdk_events(execution, cancellation_token):
+                    yield event
+            finally:
+                self._finalize_stream_capture(execution, context, cancellation_token)
 
     def _start_streaming_execution(
         self,
@@ -182,6 +199,9 @@ class OpenAIAgentsSdkAdapter:
         context: AgentContext,
         cancellation_token: CancellationToken | None,
         tool_registry: ToolRegistry | None,
+        mcp_servers: tuple[MCPServer, ...],
+        mcp_definitions: list[ToolDefinition],
+        dispatch_hooks: Any,
     ) -> StreamingSdkExecution:
         """Create the SDK run and its request-scoped evidence accumulator."""
         prepared = self._prepare_sdk_execution(
@@ -189,6 +209,9 @@ class OpenAIAgentsSdkAdapter:
             context=context,
             cancellation_token=cancellation_token,
             tool_registry=tool_registry,
+            mcp_servers=mcp_servers,
+            mcp_definitions=mcp_definitions,
+            dispatch_hooks=dispatch_hooks,
         )
         trace_id = current_trace_id()
         if not trace_id:
@@ -271,6 +294,7 @@ class OpenAIAgentsSdkAdapter:
         context: AgentContext,
         cancellation_token: CancellationToken | None = None,
         tool_registry: ToolRegistry | None = None,
+        dispatch_recorder: DispatchEvidenceRecorder | None = None,
     ) -> AssistantResponse:
         """Execute one request through the SDK's non-streaming Agent and Tool loop.
 
@@ -289,18 +313,22 @@ class OpenAIAgentsSdkAdapter:
         if cancellation_token and cancellation_token.is_cancelled():
             raise asyncio.CancelledError("Execution cancelled")
 
-        prepared = self._prepare_sdk_execution(
-            agent=agent,
-            context=context,
-            cancellation_token=cancellation_token,
-            tool_registry=tool_registry,
-        )
-        result = await Runner.run(
-            starting_agent=prepared.agent,
-            input=self._build_input(context),
-            max_turns=10,
-        )
-        return AssistantResponse(content=str(result.final_output), role="assistant")
+        async with self.mcp_runtime.session(agent.mcp_servers, dispatch_recorder) as mcp_session:
+            prepared = self._prepare_sdk_execution(
+                agent=agent,
+                context=context,
+                cancellation_token=cancellation_token,
+                tool_registry=tool_registry,
+                mcp_servers=mcp_session.servers,
+                mcp_definitions=list(mcp_session.definitions),
+                dispatch_hooks=mcp_session.dispatch_hooks,
+            )
+            result = await Runner.run(
+                starting_agent=prepared.agent,
+                input=self._build_input(context),
+                max_turns=10,
+            )
+            return AssistantResponse(content=str(result.final_output), role="assistant")
 
     def _prepare_sdk_execution(
         self,
@@ -309,14 +337,26 @@ class OpenAIAgentsSdkAdapter:
         context: AgentContext,
         cancellation_token: CancellationToken | None,
         tool_registry: ToolRegistry | None,
+        mcp_servers: tuple[MCPServer, ...] = (),
+        mcp_definitions: list[ToolDefinition] | None = None,
+        dispatch_hooks: Any = None,
     ) -> PreparedSdkExecution:
         """Resolve and attach configured Tools identically for both SDK Runner entry points."""
         collector = ToolExecutionCollector(self.settings, self.tracer)
         registry = tool_registry or ToolRegistry()
-        definitions = self._resolve_tool_definitions(agent, registry)
-        sdk_tools = self._build_sdk_tools(definitions, collector, cancellation_token)
+        local_definitions = self._resolve_tool_definitions(agent, registry)
+        definitions = [*local_definitions, *(mcp_definitions or [])]
+        if dispatch_hooks is not None:
+            dispatch_hooks.bind_collector(collector, definitions)
+        sdk_tools = self._build_sdk_tools(local_definitions, collector, cancellation_token)
         return PreparedSdkExecution(
-            agent=self._build_sdk_agent(agent, context.system_prompt, sdk_tools),
+            agent=self._build_sdk_agent(
+                agent,
+                context.system_prompt,
+                sdk_tools,
+                mcp_servers,
+                dispatch_hooks,
+            ),
             definitions=definitions,
             collector=collector,
         )
@@ -326,6 +366,8 @@ class OpenAIAgentsSdkAdapter:
         agent: AgentDefinition,
         system_prompt: str,
         tools: Sequence[FunctionTool] | None = None,
+        mcp_servers: tuple[MCPServer, ...] = (),
+        dispatch_hooks: Any = None,
     ) -> Agent[Any]:
         """Translate an AgentBreaker definition into one request-scoped SDK Agent.
 
@@ -350,6 +392,9 @@ class OpenAIAgentsSdkAdapter:
                 parallel_tool_calls=True,
             ),
             tools=[*tools] if tools else [],
+            mcp_servers=list(mcp_servers),
+            mcp_config={"include_server_in_tool_names": True},
+            hooks=dispatch_hooks,
         )
 
     @staticmethod

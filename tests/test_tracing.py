@@ -1,9 +1,24 @@
 import re
 
+from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import ResponseBase
+from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    AppendConversationRoundProgressRequest,
+    AppendConversationRoundProgressResponse,
+    ConversationRoundMutationResult,
+    CreateConversationRoundCheckpointRequest,
+    CreateConversationRoundCheckpointResponse,
+    FinalizeConversationRoundRequest,
+    FinalizeConversationRoundResponse,
+    RoundStatus,
+)
 from opentelemetry.exporter.otlp.proto.grpc import trace_exporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from agent_runner.conversation.client import ConversationManagerClient
 from agent_runner.observability import tracing
+from agent_runner.observability.runtime_tracing import RuntimeTracing
 
 TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
@@ -65,3 +80,63 @@ def test_trace_json_applies_a_hard_length_limit() -> None:
 
     assert len(serialized) == 128
     assert "truncated" in serialized
+
+
+def test_incremental_round_spans_record_rpc_revision_and_replay() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    runtime_tracing = RuntimeTracing(tracing.Tracer(provider=provider))
+    result = ConversationRoundMutationResult(
+        conversation_id="conv_trace",
+        round_number=3,
+        committed_revision=7,
+        idempotent_replay=True,
+        status=RoundStatus.COMPLETED,
+    )
+
+    checkpoint = CreateConversationRoundCheckpointRequest(
+        conversation_id="conv_trace",
+        round_number=3,
+        mutation_id="mutation-checkpoint",
+        trace_id="a" * 32,
+    )
+    with runtime_tracing.trace_round_checkpoint(checkpoint) as span:
+        runtime_tracing.record_round_mutation_result(
+            span,
+            CreateConversationRoundCheckpointResponse(base=ResponseBase(success=True), data=result),
+            "round.checkpoint.created",
+        )
+
+    append = AppendConversationRoundProgressRequest(
+        conversation_id="conv_trace",
+        round_number=3,
+        mutation_id="mutation-append",
+        expected_revision=6,
+    )
+    with runtime_tracing.trace_round_progress(append) as span:
+        runtime_tracing.record_round_mutation_result(
+            span,
+            AppendConversationRoundProgressResponse(base=ResponseBase(success=True), data=result),
+            "round.progress.appended",
+        )
+
+    finalize = FinalizeConversationRoundRequest(
+        conversation_id="conv_trace",
+        round_number=3,
+        mutation_id="mutation-finalize",
+        expected_revision=6,
+        status=RoundStatus.COMPLETED,
+    )
+    with runtime_tracing.trace_round_finalize(finalize) as span:
+        runtime_tracing.record_round_mutation_result(
+            span,
+            FinalizeConversationRoundResponse(base=ResponseBase(success=True), data=result),
+            "round.finalized",
+        )
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert set(spans) == {"round.checkpoint", "round.append", "round.finalize"}
+    assert spans["round.checkpoint"].attributes["conversation.committed_revision"] == 7
+    assert spans["round.append"].attributes["conversation.expected_revision"] == 6
+    assert spans["round.finalize"].attributes["conversation.idempotent_replay"] is True

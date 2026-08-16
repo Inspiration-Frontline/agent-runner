@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import redis.asyncio as aioredis
 
-from agent_runner.config import PROJECT_ROOT, AgentConfig, MemoryPolicy, Settings
+from agent_runner.config import PROJECT_ROOT, AgentConfig, MCPServerBindingConfig, MemoryPolicy, Settings
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ class AgentConfigLoader:
                 "model": config.model,
                 "system_prompt": config.system_prompt,
                 "tools": config.tools,
-                "mcp_servers": config.mcp_servers,
+                "mcp_servers": [binding.model_dump() for binding in config.mcp_servers],
                 "memory_policy": {
                     "profile": config.memory_policy.profile,
                     "rag": config.memory_policy.rag,
@@ -239,7 +239,7 @@ class AgentConfigLoader:
             model=data.get("model", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
             system_prompt=data.get("system_prompt", ""),
             tools=data.get("tools", []),
-            mcp_servers=data.get("mcp_servers", []),
+            mcp_servers=[MCPServerBindingConfig.model_validate(item) for item in data.get("mcp_servers", [])],
             memory_policy=memory_policy,
             max_output_tokens=data.get("max_output_tokens", self.max_output_tokens),
             temperature=data.get("temperature", 0.7),

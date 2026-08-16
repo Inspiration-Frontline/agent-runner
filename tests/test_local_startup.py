@@ -21,6 +21,6 @@ def test_open_docs_when_server_is_ready(monkeypatch: pytest.MonkeyPatch) -> None
     )
     monkeypatch.setattr("agent_runner.local_startup.webbrowser.open", opened_urls.append)
 
-    local_startup.open_docs_when_ready(8000, timeout_seconds=0.1)
+    local_startup.open_docs_when_ready(8001, timeout_seconds=0.1)
 
-    assert opened_urls == ["http://127.0.0.1:8000/docs"]
+    assert opened_urls == ["http://127.0.0.1:8001/docs"]

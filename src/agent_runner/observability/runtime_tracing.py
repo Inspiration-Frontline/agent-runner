@@ -2,6 +2,12 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    AppendConversationRoundProgressRequest,
+    AppendConversationRoundProgressResponse,
+    CreateConversationRoundCheckpointRequest,
+    CreateConversationRoundCheckpointResponse,
+    FinalizeConversationRoundRequest,
+    FinalizeConversationRoundResponse,
     SaveConversationRoundRequest,
     SaveConversationRoundResponse,
 )
@@ -149,6 +155,66 @@ class RuntimeTracing:
         with self._tracer.span("round.persist", attributes) as span:
             span.add_event("round.persistence.started")
             yield span
+
+    @contextmanager
+    def trace_round_checkpoint(self, request: CreateConversationRoundCheckpointRequest) -> Generator[Span]:
+        attributes = {
+            "conversation.id": request.conversation_id,
+            "conversation.round_number": request.round_number,
+            "conversation.mutation_id": request.mutation_id,
+            "conversation.reference_count": len(request.references),
+            "conversation.mcp_server_count": len(request.mcp_server_bindings),
+            "conversation.trace_id": request.trace_id,
+        }
+        with self._tracer.span("round.checkpoint", attributes) as span:
+            span.add_event("round.checkpoint.started")
+            yield span
+
+    @contextmanager
+    def trace_round_progress(self, request: AppendConversationRoundProgressRequest) -> Generator[Span]:
+        attributes = {
+            "conversation.id": request.conversation_id,
+            "conversation.round_number": request.round_number,
+            "conversation.mutation_id": request.mutation_id,
+            "conversation.expected_revision": request.expected_revision,
+            "conversation.turn_count": len(request.turns),
+            "conversation.dispatch_evidence_count": len(request.dispatch_evidence),
+        }
+        with self._tracer.span("round.append", attributes) as span:
+            span.add_event("round.append.started")
+            yield span
+
+    @contextmanager
+    def trace_round_finalize(self, request: FinalizeConversationRoundRequest) -> Generator[Span]:
+        attributes = {
+            "conversation.id": request.conversation_id,
+            "conversation.round_number": request.round_number,
+            "conversation.mutation_id": request.mutation_id,
+            "conversation.expected_revision": request.expected_revision,
+            "conversation.round_status": request.status.name,
+        }
+        with self._tracer.span("round.finalize", attributes) as span:
+            span.add_event("round.finalize.started")
+            yield span
+
+    @staticmethod
+    def record_round_mutation_result(
+        span: Span,
+        response: (
+            CreateConversationRoundCheckpointResponse
+            | AppendConversationRoundProgressResponse
+            | FinalizeConversationRoundResponse
+        ),
+        success_event: str,
+    ) -> None:
+        success = response.base is not None and response.base.success
+        span.set_attribute("rpc.success", success)
+        span.set_attribute("rpc.code", response.base.code if response.base is not None else -1)
+        if response.data is not None:
+            span.set_attribute("conversation.committed_revision", response.data.committed_revision)
+            span.set_attribute("conversation.idempotent_replay", response.data.idempotent_replay)
+            span.set_attribute("conversation.round_status", response.data.status.name)
+        span.add_event(success_event if success else "round.mutation.rejected")
 
     @staticmethod
     def record_round_persistence_result(span: Span, response: SaveConversationRoundResponse) -> None:

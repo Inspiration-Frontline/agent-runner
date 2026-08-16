@@ -99,4 +99,11 @@ def test_local_general_agent_uses_the_service_output_budget() -> None:
     config = json.loads((CONFIG_DIR / "agents.json").read_text(encoding="utf-8"))
     general_agent = next(agent for agent in config["agents"] if agent["agent_id"] == 1)
 
+    assert len(config["agents"]) == 1
     assert general_agent["max_output_tokens"] == get_settings().max_output_tokens == 4096
+    assert [binding["server_id"] for binding in general_agent["mcp_servers"]] == [
+        "deepwiki",
+        "microsoft-learn",
+        "context7",
+        "openai-docs",
+    ]
