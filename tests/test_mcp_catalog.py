@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from agent_runner.mcps.catalog import McpCatalogEnvelope, McpServerCatalog
+from agent_runner.mcps.catalog import McpServerCatalog, McpServerCatalogDocument
 
 
 class FakeSecrets:
@@ -36,7 +36,7 @@ def test_catalog_accepts_standard_envelope_and_resolves_secrets(tmp_path: Path) 
 )
 def test_catalog_rejects_out_of_scope_or_unsafe_profiles(profile: object) -> None:
     with pytest.raises(ValidationError):
-        McpCatalogEnvelope.model_validate({"mcpServers": {"bad": profile}})
+        McpServerCatalogDocument.model_validate({"mcpServers": {"bad": profile}})
 
 
 def test_catalog_rejects_unknown_server() -> None:

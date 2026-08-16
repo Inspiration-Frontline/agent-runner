@@ -12,12 +12,17 @@ SECRET_PATTERN = re.compile(r"^\$\{secret:([A-Za-z_][A-Za-z0-9_]*)}$")
 
 
 class SecretProvider(Protocol):
+    """Resolves configuration-time secret references immediately before an outbound call."""
+
     def resolve(self, reference: str) -> str:
-        """Resolve one secret reference at the outbound boundary."""
+        """Return the secret value identified by one validated catalog reference."""
 
 
 class EnvironmentSecretProvider:
+    """Secret provider that reads approved ${secret:ENV_NAME} references from the process environment."""
+
     def resolve(self, reference: str) -> str:
+        """Resolve one environment-variable reference without logging its value."""
         match = SECRET_PATTERN.fullmatch(reference)
         if match is None:
             raise ValueError("MCP credentials must use ${secret:ENV_NAME} references")
@@ -28,6 +33,7 @@ class EnvironmentSecretProvider:
 
 
 class McpServerProfile(BaseModel):
+    """Validated Streamable HTTP MCP server configuration for one catalog entry."""
     model_config = ConfigDict(extra="forbid")
 
     url: str
@@ -45,6 +51,7 @@ class McpServerProfile(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, value: str) -> str:
+        """Reject non-HTTP transports and literal URL credentials before the server is used."""
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("MCP Streamable HTTP URL must use http or https")
@@ -58,6 +65,7 @@ class McpServerProfile(BaseModel):
     @field_validator("headers")
     @classmethod
     def validate_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        """Validate header names and require values to be secret references."""
         normalized: dict[str, str] = {}
         for name, header_value in value.items():
             clean_name = name.strip()
@@ -70,12 +78,14 @@ class McpServerProfile(BaseModel):
 
     @model_validator(mode="after")
     def validate_policy(self) -> "McpServerProfile":
+        """Keep the currently supported policy surface explicit and fail fast for unsupported values."""
         if self.policy != "FULL_ACCESS":
-            raise ValueError("Phase 12 MCP servers support only FULL_ACCESS")
+            raise ValueError("Currently only FULL_ACCESS is supported.")
         return self
 
 
-class McpCatalogEnvelope(BaseModel):
+class McpServerCatalogDocument(BaseModel):
+    """Schema of the catalog JSON document whose root uses the standard mcpServers property."""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     mcp_servers: dict[str, McpServerProfile] = Field(alias="mcpServers")
@@ -83,15 +93,17 @@ class McpCatalogEnvelope(BaseModel):
     @field_validator("mcp_servers", mode="before")
     @classmethod
     def reject_process_servers(cls, value: Any) -> Any:
+        """Reject process-launch profiles because this runner supports remote Streamable HTTP only."""
         if isinstance(value, dict):
             for server_id, profile in value.items():
                 if isinstance(profile, dict) and "command" in profile:
-                    raise ValueError(f"MCP server {server_id} uses process transport; Phase 12 requires Streamable HTTP")
+                    raise ValueError(f"MCP server {server_id} uses process transport; Streamable HTTP is required")
         return value
 
 
 @dataclass(frozen=True)
 class ResolvedMcpServer:
+    """Catalog profile after secret templates have been resolved for one request session."""
     server_id: str
     profile: McpServerProfile
     url: str
@@ -99,27 +111,35 @@ class ResolvedMcpServer:
 
 
 class McpServerCatalog:
-    def __init__(self, envelope: McpCatalogEnvelope, secrets: SecretProvider | None = None) -> None:
-        self._profiles = dict(envelope.mcp_servers)
+    """Loads validated MCP catalog configuration and resolves secrets only at the network boundary."""
+
+    def __init__(self, document: McpServerCatalogDocument, secrets: SecretProvider | None = None) -> None:
+        """Create an in-memory catalog from a validated document and an optional secret provider."""
+        self._profiles = dict(document.mcp_servers)
         self._secrets = secrets or EnvironmentSecretProvider()
 
     @classmethod
     def from_file(cls, path: Path, secrets: SecretProvider | None = None) -> "McpServerCatalog":
+        """Read, validate, and retain a catalog JSON file without resolving secrets yet."""
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        return cls(McpCatalogEnvelope.model_validate(payload), secrets)
+        return cls(McpServerCatalogDocument.model_validate(payload), secrets)
 
     @classmethod
     def from_json(cls, payload: str, secrets: SecretProvider | None = None) -> "McpServerCatalog":
-        return cls(McpCatalogEnvelope.model_validate_json(payload), secrets)
+        """Read, validate, and retain catalog JSON supplied by an in-memory configuration source."""
+        return cls(McpServerCatalogDocument.model_validate_json(payload), secrets)
 
     @classmethod
     def empty(cls) -> "McpServerCatalog":
-        return cls(McpCatalogEnvelope.model_validate({"mcpServers": {}}))
+        """Return a catalog that intentionally declares no external MCP servers."""
+        return cls(McpServerCatalogDocument.model_validate({"mcpServers": {}}))
 
     def contains(self, server_id: str) -> bool:
+        """Return whether the catalog declares the requested server ID."""
         return server_id in self._profiles
 
     def resolve(self, server_id: str) -> ResolvedMcpServer:
+        """Resolve one enabled server's secret templates immediately before SDK connection setup."""
         profile = self._profiles.get(server_id)
         if profile is None:
             raise ValueError(f"Unknown MCP server: {server_id}")
@@ -128,4 +148,5 @@ class McpServerCatalog:
         return ResolvedMcpServer(server_id, profile, url, headers)
 
     def _resolve_template(self, value: str) -> str:
+        """Replace each validated ${secret:...} token while retaining non-secret URL text."""
         return re.sub(r"\$\{secret:[^}]+}", lambda match: self._secrets.resolve(match.group(0)), value)
