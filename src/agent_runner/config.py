@@ -92,6 +92,24 @@ class Settings(BaseSettings):
     local_agent_config_path: str = str(CONFIG_DIR / "agents.json")
     mcp_catalog_path: str = Field(default=str(CONFIG_DIR / "mcp-servers.json"), validation_alias="MCP_CATALOG_PATH")
     mcp_catalog_json: str = Field(default="", validation_alias="MCP_CATALOG_JSON")
+    mcp_pool_max_connections_per_server: int = Field(
+        default=4,
+        validation_alias="MCP_POOL_MAX_CONNECTIONS_PER_SERVER",
+        ge=1,
+        le=32,
+    )
+    mcp_pool_idle_timeout_seconds: float = Field(
+        default=300.0,
+        validation_alias="MCP_POOL_IDLE_TIMEOUT_SECONDS",
+        gt=0,
+        le=3600,
+    )
+    mcp_pool_borrow_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias="MCP_POOL_BORROW_TIMEOUT_SECONDS",
+        gt=0,
+        le=120,
+    )
 
     # Context and output token limits
     max_context_tokens: int = 128000
@@ -211,7 +229,13 @@ class ConfigurationManager:
             },
             "agent": {"default_agent_id": "default_agent_id"},
             "local_agent_config": {"enabled": "local_agent_config_enabled", "path": "local_agent_config_path"},
-            "mcp": {"catalog_path": "mcp_catalog_path", "catalog_json": "mcp_catalog_json"},
+            "mcp": {
+                "catalog_path": "mcp_catalog_path",
+                "catalog_json": "mcp_catalog_json",
+                "pool_max_connections_per_server": "mcp_pool_max_connections_per_server",
+                "pool_idle_timeout_seconds": "mcp_pool_idle_timeout_seconds",
+                "pool_borrow_timeout_seconds": "mcp_pool_borrow_timeout_seconds",
+            },
             "context": {"max_context_tokens": "max_context_tokens", "max_output_tokens": "max_output_tokens"},
             "redis": {
                 "host": "redis_host",

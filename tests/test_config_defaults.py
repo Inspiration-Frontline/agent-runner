@@ -95,6 +95,31 @@ def test_otel_priority_is_nacos_then_file_then_code_default(tmp_path) -> None:
     assert file_settings.otel_enabled is True
 
 
+def test_mcp_pool_priority_is_nacos_then_file_then_code_default(tmp_path) -> None:
+    env_file = tmp_path / "agent-runner.env"
+    env_file.write_text(
+        "MCP_POOL_MAX_CONNECTIONS_PER_SERVER=2\n"
+        "MCP_POOL_IDLE_TIMEOUT_SECONDS=45\n"
+        "MCP_POOL_BORROW_TIMEOUT_SECONDS=6\n"
+        "NACOS_ENABLED=true\n",
+        encoding="utf-8",
+    )
+    file_settings = Settings(_env_file=env_file)
+    manager = ConfigurationManager(file_settings)
+    manager._nacos_loader = type(
+        "NacosSnapshot",
+        (),
+        {"cached_config": {"mcp": {"pool_max_connections_per_server": 4}}},
+    )()
+
+    merged = manager.get_settings()
+
+    assert Settings(_env_file=None).mcp_pool_max_connections_per_server == 4
+    assert merged.mcp_pool_max_connections_per_server == 4
+    assert merged.mcp_pool_idle_timeout_seconds == 45
+    assert merged.mcp_pool_borrow_timeout_seconds == 6
+
+
 def test_local_general_agent_uses_the_service_output_budget() -> None:
     config = json.loads((CONFIG_DIR / "agents.json").read_text(encoding="utf-8"))
     general_agent = next(agent for agent in config["agents"] if agent["agent_id"] == 1)

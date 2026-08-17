@@ -16,22 +16,22 @@
       "url": "https://developers.openai.com/mcp",
       "display_name": "OpenAI Developer Docs"
     },
-    "phase12-fixture": {
+    "mcp-test-fixture": {
       "url": "http://127.0.0.1:8765/mcp",
-      "display_name": "Phase 12 Local Fixture",
+      "display_name": "Local MCP Test Fixture",
       "schema_cache_ttl_seconds": 60
     },
-    "phase12-fixture-short": {
+    "mcp-test-fixture-short-timeout": {
       "url": "http://127.0.0.1:8765/mcp",
-      "display_name": "Phase 12 Local Timeout Fixture",
+      "display_name": "Local MCP Timeout Test Fixture",
       "request_timeout_seconds": 1,
       "schema_cache_ttl_seconds": 60
     },
-    "phase12-fixture-auth": {
+    "mcp-test-fixture-auth": {
       "url": "http://127.0.0.1:8766/mcp",
-      "display_name": "Phase 12 Authenticated Fixture",
+      "display_name": "Authenticated Local MCP Test Fixture",
       "headers": {
-        "Authorization": "${secret:PHASE12_MCP_AUTHORIZATION}"
+        "Authorization": "${secret:MCP_TEST_AUTHORIZATION}"
       },
       "schema_cache_ttl_seconds": 60
     }

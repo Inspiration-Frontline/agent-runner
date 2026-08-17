@@ -56,6 +56,12 @@ local_agent_config:
   enabled: true
   path: ./config/agents.json
 
+mcp:
+  catalog_path: ./config/mcp-servers.json
+  pool_max_connections_per_server: 4
+  pool_idle_timeout_seconds: 300
+  pool_borrow_timeout_seconds: 10
+
 context:
   max_context_tokens: 128000
   max_output_tokens: 4096

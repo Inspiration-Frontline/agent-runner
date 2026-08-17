@@ -94,7 +94,8 @@ from agent_runner.conversation import (
     ConversationManagerClient,
 )
 from agent_runner.mcps.catalog import McpServerCatalog
-from agent_runner.mcps.sdk_runtime import SdkMcpRuntime
+from agent_runner.mcps.connection_pool import McpConnectionPool
+from agent_runner.mcps.sdk_runtime import McpSchemaCache, SdkMcpRuntime
 from agent_runner.observability.runtime_tracing import RuntimeTracing
 from agent_runner.observability.tracing import Tracer
 from agent_runner.runtime.cancellation import (
@@ -279,6 +280,8 @@ class RuntimeOrchestrator:
         settings: Settings,
         tracer: Tracer,
         cancellation_registry: ConversationCancellationRegistry,
+        mcp_connection_pool: McpConnectionPool | None = None,
+        mcp_schema_cache: McpSchemaCache | None = None,
     ) -> None:
         """
         Initialize the runtime orchestrator with all required components.
@@ -299,7 +302,13 @@ class RuntimeOrchestrator:
             if settings.mcp_catalog_json
             else McpServerCatalog.from_file(Path(settings.mcp_catalog_path))
         )
-        mcp_runtime = SdkMcpRuntime(mcp_catalog, tracer)
+        mcp_runtime = SdkMcpRuntime(
+            mcp_catalog,
+            tracer,
+            connection_pool=mcp_connection_pool,
+            settings=settings,
+            schema_cache=mcp_schema_cache,
+        )
         self.agent_factory = AgentFactory(mcp_catalog)
         self.cancellation_manager = CancellationManager()
         self.openai_runtime = OpenAIAgentsSdkAdapter(settings=settings, tracer=tracer, mcp_runtime=mcp_runtime)

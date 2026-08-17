@@ -164,7 +164,7 @@ class OpenAIAgentsSdkAdapter:
         self.tracer = tracer or Tracer(self.settings.otel_service_name)
         self.model_factory = model_factory or LiteLLMModelFactory(settings=self.settings, tracer=self.tracer)
         catalog = McpServerCatalog.from_file(Path(self.settings.mcp_catalog_path))
-        self.mcp_runtime = mcp_runtime or SdkMcpRuntime(catalog, self.tracer)
+        self.mcp_runtime = mcp_runtime or SdkMcpRuntime(catalog, self.tracer, settings=self.settings)
         self.last_capture = AgentRunCapture()
 
     async def run_streamed(

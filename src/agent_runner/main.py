@@ -10,6 +10,8 @@ from agent_runner.api.responses import HealthResponse
 from agent_runner.api.routes import create_agent_router
 from agent_runner.application_services import ApplicationServices
 from agent_runner.config import ConfigurationManager, Settings
+from agent_runner.mcps.connection_pool import McpConnectionPool
+from agent_runner.mcps.sdk_runtime import McpSchemaCache
 from agent_runner.observability.logging import setup_logging
 from agent_runner.observability.metrics import MetricsCollector
 from agent_runner.observability.tracing import TracingManager
@@ -21,6 +23,8 @@ def create_app() -> FastAPI:
     configuration = ConfigurationManager(Settings())
     metrics = MetricsCollector()
     cancellations = ConversationCancellationRegistry()
+    mcp_connection_pool = McpConnectionPool()
+    mcp_schema_cache = McpSchemaCache()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -37,12 +41,15 @@ def create_app() -> FastAPI:
             tracing=tracing,
             metrics=metrics,
             cancellations=cancellations,
+            mcp_connection_pool=mcp_connection_pool,
+            mcp_schema_cache=mcp_schema_cache,
         )
         if settings.debug_endpoints_enabled or settings.environment in {"local", "dev"}:
             application.include_router(create_debug_router(), prefix="/v1/agent")
         try:
             yield
         finally:
+            await mcp_connection_pool.close()
             await configuration.close()
             tracing.shutdown()
 

@@ -9,7 +9,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 LEDGER: list[dict[str, Any]] = []
 MCP = FastMCP(
-    "agentbreaker-phase12-fixture",
+    "agentbreaker-mcp-test-fixture",
     host="127.0.0.1",
     port=8765,
     streamable_http_path="/mcp",

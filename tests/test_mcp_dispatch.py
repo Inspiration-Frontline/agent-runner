@@ -17,6 +17,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from agent_runner.mcps.connection_pool import McpConnectionKey, PooledMcpConnection
+from agent_runner.mcps.dispatch_tracing import McpTracedOperations
 from agent_runner.mcps.sdk_runtime import DispatchTurnTracker, DurableMcpServer, McpSchemaCache
 from agent_runner.observability.tracing import Tracer
 from agent_runner.runtime.mcp_dispatch import ConversationDispatchRecorder
@@ -44,6 +46,19 @@ class FakeRecorder:
         self.events.append((state, attempt_id))
 
 
+def pooled_transport(call_tool: Any) -> PooledMcpConnection:
+    transport = MCPServerStreamableHttp.__new__(MCPServerStreamableHttp)
+    transport._name = "fixture"
+    transport.call_tool = call_tool
+    manager = SimpleNamespace(cleanup_all=lambda: asyncio.sleep(0))
+    return PooledMcpConnection(
+        McpConnectionKey("fixture", "https://example.test/mcp", "fingerprint"),
+        transport,
+        manager,
+        0,
+    )
+
+
 async def test_durable_server_commits_intent_before_remote_call(monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = FakeRecorder()
     exporter = InMemorySpanExporter()
@@ -51,7 +66,6 @@ async def test_durable_server_commits_intent_before_remote_call(monkeypatch: pyt
     provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     async def call_remote(
-        self: MCPServerStreamableHttp,
         tool_name: str,
         arguments: dict[str, Any] | None,
         meta: dict[str, Any] | None = None,
@@ -59,16 +73,14 @@ async def test_durable_server_commits_intent_before_remote_call(monkeypatch: pyt
         assert recorder.events[0][0] == "before"
         return SimpleNamespace(isError=False)
 
-    monkeypatch.setattr(MCPServerStreamableHttp, "call_tool", call_remote)
+    connection = pooled_transport(call_remote)
     server = DurableMcpServer(
-        params={"url": "https://example.test/mcp"},
-        name="fixture",
-        server_id="fixture",
+        connection,
         recorder=recorder,
         schema_cache=McpSchemaCache(),
         schema_cache_ttl_seconds=60,
         tracker=DispatchTurnTracker(),
-        tracer=Tracer(provider=provider),
+        traced_operations=McpTracedOperations(Tracer(provider=provider)),
     )
 
     await server.call_tool(
@@ -90,7 +102,6 @@ async def test_durable_server_records_unknown_without_retry(monkeypatch: pytest.
     calls = 0
 
     async def call_remote(
-        self: MCPServerStreamableHttp,
         tool_name: str,
         arguments: dict[str, Any] | None,
         meta: dict[str, Any] | None = None,
@@ -99,15 +110,14 @@ async def test_durable_server_records_unknown_without_retry(monkeypatch: pytest.
         calls += 1
         raise TimeoutError("response path lost")
 
-    monkeypatch.setattr(MCPServerStreamableHttp, "call_tool", call_remote)
+    connection = pooled_transport(call_remote)
     server = DurableMcpServer(
-        params={"url": "https://example.test/mcp"},
-        name="fixture",
-        server_id="fixture",
+        connection,
         recorder=recorder,
         schema_cache=McpSchemaCache(),
         schema_cache_ttl_seconds=60,
         tracker=DispatchTurnTracker(),
+        traced_operations=McpTracedOperations(Tracer()),
     )
 
     with pytest.raises(TimeoutError):
@@ -125,22 +135,20 @@ async def test_durable_server_records_connect_failure_as_failed(monkeypatch: pyt
     recorder = FakeRecorder()
 
     async def call_remote(
-        self: MCPServerStreamableHttp,
         tool_name: str,
         arguments: dict[str, Any] | None,
         meta: dict[str, Any] | None = None,
     ) -> object:
         raise httpx.ConnectError("DNS lookup failed", request=httpx.Request("POST", "https://example.test/mcp"))
 
-    monkeypatch.setattr(MCPServerStreamableHttp, "call_tool", call_remote)
+    connection = pooled_transport(call_remote)
     server = DurableMcpServer(
-        params={"url": "https://example.test/mcp"},
-        name="fixture",
-        server_id="fixture",
+        connection,
         recorder=recorder,
         schema_cache=McpSchemaCache(),
         schema_cache_ttl_seconds=60,
         tracker=DispatchTurnTracker(),
+        traced_operations=McpTracedOperations(Tracer()),
     )
 
     with pytest.raises(httpx.ConnectError):

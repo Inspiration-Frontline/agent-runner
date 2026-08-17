@@ -42,12 +42,12 @@ def run_case(
     env.update({
         "SERVER_PORT": runner_url.rsplit(":", maxsplit=1)[1],
         "DEFAULT_AGENT_ID": str(agent_id),
-        "LOCAL_AGENT_CONFIG_PATH": str(project_root / "tests" / "integration" / "phase12_agents.json"),
+        "LOCAL_AGENT_CONFIG_PATH": str(project_root / "tests" / "integration" / "mcp_validation_agents.json"),
         "NACOS_ENABLED": "false",
         "OPEN_BROWSER_ON_STARTUP": "false",
     })
-    stdout_path = output_dir / f"phase12-runner-{agent_id}.out.log"
-    stderr_path = output_dir / f"phase12-runner-{agent_id}.err.log"
+    stdout_path = output_dir / f"mcp-validation-runner-{agent_id}.out.log"
+    stderr_path = output_dir / f"mcp-validation-runner-{agent_id}.err.log"
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
         process = subprocess.Popen(
             [sys.executable, "src/main.py"],
@@ -70,7 +70,7 @@ def run_case(
                         "conversation_id": conversation_id,
                         "message": CASE_MESSAGES.get(
                             agent_id,
-                            f"Run the configured Phase 12 case for Agent {agent_id}.",
+                            "Complete the configured MCP validation request.",
                         ),
                         "file_ids": [],
                         "references": [],
@@ -79,7 +79,7 @@ def run_case(
                 ) as response:
                     response.raise_for_status()
                     sse = "\n".join(response.iter_lines())
-            sse_path = output_dir / f"phase12-agent-{agent_id}.sse"
+            sse_path = output_dir / f"mcp-validation-agent-{agent_id}.sse"
             sse_path.write_text(sse, encoding="utf-8")
             events = [
                 json.loads(line.removeprefix("data: "))
@@ -127,7 +127,7 @@ def main() -> None:
         run_case(project_root, args.gateway_url, args.runner_url, output_dir, agent_id)
         for agent_id in args.agent_ids
     ]
-    manifest = output_dir / "phase12-live-acceptance.json"
+    manifest = output_dir / "mcp-live-acceptance.json"
     manifest.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
