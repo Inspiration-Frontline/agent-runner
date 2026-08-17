@@ -41,6 +41,7 @@ class LifecycleManager:
         """
         Initialize the lifecycle manager with empty request tracking.
         """
+        # Key: request ID. Value: lifecycle state for the currently executing request.
         self._active_requests: dict[str, RequestLifecycle] = {}
 
     def register(self, lifecycle: RequestLifecycle) -> None:

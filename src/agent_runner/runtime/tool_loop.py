@@ -79,7 +79,9 @@ class ToolExecutionCollector:
         cancellation. Keeping calls and executions here lets persistence reconstruct a complete,
         one-to-one audit trail independently of SDK object lifetime.
         """
+        # Key: model Tool call ID. Value: terminal execution result captured for persistence.
         self._executions: dict[str, CapturedToolExecution] = {}
+        # Key: model Tool call ID. Value: original model-requested Tool call and arguments.
         self._calls: dict[str, CapturedToolCall] = {}
         current_settings = settings or Settings()
         self._tracing = ToolTracing(tracer or Tracer(current_settings.otel_service_name), current_settings)

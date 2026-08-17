@@ -24,6 +24,7 @@ class AgentFactory:
         """
         Initialize the agent factory with an empty registry.
         """
+        # Key: public Agent ID. Value: latest validated runtime definition for that Agent.
         self._agent_registry: dict[int, AgentDefinition] = {}
         self._mcp_catalog = mcp_catalog or McpServerCatalog.empty()
 

@@ -563,6 +563,7 @@ class RuntimeOrchestrator:
         user_id: int,
         state: RuntimeRequestState,
     ) -> None:
+        """Freeze request/Agent/MCP identity before the first model call and retain its revision."""
         if not hasattr(self.conversation_client, "create_round_checkpoint"):
             return
         if state.agent is None:
@@ -604,6 +605,7 @@ class RuntimeOrchestrator:
         status: RoundStatus,
         error_message: str,
     ) -> None:
+        """Convert captured SDK Turns into one ordered revision-checked progress mutation."""
         if state.agent is None or not capture.turns:
             return
         turns = []
@@ -641,6 +643,7 @@ class RuntimeOrchestrator:
         end_time: int,
         final_answer: AssistantAnswer | None = None,
     ) -> None:
+        """Commit one terminal Round transition and mark terminal persistence as complete."""
         request = FinalizeConversationRoundRequest(
             user_id=user_id,
             conversation_id=conversation_request.conversation_id,

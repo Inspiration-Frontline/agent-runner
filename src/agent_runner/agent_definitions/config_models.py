@@ -69,5 +69,5 @@ class AgentDefinition:
     memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
     max_output_tokens: int = 4096
     temperature: float = 0.7
+    # Key: extension metadata name. Value: JSON-compatible Agent configuration metadata.
     metadata: dict[str, Any] = field(default_factory=dict)
-

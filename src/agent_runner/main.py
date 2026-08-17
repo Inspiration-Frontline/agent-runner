@@ -28,6 +28,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        """Initialize shared configuration/tracing services and deterministically close owned resources."""
         setup_logging()
         settings = await configuration.initialize()
         tracing = TracingManager(

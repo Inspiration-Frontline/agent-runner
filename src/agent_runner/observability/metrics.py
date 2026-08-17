@@ -10,6 +10,7 @@ class MetricsCollector:
     """Application-scoped Prometheus instruments and HTTP metrics middleware."""
 
     def __init__(self) -> None:
+        """Create an isolated registry so tests and multiple app instances never share collectors."""
         self._registry = CollectorRegistry()
         self._request_count = Counter(
             "agent_runner_requests_total",

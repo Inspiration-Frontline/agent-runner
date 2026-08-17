@@ -67,6 +67,7 @@ class NacosConfigLoader:
         self.password = password
         self.enabled = enabled
         self.config_client: NacosConfigService | None = None
+        # Key: Nacos configuration property name. Value: latest parsed remote property value.
         self._cached_config: dict[str, Any] = {}
         self._listener_task: asyncio.Task[None] | None = None
 

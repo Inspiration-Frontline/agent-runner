@@ -39,6 +39,7 @@ class ToolDefinition:
     tool_key: str
     tool_name: str
     description: str
+    # Key: JSON Schema property name. Value: schema keyword/value describing Tool arguments.
     parameters: dict[str, Any]
     strict: bool = False
     definition_hash: str = field(init=False)
@@ -98,7 +99,9 @@ class ToolRegistry:
         """
         Initialize the tool registry with empty collections.
         """
+        # Key: stable Tool registry key. Value: executable definition and its source provenance.
         self._tools: dict[str, ToolDefinition] = {}
+        # Key: Tool source category. Value: registration-ordered Tool keys from that source.
         self._tools_by_source: dict[ToolSourceType, list[str]] = {
             ToolSourceType.INTERNAL: [],
             ToolSourceType.BUSINESS: [],

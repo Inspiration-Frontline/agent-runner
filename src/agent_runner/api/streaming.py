@@ -54,6 +54,7 @@ class StreamEvent(BaseModel):
     content: str | None = None
     tool: str | None = None
     tool_call_id: str | None = None
+    # Key: Tool argument name. Value: model-generated JSON-compatible argument value.
     tool_args: dict[str, Any] | None = None
     tool_result: Any = None
     tool_status: str | None = None

@@ -96,6 +96,7 @@ class RuntimeEventBus:
         """
         Initialize the event bus with empty handler lists.
         """
+        # Key: runtime event type. Value: subscription-ordered handlers invoked for that event.
         self._handlers: dict[RuntimeEventType, list[RuntimeEventHandler]] = {
             event_type: [] for event_type in RuntimeEventType
         }

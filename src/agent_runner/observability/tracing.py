@@ -63,6 +63,7 @@ def trace_json(value: Any, max_chars: int) -> str:
 
 
 def _sanitize_trace_value(value: Any, *, depth: int) -> Any:
+    """Recursively produce bounded, credential-redacted values safe for optional span capture."""
     if depth >= _MAX_DEPTH:
         return "[MAX_DEPTH]"
     if value is None or isinstance(value, bool | int | float):
@@ -151,6 +152,7 @@ class Tracer:
         parent_context: Context | None = None,
         kind: SpanKind = SpanKind.INTERNAL,
     ) -> Generator[Span]:
+        """Activate one span, preserve explicit parentage, and record escaping exceptions."""
         parent_span = trace.get_current_span(parent_context).get_span_context() if parent_context else None
         parent_id = _hex_span_id(parent_span) if parent_span is not None and parent_span.is_valid else None
         with self._otel_tracer.start_as_current_span(

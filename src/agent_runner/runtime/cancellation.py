@@ -105,6 +105,7 @@ class CancellationManager:
         Conversation cancellation uses :class:`ConversationCancellationRegistry`; this manager
         remains for request-local token lookup and cleanup in older integrations.
         """
+        # Key: caller-supplied token ID. Value: request-local cooperative cancellation token.
         self._tokens: dict[str, CancellationToken] = {}
 
     def create_token(self, token_id: str | None = None) -> CancellationToken:
@@ -179,6 +180,7 @@ class ConversationCancellationRegistry:
         Tokens are intentionally in-memory: cancellation is a best-effort control signal for the
         current Runner process, while durable Round status is persisted by the orchestrator.
         """
+        # Key: authenticated user ID and Conversation ID. Value: active generation cancellation token.
         self._tokens: dict[tuple[int, str], CancellationToken] = {}
 
     def register(self, user_id: int, conversation_id: str, token: CancellationToken) -> None:

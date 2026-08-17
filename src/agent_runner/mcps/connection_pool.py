@@ -81,6 +81,7 @@ class McpConnectionPool:
 
     def __init__(self) -> None:
         """Create an empty pool whose connections are opened lazily on first use."""
+        # Key: server, URL, and credential fingerprint identity. Value: isolated connection bucket.
         self._buckets: dict[McpConnectionKey, _ConnectionBucket] = {}
         self._closed = False
 
@@ -90,11 +91,34 @@ class McpConnectionPool:
         settings: McpConnectionPoolSettings,
         creator: Callable[[], Awaitable[PooledMcpConnection]],
     ) -> PooledMcpConnection:
-        """Borrow an exclusive live connection, waiting only up to the configured timeout."""
+        """Borrow one exclusive live connection through a bounded, cancellation-safe state machine.
+
+        The method first evicts expired idle entries, then atomically chooses one of three paths:
+        reuse an idle connection, reserve capacity for one new connection, or wait for a return.
+        ``bucket.creating`` reserves capacity before network I/O starts, so concurrent borrowers
+        cannot all observe free capacity and exceed the configured maximum. Connection creation and
+        cleanup happen outside the Condition lock so slow network operations never block releases.
+
+        Args:
+            key: Credential-isolated identity of the target MCP server.
+            settings: Effective capacity, idle-expiry, and wait-time limits.
+            creator: Async factory that opens one initialized SDK connection.
+
+        Returns:
+            An exclusively leased connection that must later be passed to :meth:`release`.
+
+        Raises:
+            TimeoutError: No connection becomes available before the shared borrow deadline.
+            RuntimeError: The application pool is closed before the lease can be returned.
+        """
+        # One absolute deadline covers every wake-up, preventing spurious notifications from
+        # restarting the configured borrow timeout.
         deadline = monotonic() + settings.borrow_timeout_seconds
         bucket = self._buckets.setdefault(key, _ConnectionBucket())
 
         while True:
+            # Remove expired entries under the bucket lock, but close their network resources after
+            # releasing it. SDK cleanup can block and must not stall borrowers returning leases.
             expired = await self._take_expired(bucket, settings.idle_timeout_seconds)
             await self._close_all(expired)
 
@@ -106,6 +130,8 @@ class McpConnectionPool:
                     reusable.borrowed = True
                     return reusable
                 if len(bucket.connections) + bucket.creating < settings.max_connections_per_server:
+                    # Reserve the slot before leaving the lock. Other borrowers include this count
+                    # in their capacity check while the actual Streamable HTTP handshake is running.
                     bucket.creating += 1
                     break
                 remaining = deadline - monotonic()
@@ -116,14 +142,19 @@ class McpConnectionPool:
                 except TimeoutError as error:
                     raise TimeoutError(f"Timed out waiting for an MCP connection to {key.server_id}.") from error
 
+        # The remote initialize handshake intentionally runs without holding bucket.condition.
         try:
             connection = await creator()
         except BaseException:
+            # Cancellation and ordinary failures both release the capacity reservation and wake a
+            # waiter that may now create a replacement connection.
             async with bucket.condition:
                 bucket.creating -= 1
                 bucket.condition.notify_all()
             raise
 
+        # Publish the completed connection atomically. If shutdown won the race, close this late
+        # connection instead of allowing a lease to escape a closed application pool.
         async with bucket.condition:
             bucket.creating -= 1
             if self._closed:
@@ -138,7 +169,12 @@ class McpConnectionPool:
         raise RuntimeError("MCP connection pool closed while creating a connection.")
 
     async def release(self, connection: PooledMcpConnection, invalidate: bool = False) -> None:
-        """Return a lease or evict it after a transport-level failure."""
+        """Return a lease or atomically evict it after a transport-level failure.
+
+        Invalid connections are detached while holding the bucket lock, then closed outside the
+        lock. Every return notifies waiters because it either exposes reusable capacity or removes a
+        broken entry so a waiter can reserve replacement capacity.
+        """
         bucket = self._buckets.get(connection.key)
         if bucket is None:
             await connection.close()
@@ -156,7 +192,11 @@ class McpConnectionPool:
             await connection.close()
 
     async def close(self) -> None:
-        """Close idle and borrowed connections during FastAPI application shutdown."""
+        """Detach and close all connections during FastAPI application shutdown.
+
+        Buckets are drained before SDK cleanup begins. Borrowers waking during this process observe
+        ``_closed`` and fail instead of receiving a connection whose manager is being torn down.
+        """
         self._closed = True
         connections: list[PooledMcpConnection] = []
         for bucket in self._buckets.values():
@@ -167,7 +207,7 @@ class McpConnectionPool:
         await self._close_all(connections)
 
     async def _take_expired(self, bucket: _ConnectionBucket, idle_timeout_seconds: float) -> list[PooledMcpConnection]:
-        """Remove idle, returned connections before a new borrow attempt."""
+        """Atomically detach returned connections whose monotonic idle age reached the limit."""
         now = monotonic()
         async with bucket.condition:
             expired = [
@@ -181,7 +221,7 @@ class McpConnectionPool:
 
     @staticmethod
     async def _close_all(connections: list[PooledMcpConnection]) -> None:
-        """Close independent SDK managers without allowing one cleanup failure to leak the rest."""
+        """Close independent SDK managers without allowing one cleanup failure to skip the rest."""
         results = await asyncio.gather(*(connection.close() for connection in connections), return_exceptions=True)
         for result in results:
             if isinstance(result, BaseException):

@@ -74,7 +74,9 @@ class McpSchemaCache:
 
     def __init__(self) -> None:
         """Create an empty cache; entries are created lazily after a successful discovery."""
+        # Key: credential-isolated McpConnectionKey.cache_key. Value: Tool schema snapshot and expiry.
         self._entries: dict[str, _SchemaCacheEntry] = {}
+        # Key: the same cache key. Value: per-server lock that coalesces concurrent cache refreshes.
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def get(
@@ -107,6 +109,7 @@ class DispatchTurnTracker:
     def __init__(self) -> None:
         """Start an empty tracker before the first model response is received."""
         self.turn_number = 0
+        # Key: model Tool call ID. Value: durable dispatch state and recovery explanation.
         self.outcomes: dict[str, tuple[str, str]] = {}
 
     def model_response_completed(self) -> None:
@@ -149,6 +152,7 @@ class McpDispatchHooks(AgentHooksBase[Any, Agent[Any]]):
         """Create hooks for one request tracker before the Agent SDK starts execution."""
         self._tracker = tracker
         self._collector: ExternalExecutionCollector | None = None
+        # Key: SDK-visible Tool name. Value: AgentBreaker definition carrying source provenance.
         self._definitions: dict[str, ToolDefinition] = {}
 
     def bind_collector(self, collector: ExternalExecutionCollector, definitions: Sequence[ToolDefinition]) -> None:
@@ -364,6 +368,38 @@ class McpConnectionDiagnostic:
 
 
 @dataclass(frozen=True)
+class McpServerBorrowResult:
+    """One binding's connection-preflight diagnostic and optional request-scoped server wrapper."""
+
+    diagnostic: McpConnectionDiagnostic
+    server: DurableMcpServer | None
+
+
+@dataclass(frozen=True)
+class DiscoveredMcpServer:
+    """One prepared server paired with the Tool schemas discovered from it."""
+
+    server: DurableMcpServer
+    tools: tuple[McpTool, ...]
+
+
+@dataclass(frozen=True)
+class McpServerDiscoveryError:
+    """Schema-discovery failure associated with one catalog server identity."""
+
+    server_id: str
+    message: str
+
+
+@dataclass(frozen=True)
+class McpServerDiscoveryResult:
+    """Complete schema-discovery outcome without positional multi-value return semantics."""
+
+    servers: tuple[DiscoveredMcpServer, ...]
+    errors: tuple[McpServerDiscoveryError, ...]
+
+
+@dataclass(frozen=True)
 class ActiveMcpSession:
     """The request-scoped SDK servers, tool definitions, diagnostics, and event hooks."""
 
@@ -408,23 +444,23 @@ class SdkMcpRuntime:
         diagnostics: list[McpConnectionDiagnostic] = []
         try:
             for binding in bindings:
-                diagnostic, server = await self._borrow_server(binding, recorder, tracker)
-                diagnostics.append(diagnostic)
-                if server is not None:
-                    leases.append(server)
+                borrow_result = await self._borrow_server(binding, recorder, tracker)
+                diagnostics.append(borrow_result.diagnostic)
+                if borrow_result.server is not None:
+                    leases.append(borrow_result.server)
             failed_required = [item for item in diagnostics if item.required and not item.connected]
             if failed_required:
                 details = "; ".join(f"{item.server_id}: {item.error}" for item in failed_required)
                 raise RequiredMcpServerUnavailableError(f"Required MCP server unavailable: {details}")
-            discovered, discovery_errors = await self._discover_servers(leases)
-            diagnostics = self._merge_discovery_errors(diagnostics, discovery_errors)
+            discovery_result = await self._discover_servers(leases)
+            diagnostics = self._merge_discovery_errors(diagnostics, discovery_result.errors)
             failed_required = [item for item in diagnostics if item.required and not item.connected]
             self._trace_diagnostics(diagnostics)
             if failed_required:
                 details = "; ".join(f"{item.server_id}: {item.error}" for item in failed_required)
                 raise RequiredMcpServerUnavailableError(f"Required MCP server unavailable: {details}")
-            active_servers = tuple(server for server, _ in discovered)
-            definitions = tuple(self._build_definitions(discovered))
+            active_servers = tuple(item.server for item in discovery_result.servers)
+            definitions = tuple(self._build_definitions(discovery_result.servers))
             yield ActiveMcpSession(active_servers, tuple(diagnostics), definitions, McpDispatchHooks(tracker))
         finally:
             await asyncio.gather(
@@ -437,12 +473,13 @@ class SdkMcpRuntime:
         binding: MCPServerBinding,
         recorder: DispatchEvidenceRecorder | None,
         tracker: DispatchTurnTracker,
-    ) -> tuple[McpConnectionDiagnostic, DurableMcpServer | None]:
-        """Resolve one binding and borrow an exclusive connection or return a non-secret diagnostic."""
+    ) -> McpServerBorrowResult:
+        """Resolve one binding into a named preflight result with an optional borrowed server."""
         try:
             resolved = self._catalog.resolve(binding.server_id)
             if not resolved.profile.enabled:
-                return McpConnectionDiagnostic(binding.server_id, binding.required, False, "Server is disabled"), None
+                diagnostic = McpConnectionDiagnostic(binding.server_id, binding.required, False, "Server is disabled")
+                return McpServerBorrowResult(diagnostic, None)
             key = McpConnectionKey.from_resolved(resolved)
             connection = await self._connection_pool.borrow(
                 key,
@@ -457,10 +494,19 @@ class SdkMcpRuntime:
                 tracker,
                 self._traced_operations,
             )
-            return McpConnectionDiagnostic(binding.server_id, binding.required, True), server
+            return McpServerBorrowResult(
+                McpConnectionDiagnostic(binding.server_id, binding.required, True),
+                server,
+            )
         except BaseException as error:
             logger.warning("MCP connection preflight failed", extra={"server_id": binding.server_id, "error": str(error)})
-            return McpConnectionDiagnostic(binding.server_id, binding.required, False, str(error) or type(error).__name__), None
+            diagnostic = McpConnectionDiagnostic(
+                binding.server_id,
+                binding.required,
+                False,
+                str(error) or type(error).__name__,
+            )
+            return McpServerBorrowResult(diagnostic, None)
 
     def _pool_settings(self) -> McpConnectionPoolSettings:
         """Translate the current Nacos-over-file settings snapshot into pool limits."""
@@ -508,12 +554,13 @@ class SdkMcpRuntime:
     @staticmethod
     def _merge_discovery_errors(
         diagnostics: list[McpConnectionDiagnostic],
-        errors: dict[str, str],
+        errors: Sequence[McpServerDiscoveryError],
     ) -> list[McpConnectionDiagnostic]:
         """Replace successful connection diagnostics with discovery failures for the same server."""
+        errors_by_server_id = {error.server_id: error.message for error in errors}
         return [
-            McpConnectionDiagnostic(item.server_id, item.required, False, errors[item.server_id])
-            if item.server_id in errors
+            McpConnectionDiagnostic(item.server_id, item.required, False, errors_by_server_id[item.server_id])
+            if item.server_id in errors_by_server_id
             else item
             for item in diagnostics
         ]
@@ -521,25 +568,26 @@ class SdkMcpRuntime:
     @staticmethod
     async def _discover_servers(
         servers: Sequence[DurableMcpServer],
-    ) -> tuple[list[tuple[DurableMcpServer, list[McpTool]]], dict[str, str]]:
-        """Run `tools/list` concurrently for the currently borrowed server wrappers."""
+    ) -> McpServerDiscoveryResult:
+        """Run concurrent `tools/list` calls and return one named aggregate discovery result."""
         results = await asyncio.gather(*(server.list_tools() for server in servers), return_exceptions=True)
-        discovered: list[tuple[DurableMcpServer, list[McpTool]]] = []
-        errors: dict[str, str] = {}
+        discovered: list[DiscoveredMcpServer] = []
+        errors: list[McpServerDiscoveryError] = []
         for server, result in zip(servers, results, strict=True):
             if isinstance(result, BaseException):
-                errors[server.name] = str(result) or type(result).__name__
-                logger.warning("MCP schema discovery failed", extra={"server_id": server.name, "error": errors[server.name]})
+                message = str(result) or type(result).__name__
+                errors.append(McpServerDiscoveryError(server.name, message))
+                logger.warning("MCP schema discovery failed", extra={"server_id": server.name, "error": message})
             else:
-                discovered.append((server, result))
-        return discovered, errors
+                discovered.append(DiscoveredMcpServer(server, tuple(result)))
+        return McpServerDiscoveryResult(tuple(discovered), tuple(errors))
 
     @staticmethod
     def _build_definitions(
-        discovered: list[tuple[DurableMcpServer, list[McpTool]]],
+        discovered: Sequence[DiscoveredMcpServer],
     ) -> list[ToolDefinition]:
         """Convert discovered MCP schemas into SDK function tools plus AgentBreaker provenance."""
-        batches = [(index, server, tools) for index, (server, tools) in enumerate(discovered)]
+        batches = [(index, item.server, item.tools) for index, item in enumerate(discovered)]
         overrides = MCPUtil._build_prefixed_tool_name_overrides(batches, reserved_names=set())
         definitions: list[ToolDefinition] = []
         for server_index, server, tools in batches:

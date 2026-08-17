@@ -37,6 +37,7 @@ class McpServerProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: str
+    # Key: outbound HTTP header name. Value: unresolved ${secret:NAME} reference.
     headers: dict[str, str] = Field(default_factory=dict)
     display_name: str = ""
     enabled: bool = True
@@ -88,6 +89,7 @@ class McpServerCatalogDocument(BaseModel):
     """Schema of the catalog JSON document whose root uses the standard mcpServers property."""
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    # Key: stable MCP server ID. Value: validated connection and policy profile.
     mcp_servers: dict[str, McpServerProfile] = Field(alias="mcpServers")
 
     @field_validator("mcp_servers", mode="before")
@@ -107,6 +109,7 @@ class ResolvedMcpServer:
     server_id: str
     profile: McpServerProfile
     url: str
+    # Key: outbound HTTP header name. Value: resolved secret header value for connection creation.
     headers: dict[str, str]
 
 
