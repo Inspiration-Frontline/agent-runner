@@ -32,6 +32,7 @@ def setup_logging(level: int = logging.INFO, json_format: bool = False) -> None:
     )
     for handler in logging.getLogger().handlers:
         handler.addFilter(RequestContextFilter())
+        handler.addFilter(ExternalMcpCredentialFilter())
 
     processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
@@ -91,3 +92,24 @@ class RequestContextFilter(logging.Filter):
         record.trace_id = current_trace_id() or "-"
         record.span_id = current_span_id() or "-"
         return True
+
+
+class ExternalMcpCredentialFilter(logging.Filter):
+    """Suppress third-party MCP logs that may render resolved URL credentials or Headers.
+
+    Agent Runner emits its own typed, credential-safe diagnostic at every SDK failure boundary.
+    The upstream SDK logs exceptions before returning control and may include a resolved URL in
+    traceback text, so those duplicate records cannot safely cross the application log boundary.
+    """
+
+    _UNSAFE_LOGGER_PREFIXES = (
+        "agents.mcp",
+        "httpcore",
+        "httpx",
+        "mcp.client",
+        "openai.agents",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Allow application diagnostics while dropping credential-bearing upstream MCP records."""
+        return not record.name.startswith(self._UNSAFE_LOGGER_PREFIXES)

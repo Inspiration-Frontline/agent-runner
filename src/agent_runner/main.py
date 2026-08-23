@@ -12,6 +12,7 @@ from agent_runner.application_services import ApplicationServices
 from agent_runner.config import ConfigurationManager, Settings
 from agent_runner.mcps.connection_pool import McpConnectionPool
 from agent_runner.mcps.sdk_runtime import McpSchemaCache
+from agent_runner.mcps.secrets import ConfigurationSecretProvider
 from agent_runner.observability.logging import setup_logging
 from agent_runner.observability.metrics import MetricsCollector
 from agent_runner.observability.tracing import TracingManager
@@ -25,6 +26,7 @@ def create_app() -> FastAPI:
     cancellations = ConversationCancellationRegistry()
     mcp_connection_pool = McpConnectionPool()
     mcp_schema_cache = McpSchemaCache()
+    mcp_secret_provider = ConfigurationSecretProvider(configuration.get_mcp_secret_snapshot)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -44,6 +46,7 @@ def create_app() -> FastAPI:
             cancellations=cancellations,
             mcp_connection_pool=mcp_connection_pool,
             mcp_schema_cache=mcp_schema_cache,
+            mcp_secret_provider=mcp_secret_provider,
         )
         if settings.debug_endpoints_enabled or settings.environment in {"local", "dev"}:
             application.include_router(create_debug_router(), prefix="/v1/agent")

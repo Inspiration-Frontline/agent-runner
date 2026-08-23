@@ -1,35 +1,18 @@
 import json
-import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SECRET_PATTERN = re.compile(r"^\$\{secret:([A-Za-z_][A-Za-z0-9_]*)}$")
-
-
-class SecretProvider(Protocol):
-    """Resolves configuration-time secret references immediately before an outbound call."""
-
-    def resolve(self, reference: str) -> str:
-        """Return the secret value identified by one validated catalog reference."""
-
-
-class EnvironmentSecretProvider:
-    """Secret provider that reads approved ${secret:ENV_NAME} references from the process environment."""
-
-    def resolve(self, reference: str) -> str:
-        """Resolve one environment-variable reference without logging its value."""
-        match = SECRET_PATTERN.fullmatch(reference)
-        if match is None:
-            raise ValueError("MCP credentials must use ${secret:ENV_NAME} references")
-        value = os.getenv(match.group(1))
-        if not value:
-            raise ValueError(f"MCP secret is unavailable: {match.group(1)}")
-        return value
+from agent_runner.mcps.secrets import (
+    EnvironmentSecretProvider,
+    SecretProvider,
+    SecretTemplateResolver,
+    has_secret_reference,
+    validate_secret_template,
+)
 
 
 class McpServerProfile(BaseModel):
@@ -37,8 +20,9 @@ class McpServerProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: str
-    # Key: outbound HTTP header name. Value: unresolved ${secret:NAME} reference.
+    # Key: outbound HTTP header name. Value: unresolved template containing a ${secret:NAME} reference.
     headers: dict[str, str] = Field(default_factory=dict)
+    allow_url_secret: bool = False
     display_name: str = ""
     enabled: bool = True
     disabled_tools: frozenset[str] = Field(default_factory=frozenset)
@@ -58,30 +42,29 @@ class McpServerProfile(BaseModel):
             raise ValueError("MCP Streamable HTTP URL must use http or https")
         if parsed.username or parsed.password:
             raise ValueError("MCP URL must not contain literal credentials")
-        for token in re.findall(r"\$\{secret:[^}]+}", value):
-            if SECRET_PATTERN.fullmatch(token) is None:
-                raise ValueError("MCP URL contains an invalid secret reference")
-        return value
+        return validate_secret_template(value)
 
     @field_validator("headers")
     @classmethod
     def validate_headers(cls, value: dict[str, str]) -> dict[str, str]:
-        """Validate header names and require values to be secret references."""
+        """Validate header names and require values to contain Secret references."""
         normalized: dict[str, str] = {}
         for name, header_value in value.items():
             clean_name = name.strip()
             if not clean_name or any(char in clean_name for char in "\r\n:"):
                 raise ValueError("MCP header name is invalid")
-            if SECRET_PATTERN.fullmatch(header_value) is None:
-                raise ValueError("MCP header values must be secret references")
-            normalized[clean_name] = header_value
+            if any(char in header_value for char in "\r\n"):
+                raise ValueError("MCP header value is invalid")
+            normalized[clean_name] = validate_secret_template(header_value, require_reference=True)
         return normalized
 
     @model_validator(mode="after")
-    def validate_policy(self) -> "McpServerProfile":
-        """Keep the currently supported policy surface explicit and fail fast for unsupported values."""
+    def validate_profile(self) -> "McpServerProfile":
+        """Reject unsupported Policy and implicit URL credentials before connection setup."""
         if self.policy != "FULL_ACCESS":
             raise ValueError("Currently only FULL_ACCESS is supported.")
+        if has_secret_reference(self.url) and not self.allow_url_secret:
+            raise ValueError("MCP URL Secret references require allow_url_secret=true")
         return self
 
 
@@ -111,6 +94,7 @@ class ResolvedMcpServer:
     url: str
     # Key: outbound HTTP header name. Value: resolved secret header value for connection creation.
     headers: dict[str, str]
+    configuration_revision: int
 
 
 class McpServerCatalog:
@@ -146,10 +130,9 @@ class McpServerCatalog:
         profile = self._profiles.get(server_id)
         if profile is None:
             raise ValueError(f"Unknown MCP server: {server_id}")
-        url = self._resolve_template(profile.url)
-        headers = {name: self._secrets.resolve(value) for name, value in profile.headers.items()}
-        return ResolvedMcpServer(server_id, profile, url, headers)
+        snapshot = self._secrets.get_snapshot()
+        template_resolver = SecretTemplateResolver(snapshot)
+        url = template_resolver.resolve(profile.url)
+        headers = {name: template_resolver.resolve(value) for name, value in profile.headers.items()}
 
-    def _resolve_template(self, value: str) -> str:
-        """Replace each validated ${secret:...} token while retaining non-secret URL text."""
-        return re.sub(r"\$\{secret:[^}]+}", lambda match: self._secrets.resolve(match.group(0)), value)
+        return ResolvedMcpServer(server_id, profile, url, headers, snapshot.configuration_revision)

@@ -1,9 +1,10 @@
+from contextlib import suppress
+
 from agent_runner.config import Settings
 from agent_runner.local_startup import open_docs_when_ready
 from agent_runner.main import create_app
 
 if __name__ == "__main__":
-    import asyncio
     import threading
 
     import uvicorn
@@ -24,4 +25,5 @@ if __name__ == "__main__":
         port=settings.server_port,
     )
     server = uvicorn.Server(server_config)
-    asyncio.run(server.serve())
+    with suppress(KeyboardInterrupt):
+        server.run()

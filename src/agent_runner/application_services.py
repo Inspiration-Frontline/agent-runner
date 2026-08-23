@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from agent_runner.config import ConfigurationManager, Settings
 from agent_runner.mcps.connection_pool import McpConnectionPool
 from agent_runner.mcps.sdk_runtime import McpSchemaCache
+from agent_runner.mcps.secrets import SecretProvider
 from agent_runner.observability.metrics import MetricsCollector
 from agent_runner.observability.tracing import TracingManager
 from agent_runner.runtime.cancellation import ConversationCancellationRegistry
@@ -18,6 +19,7 @@ class ApplicationServices:
     cancellations: ConversationCancellationRegistry
     mcp_connection_pool: McpConnectionPool
     mcp_schema_cache: McpSchemaCache
+    mcp_secret_provider: SecretProvider
 
     def get_settings(self) -> Settings:
         """Return the latest Nacos-over-file settings snapshot for a new request."""

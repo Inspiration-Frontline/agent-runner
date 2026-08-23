@@ -3,7 +3,6 @@ import json
 import logging
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any, Literal, Protocol, TypeIs
 from uuid import uuid4
 
@@ -24,7 +23,7 @@ from openai.types.responses.response_input_text_param import ResponseInputTextPa
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
 
 from agent_runner.agent_definitions.config_models import AgentDefinition
-from agent_runner.config import Settings
+from agent_runner.config import Settings, resolve_project_path
 from agent_runner.context.builder import (
     AgentContext,
     CapturedMessage,
@@ -37,7 +36,7 @@ from agent_runner.context.builder import (
 )
 from agent_runner.gateway.litellm_client import LiteLLMModelFactory
 from agent_runner.mcps.catalog import McpServerCatalog
-from agent_runner.mcps.sdk_runtime import DispatchEvidenceRecorder, SdkMcpRuntime
+from agent_runner.mcps.sdk_runtime import DispatchEvidenceRecorder, DurableMcpServer, SdkMcpRuntime
 from agent_runner.observability.tracing import Tracer, current_trace_id
 from agent_runner.runtime.cancellation import CancellationToken
 from agent_runner.runtime.model_events import (
@@ -163,7 +162,7 @@ class OpenAIAgentsSdkAdapter:
         self.settings = settings or Settings()
         self.tracer = tracer or Tracer(self.settings.otel_service_name)
         self.model_factory = model_factory or LiteLLMModelFactory(settings=self.settings, tracer=self.tracer)
-        catalog = McpServerCatalog.from_file(Path(self.settings.mcp_catalog_path))
+        catalog = McpServerCatalog.from_file(resolve_project_path(self.settings.mcp_catalog_path))
         self.mcp_runtime = mcp_runtime or SdkMcpRuntime(catalog, self.tracer, settings=self.settings)
         self.last_capture = AgentRunCapture()
 
@@ -348,6 +347,9 @@ class OpenAIAgentsSdkAdapter:
         definitions = [*local_definitions, *(mcp_definitions or [])]
         if dispatch_hooks is not None:
             dispatch_hooks.bind_collector(collector, definitions)
+        for mcp_server in mcp_servers:
+            if isinstance(mcp_server, DurableMcpServer):
+                mcp_server.bind_execution_collector(collector, definitions)
         sdk_tools = self._build_sdk_tools(local_definitions, collector, cancellation_token)
         return PreparedSdkExecution(
             agent=self._build_sdk_agent(

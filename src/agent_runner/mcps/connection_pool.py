@@ -11,8 +11,9 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from time import monotonic
+from typing import cast
 
-from agents.mcp import MCPServerManager, MCPServerStreamableHttp
+from agents.mcp import MCPServerStreamableHttp
 
 from agent_runner.mcps.catalog import ResolvedMcpServer
 
@@ -31,20 +32,117 @@ class McpConnectionKey:
     """Non-secret identity used to isolate pooled connections by effective credentials."""
 
     server_id: str
-    url: str
+    endpoint_fingerprint: str
     credential_fingerprint: str
+    configuration_revision: int = field(compare=False)
 
     @classmethod
     def from_resolved(cls, server: ResolvedMcpServer) -> "McpConnectionKey":
         """Create a key without retaining resolved credential values outside the SDK client."""
+        endpoint_fingerprint = hashlib.sha256(server.profile.url.encode("utf-8")).hexdigest()
         canonical_headers = json.dumps(sorted(server.headers.items()), separators=(",", ":"))
-        fingerprint = hashlib.sha256(canonical_headers.encode("utf-8")).hexdigest()
-        return cls(server.server_id, server.url, fingerprint)
+        resolved_credentials = f"{server.url}|{canonical_headers}"
+        credential_fingerprint = hashlib.sha256(resolved_credentials.encode("utf-8")).hexdigest()
+        return cls(
+            server.server_id,
+            endpoint_fingerprint,
+            credential_fingerprint,
+            server.configuration_revision,
+        )
 
     @property
     def cache_key(self) -> str:
         """Return a stable cache identifier that never exposes credentials in logs or memory keys."""
-        return f"{self.server_id}:{hashlib.sha256(f'{self.url}|{self.credential_fingerprint}'.encode()).hexdigest()}"
+        return f"{self.server_id}:{self.endpoint_fingerprint}:{self.credential_fingerprint}"
+
+
+class TaskAffineMcpConnectionManager:
+    """Own one Streamable HTTP lifecycle in the same task from connect through cleanup.
+
+    AnyIO cancel scopes used by the MCP transport are task-affine. A transport background failure
+    may cancel its owning task, so cleanup must run in that task's ``finally`` block instead of
+    being delegated after the worker has already exited.
+    """
+
+    def __init__(self, server: MCPServerStreamableHttp, connect_timeout_seconds: float) -> None:
+        """Prepare an owner task that starts lazily when the manager is entered."""
+        self._server = server
+        self._connect_timeout_seconds = connect_timeout_seconds
+        self._close_requested = asyncio.Event()
+        self._cleanup_lock = asyncio.Lock()
+        self._ready: asyncio.Future[None] | None = None
+        self._owner_task: asyncio.Task[None] | None = None
+        self._active = False
+        self._cleanup_error: BaseException | None = None
+
+    @property
+    def active_servers(self) -> list[MCPServerStreamableHttp]:
+        """Expose the connected server using the SDK Manager's public shape."""
+        return [self._server] if self._active else []
+
+    async def __aenter__(self) -> "TaskAffineMcpConnectionManager":
+        """Start the owner and wait for a bounded initialize handshake."""
+        if self._owner_task is not None:
+            raise RuntimeError("MCP connection manager cannot be entered more than once.")
+        self._ready = asyncio.get_running_loop().create_future()
+        self._owner_task = asyncio.create_task(self._run(), name=f"mcp-owner-{self._server.name}")
+        try:
+            async with asyncio.timeout(self._connect_timeout_seconds):
+                await asyncio.shield(self._ready)
+        except BaseException:
+            if not self._ready.done():
+                self._owner_task.cancel()
+            await self._wait_for_owner()
+            if self._ready.done() and not self._ready.cancelled():
+                self._ready.exception()
+            raise
+        return self
+
+    async def cleanup_all(self) -> None:
+        """Ask the owner to close and wait without allowing caller cancellation to interrupt it."""
+        async with self._cleanup_lock:
+            self._close_requested.set()
+            await self._wait_for_owner()
+            if self._cleanup_error is not None:
+                raise self._cleanup_error
+
+    async def _run(self) -> None:
+        """Connect, remain the transport host, and always clean up in this same task."""
+        ready = self._ready
+        if ready is None:
+            raise RuntimeError("MCP connection owner started without a readiness future.")
+        try:
+            connect = cast(Callable[[], Awaitable[None]], self._server.connect)
+            await connect()
+            self._active = True
+            if not ready.done():
+                ready.set_result(None)
+            await self._close_requested.wait()
+        except BaseException as error:
+            if not ready.done():
+                ready.set_exception(error)
+        finally:
+            try:
+                cleanup = cast(Callable[[], Awaitable[None]], self._server.cleanup)
+                await cleanup()
+            except BaseException as error:
+                self._cleanup_error = error
+            self._active = False
+
+    async def _wait_for_owner(self) -> None:
+        """Wait through repeated caller cancellation, then preserve cancellation for the caller."""
+        owner_task = self._owner_task
+        if owner_task is None:
+            return
+        cancelled = False
+        while not owner_task.done():
+            try:
+                await asyncio.shield(owner_task)
+            except asyncio.CancelledError:
+                cancelled = True
+        owner_task.exception()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 @dataclass
@@ -53,7 +151,7 @@ class PooledMcpConnection:
 
     key: McpConnectionKey
     server: MCPServerStreamableHttp
-    manager: MCPServerManager
+    manager: TaskAffineMcpConnectionManager
     last_returned_at: float
     borrowed: bool = False
     invalid: bool = False
@@ -83,6 +181,9 @@ class McpConnectionPool:
         """Create an empty pool whose connections are opened lazily on first use."""
         # Key: server, URL, and credential fingerprint identity. Value: isolated connection bucket.
         self._buckets: dict[McpConnectionKey, _ConnectionBucket] = {}
+        # Key: stable MCP server ID. Value: newest credential-isolated key allowed to populate its pool.
+        self._active_keys: dict[str, McpConnectionKey] = {}
+        self._activation_lock = asyncio.Lock()
         self._closed = False
 
     async def borrow(
@@ -111,6 +212,13 @@ class McpConnectionPool:
             TimeoutError: No connection becomes available before the shared borrow deadline.
             RuntimeError: The application pool is closed before the lease can be returned.
         """
+        active = await self._activate_key(key)
+        if not active:
+            connection = await creator()
+            connection.borrowed = True
+            connection.invalid = True
+            return connection
+
         # One absolute deadline covers every wake-up, preventing spurious notifications from
         # restarting the configured borrow timeout.
         deadline = monotonic() + settings.borrow_timeout_seconds
@@ -157,8 +265,17 @@ class McpConnectionPool:
         # connection instead of allowing a lease to escape a closed application pool.
         async with bucket.condition:
             bucket.creating -= 1
+            active_key = self._active_keys.get(key.server_id)
             if self._closed:
                 connection.invalid = True
+            elif active_key != key:
+                # A newer Nacos revision replaced these credentials during the remote handshake.
+                # The already-started request may finish with this unpooled lease, but no later
+                # request can borrow it and release() will close it immediately.
+                connection.borrowed = True
+                connection.invalid = True
+                bucket.condition.notify_all()
+                return connection
             else:
                 connection.borrowed = True
                 bucket.connections.append(connection)
@@ -184,8 +301,9 @@ class McpConnectionPool:
             connection.borrowed = False
             connection.last_returned_at = monotonic()
             connection.invalid = connection.invalid or invalidate or self._closed
-            if connection.invalid and connection in bucket.connections:
-                bucket.connections.remove(connection)
+            if connection.invalid:
+                if connection in bucket.connections:
+                    bucket.connections.remove(connection)
                 should_close = True
             bucket.condition.notify_all()
         if should_close:
@@ -198,6 +316,7 @@ class McpConnectionPool:
         ``_closed`` and fail instead of receiving a connection whose manager is being torn down.
         """
         self._closed = True
+        self._active_keys.clear()
         connections: list[PooledMcpConnection] = []
         for bucket in self._buckets.values():
             async with bucket.condition:
@@ -205,6 +324,50 @@ class McpConnectionPool:
                 bucket.connections.clear()
                 bucket.condition.notify_all()
         await self._close_all(connections)
+
+    async def _activate_key(self, key: McpConnectionKey) -> bool:
+        """Activate a credential revision and retire connections for older credentials.
+
+        A newer configuration revision wins permanently over delayed work carrying an older
+        snapshot. Idle stale connections close immediately. Borrowed stale connections are marked
+        invalid and close when their owning request returns them, so active Tool calls are never
+        interrupted during credential rotation.
+
+        Args:
+            key: Resolved endpoint and credential identity for the requesting connection.
+
+        Returns:
+            ``True`` when the key may use the shared pool, or ``False`` when an older in-flight
+            request must receive an unpooled connection.
+        """
+        connections_to_close: list[PooledMcpConnection] = []
+        async with self._activation_lock:
+            active_key = self._active_keys.get(key.server_id)
+            if active_key is not None and key.configuration_revision < active_key.configuration_revision:
+                return False
+
+            if active_key == key:
+                if key.configuration_revision > active_key.configuration_revision:
+                    self._active_keys[key.server_id] = key
+                return True
+
+            self._active_keys[key.server_id] = key
+            stale_keys = [candidate for candidate in self._buckets if candidate.server_id == key.server_id]
+            for stale_key in stale_keys:
+                stale_bucket = self._buckets[stale_key]
+                async with stale_bucket.condition:
+                    idle_connections: list[PooledMcpConnection] = []
+                    for connection in stale_bucket.connections:
+                        connection.invalid = True
+                        if not connection.borrowed:
+                            idle_connections.append(connection)
+                            connections_to_close.append(connection)
+                    for connection in idle_connections:
+                        stale_bucket.connections.remove(connection)
+                    stale_bucket.condition.notify_all()
+
+        await self._close_all(connections_to_close)
+        return True
 
     async def _take_expired(self, bucket: _ConnectionBucket, idle_timeout_seconds: float) -> list[PooledMcpConnection]:
         """Atomically detach returned connections whose monotonic idle age reached the limit."""

@@ -69,6 +69,7 @@ class NacosConfigLoader:
         self.config_client: NacosConfigService | None = None
         # Key: Nacos configuration property name. Value: latest parsed remote property value.
         self._cached_config: dict[str, Any] = {}
+        self._configuration_revision = 0
         self._listener_task: asyncio.Task[None] | None = None
 
     async def initialize(self) -> None:
@@ -89,7 +90,9 @@ class NacosConfigLoader:
                 .namespace_id(self.namespace)
                 .username(self.username)
                 .password(self.password)
-                .log_level("INFO")
+                # The SDK logs access tokens and owns a process-global rolling file handler.
+                # Application logs provide the credential-safe lifecycle and failure evidence.
+                .log_level("CRITICAL")
                 .grpc_config(GRPCConfig(grpc_timeout=5000))
                 .build()
             )
@@ -125,13 +128,15 @@ class NacosConfigLoader:
             content = await self.config_client.get_config(config_param)
 
             if content:
-                parsed_config = yaml.safe_load(content) or {}
-                self._cached_config = parsed_config
+                parsed_config = self._parse_and_replace_config(content)
                 logger.debug(f"Loaded configuration from Nacos: {self.data_id}")
                 return parsed_config
 
-        except Exception as e:
-            logger.warning(f"Failed to load config from Nacos: {e}")
+        except Exception as error:
+            logger.warning(
+                "Failed to load configuration from Nacos",
+                extra={"error_type": type(error).__name__},
+            )
 
         return {}
 
@@ -156,13 +161,17 @@ class NacosConfigLoader:
                 content: The new configuration content.
             """
             logger.info(f"Configuration changed in Nacos: data_id={data_id}, group={group}")
-            if content:
-                try:
-                    parsed_config = yaml.safe_load(content) or {}
-                    self._cached_config = parsed_config
-                    logger.info("Configuration cache updated from Nacos")
-                except Exception as e:
-                    logger.warning(f"Failed to parse updated configuration: {e}")
+            try:
+                # An empty callback means the Data ID was cleared or removed. Publishing an empty
+                # snapshot revokes cached Secrets instead of retaining credentials that no longer
+                # exist in the configuration center.
+                self._parse_and_replace_config(content)
+                logger.info("Configuration cache updated from Nacos")
+            except Exception as error:
+                logger.warning(
+                    "Failed to parse updated Nacos configuration",
+                    extra={"error_type": type(error).__name__},
+                )
 
         try:
             await self.config_client.add_listener(
@@ -193,6 +202,30 @@ class NacosConfigLoader:
     def cached_config(self) -> dict[str, Any]:
         """Return the latest parsed Nacos document used for synchronous settings reads."""
         return self._cached_config
+
+    @property
+    def configuration_revision(self) -> int:
+        """Return the monotonic revision assigned to the latest valid Nacos snapshot."""
+        return self._configuration_revision
+
+    @staticmethod
+    def _parse_config(content: str) -> dict[str, Any]:
+        """Parse one YAML document and reject non-object roots before publishing it."""
+        parsed_config = yaml.safe_load(content) or {}
+        if not isinstance(parsed_config, dict):
+            raise ValueError("Nacos configuration root must be a YAML object")
+        return parsed_config
+
+    def _replace_cached_config(self, parsed_config: dict[str, Any]) -> None:
+        """Atomically publish one valid snapshot and increment its monotonic revision."""
+        self._cached_config = parsed_config
+        self._configuration_revision += 1
+
+    def _parse_and_replace_config(self, content: str) -> dict[str, Any]:
+        """Parse a complete Nacos document before atomically publishing its new revision."""
+        parsed_config = self._parse_config(content)
+        self._replace_cached_config(parsed_config)
+        return parsed_config
 
     async def close(self) -> None:
         """

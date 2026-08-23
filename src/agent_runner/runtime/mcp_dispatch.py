@@ -21,6 +21,7 @@ class RevisionState(Protocol):
     """Mutable Round revision exposed by orchestration to serialized dispatch persistence."""
 
     checkpoint_revision: int
+    revision_lock: asyncio.Lock
 
 
 @dataclass
@@ -61,7 +62,6 @@ class ConversationDispatchRecorder(DispatchEvidenceRecorder):
         self._user_id = user_id
         self._conversation_id = conversation_id
         self._round_number = round_number
-        self._lock = asyncio.Lock()
         # Key: remote attempt ID. Value: DISPATCHING evidence awaiting its terminal outcome.
         self._pending: dict[str, PendingDispatch] = {}
 
@@ -101,9 +101,9 @@ class ConversationDispatchRecorder(DispatchEvidenceRecorder):
         state: ToolDispatchState,
         recovery_reason: str = "",
     ) -> None:
-        """Append one evidence mutation while serializing access to the shared Round revision."""
-        async with self._lock:
-            response = await self._client.append_round_progress(AppendConversationRoundProgressRequest(
+        """Append one evidence mutation without losing its committed revision to cancellation."""
+        async with self._state.revision_lock:
+            request = AppendConversationRoundProgressRequest(
                 user_id=self._user_id,
                 conversation_id=self._conversation_id,
                 round_number=self._round_number,
@@ -125,11 +125,23 @@ class ConversationDispatchRecorder(DispatchEvidenceRecorder):
                     transport_evidence="streamable-http",
                     recovery_reason=recovery_reason[:2000],
                 )],
-            ))
+            )
+            append_task = asyncio.create_task(self._client.append_round_progress(request))
+            cancellation_received = False
+            while not append_task.done():
+                try:
+                    await asyncio.shield(append_task)
+                except asyncio.CancelledError:
+                    if append_task.cancelled():
+                        raise
+                    cancellation_received = True
+            response = await append_task
             if response.base is None or not response.base.success or response.data is None:
                 message = response.base.message if response.base is not None else "Dispatch checkpoint failed."
                 raise RuntimeError(message)
             self._state.checkpoint_revision = response.data.committed_revision
+        if cancellation_received:
+            raise asyncio.CancelledError
 
     @classmethod
     def _redact(cls, value: Any) -> Any:

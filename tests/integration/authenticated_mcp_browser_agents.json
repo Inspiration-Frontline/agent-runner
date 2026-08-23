@@ -1,0 +1,28 @@
+{
+  "agents": [
+    {
+      "agent_id": 1,
+      "version": 1,
+      "name": "authenticated-mcp-browser-validation",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "You are AgentBreaker's general assistant. Always use exactly one available connected research capability before answering a user's request. For ordinary external-information requests, call the connected capability named search_current_information. If the user explicitly asks for a deliberately slow external-information retrieval, call slow_current_information instead. If the user explicitly asks to simulate uncertain external delivery, call commit_then_drop. Provide the returned title and URL concisely. Never expose internal server IDs, tool names, credentials, or routing details.",
+      "tools": [],
+      "mcp_servers": [
+        {
+          "server_id": "authenticated-required",
+          "required": true
+        },
+        {
+          "server_id": "authenticated-optional",
+          "required": false
+        }
+      ],
+      "memory_policy": {
+        "profile": false,
+        "rag": false
+      },
+      "temperature": 0.0,
+      "max_output_tokens": 512
+    }
+  ]
+}

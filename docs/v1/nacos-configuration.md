@@ -61,6 +61,10 @@ mcp:
   pool_max_connections_per_server: 4
   pool_idle_timeout_seconds: 300
   pool_borrow_timeout_seconds: 10
+  secrets:
+    TAVILY_API_KEY: ""
+    CONTEXT7_API_KEY: ""
+    EXA_API_KEY: ""
 
 context:
   max_context_tokens: 128000
@@ -78,6 +82,10 @@ agent_config_cache:
   enabled: false
   ttl_seconds: 300
 ```
+
+`catalog_path` and `local_agent_config.path` may be absolute. Relative values are always resolved from
+the Agent Runner project root, never from the process working directory. This lets the service start
+reliably from an IDE, the project root, or a service manager.
 
 ## Environment Variables
 
@@ -105,9 +113,20 @@ is updated in Nacos, the service will:
 
 No service restart is required for configuration changes to take effect.
 
+MCP Secret changes use the same listener but stay outside the merged `Settings` model and debug
+response. A new request resolves the latest Secret snapshot immediately before opening or borrowing
+an MCP connection. Connections created with older credentials are never reused after rotation;
+idle connections close immediately and borrowed connections close when their request returns them.
+
+Keep real values only in Nacos. The Catalog and Agent Definitions contain `${secret:NAME}`
+references and stable Server IDs, never literal credentials. Empty values are valid placeholders:
+the corresponding optional MCP Server is omitted until an administrator supplies its Key.
+
 ## Enabling Nacos
 
-Local development uses `config/agent-runner.env` with Nacos disabled by default so Agent Runner can start directly from PyCharm. To enable Nacos, set:
+Local development uses `config/agent-runner.env` with Nacos enabled by default. The checked-in connection
+settings point to the local `agent-breaker-local` namespace; Secret values remain exclusively in Nacos.
+To enable Nacos in another environment, set:
 
 ```bash
 NACOS_ENABLED=true

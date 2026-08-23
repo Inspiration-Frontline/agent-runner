@@ -1,16 +1,32 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from agent_runner.mcps.secrets import McpSecretSnapshot
 
 logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
+
+
+def resolve_project_path(configured_path: str) -> Path:
+    """Resolve a configured path independently of the process working directory.
+
+    Args:
+        configured_path: Absolute filesystem path or a path relative to the Agent Runner project root.
+
+    Returns:
+        Path: The absolute configured path, or the project-root-relative path.
+    """
+    path = Path(configured_path)
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def get_env_file() -> Path:
@@ -158,8 +174,8 @@ class Settings(BaseSettings):
         le=131_072,
     )
 
-    # Built-in Tool network safety settings. Persisted Tool results are not semantically trimmed
-    # in Phase 5; the byte limit protects the HTTP client from unbounded remote responses.
+    # Built-in Tool network safety settings. Persisted Tool results are not semantically trimmed;
+    # the byte limit protects the HTTP client from unbounded remote responses.
     tool_http_timeout_seconds: float = Field(default=15.0, validation_alias="TOOL_HTTP_TIMEOUT_SECONDS")
     web_search_max_results: int = Field(default=5, validation_alias="WEB_SEARCH_MAX_RESULTS")
     web_fetch_max_bytes: int = Field(default=2_000_000, validation_alias="WEB_FETCH_MAX_BYTES")
@@ -296,6 +312,26 @@ class ConfigurationManager:
             logger.exception("Failed to merge the current Nacos configuration")
 
         return self._base_settings
+
+    def get_mcp_secret_snapshot(self) -> "McpSecretSnapshot":
+        """Return the latest typed MCP Secret snapshot without merging it into Settings.
+
+        Secret values remain in the outbound credential boundary and therefore cannot appear in
+        Settings serialization or the debug configuration response.
+        """
+        from agent_runner.mcps.secrets import McpSecretSnapshot
+
+        if self._nacos_loader is None:
+            return McpSecretSnapshot.create({}, configuration_revision=0)
+
+        cached_config = self._nacos_loader.cached_config
+        mcp_config = cached_config.get("mcp", {})
+        raw_secrets = mcp_config.get("secrets", {}) if isinstance(mcp_config, dict) else {}
+        if not isinstance(raw_secrets, dict):
+            raise ValueError("Nacos mcp.secrets must be a YAML object")
+
+        configuration_revision = getattr(self._nacos_loader, "configuration_revision", 0)
+        return McpSecretSnapshot.create(raw_secrets, configuration_revision)
 
     async def close(self) -> None:
         """Release the loader owned by this application-scoped manager."""

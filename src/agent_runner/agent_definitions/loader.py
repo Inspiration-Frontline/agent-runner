@@ -8,13 +8,12 @@ caching for improved performance and configuration update propagation.
 
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 import httpx
 import redis.asyncio as aioredis
 
-from agent_runner.config import PROJECT_ROOT, AgentConfig, MCPServerBindingConfig, MemoryPolicy, Settings
+from agent_runner.config import AgentConfig, MCPServerBindingConfig, MemoryPolicy, Settings, resolve_project_path
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +70,7 @@ class AgentConfigLoader:
         self.max_output_tokens = current_settings.max_output_tokens
 
         # Resolve local configuration path
-        self.local_config_path = Path(current_settings.local_agent_config_path)
-        if not self.local_config_path.is_absolute():
-            self.local_config_path = PROJECT_ROOT / self.local_config_path
+        self.local_config_path = resolve_project_path(current_settings.local_agent_config_path)
 
     async def load(self, agent_id: int, version: int | None = None) -> AgentConfig:
         """

@@ -6,6 +6,7 @@ The wrappers hold dispatch evidence and model-turn metadata, never the shared tr
 """
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -14,11 +15,10 @@ from time import monotonic
 from typing import Any, Protocol
 from uuid import uuid4
 
-import httpx
 from agents import Agent
 from agents.agent import AgentBase
 from agents.lifecycle import AgentHooksBase
-from agents.mcp import MCPServer, MCPServerManager, MCPServerStreamableHttp, MCPUtil
+from agents.mcp import MCPServer, MCPServerStreamableHttp, MCPUtil
 from agents.run_context import RunContextWrapper
 from agents.tool_context import ToolContext
 from mcp.types import Tool as McpTool
@@ -32,8 +32,10 @@ from agent_runner.mcps.connection_pool import (
     McpConnectionPool,
     McpConnectionPoolSettings,
     PooledMcpConnection,
+    TaskAffineMcpConnectionManager,
 )
 from agent_runner.mcps.dispatch_tracing import McpTracedOperations
+from agent_runner.mcps.failures import McpFailureCode, classify_mcp_failure, mcp_failure
 from agent_runner.observability.tracing import Tracer
 from agent_runner.tools.registry import ToolDefinition, ToolSourceType
 
@@ -41,6 +43,22 @@ logger = logging.getLogger(__name__)
 
 _CALL_ID_META_KEY = "agentbreaker/tool_call_id"
 _TURN_NUMBER_META_KEY = "agentbreaker/turn_number"
+
+
+async def _await_cancellation_safe_cleanup(cleanup: Awaitable[object]) -> None:
+    """Finish owned transport cleanup before propagating one or more request cancellations."""
+    cleanup_task = asyncio.ensure_future(cleanup)
+    cancelled = False
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            cancelled = True
+    cleanup_error = cleanup_task.exception()
+    if cleanup_error is not None:
+        raise cleanup_error
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 class DispatchEvidenceRecorder(Protocol):
@@ -218,6 +236,31 @@ class DurableMcpServer(MCPServer):
         self._tracker = tracker
         self._traced_operations = traced_operations
         self._transport_failed = False
+        self._request_schema_lock = asyncio.Lock()
+        self._request_tools: tuple[McpTool, ...] | None = None
+        self._execution_collector: ExternalExecutionCollector | None = None
+        # Key: MCP protocol Tool name. Value: AgentBreaker definition with stable provenance.
+        self._definitions_by_remote_name: dict[str, ToolDefinition] = {}
+
+    def bind_execution_collector(
+        self,
+        collector: ExternalExecutionCollector,
+        definitions: Sequence[ToolDefinition],
+    ) -> None:
+        """Attach request-scoped execution capture after MCP schemas receive public SDK names.
+
+        The Agents SDK invokes MCP FunctionTools through ``call_tool`` without reliably invoking
+        Agent hooks. Capturing at this protocol boundary preserves the matching public Tool
+        definition for both streamed completion events and durable history.
+        """
+        tool_key_prefix = f"mcp.{self.name}."
+        self._execution_collector = collector
+        self._definitions_by_remote_name = {
+            definition.tool_key.removeprefix(tool_key_prefix): definition
+            for definition in definitions
+            if definition.source_type == ToolSourceType.MCP
+            and definition.tool_key.startswith(tool_key_prefix)
+        }
 
     @property
     def name(self) -> str:
@@ -240,7 +283,18 @@ class DurableMcpServer(MCPServer):
         run_context: RunContextWrapper[Any] | None = None,
         agent: AgentBase | None = None,
     ) -> list[McpTool]:
-        """Discover this server's tools from the shared cache or through a fresh `tools/list` call."""
+        """Return one immutable schema snapshot for the complete Agent request."""
+        async with self._request_schema_lock:
+            if self._request_tools is None:
+                self._request_tools = tuple(await self._discover_tools(run_context, agent))
+            return list(self._request_tools)
+
+    async def _discover_tools(
+        self,
+        run_context: RunContextWrapper[Any] | None,
+        agent: AgentBase | None,
+    ) -> list[McpTool]:
+        """Discover schemas from the cross-request cache or a remote `tools/list` call."""
         async def load() -> list[McpTool]:
             return await self._traced_operations.discover(
                 self.name,
@@ -254,7 +308,7 @@ class DurableMcpServer(MCPServer):
                 load,
             )
         except BaseException as error:
-            if self._is_transport_failure(error):
+            if classify_mcp_failure(error).transport_failed:
                 self._transport_failed = True
                 self._schema_cache.invalidate(self._connection.key.cache_key)
             raise
@@ -266,22 +320,21 @@ class DurableMcpServer(MCPServer):
         meta: dict[str, Any] | None = None,
     ) -> Any:
         """Persist dispatch intent, deliver one remote tool call, then persist its terminal evidence."""
-        if self._recorder is None:
-            return await self._connection.server.call_tool(tool_name, arguments, meta)
         outbound_meta = dict(meta or {})
         tool_call_id = str(outbound_meta.pop(_CALL_ID_META_KEY, ""))
         turn_number = int(outbound_meta.pop(_TURN_NUMBER_META_KEY, 1))
         if not tool_call_id:
             raise RuntimeError("SDK MCP invocation is missing its model Tool call ID.")
         attempt_id = str(uuid4())
-        await self._recorder.before_dispatch(
-            attempt_id,
-            tool_call_id,
-            turn_number,
-            self.name,
-            tool_name,
-            arguments or {},
-        )
+        if self._recorder is not None:
+            await self._recorder.before_dispatch(
+                attempt_id,
+                tool_call_id,
+                turn_number,
+                self.name,
+                tool_name,
+                arguments or {},
+            )
         try:
             result = await self._traced_operations.dispatch(
                 self.name,
@@ -290,15 +343,47 @@ class DurableMcpServer(MCPServer):
                 attempt_id,
                 lambda: self._connection.server.call_tool(tool_name, arguments, outbound_meta or None),
             )
+        except asyncio.CancelledError:
+            try:
+                await self._record_cancelled_result(tool_call_id, tool_name, attempt_id)
+            finally:
+                self._record_execution(
+                    tool_call_id,
+                    tool_name,
+                    arguments or {},
+                    "CANCELLED",
+                    None,
+                    "Generation cancelled.",
+                )
+            raise
         except BaseException as error:
-            state = "FAILED" if self._is_definite_pre_delivery_failure(error) else "UNKNOWN"
-            self._transport_failed = self._is_transport_failure(error)
-            await self._record_result(tool_call_id, tool_name, attempt_id, state, str(error), type(error).__name__)
+            failure = classify_mcp_failure(error)
+            state = "FAILED" if failure.definitely_not_delivered else "UNKNOWN"
+            self._transport_failed = failure.transport_failed
+            await self._record_result(tool_call_id, tool_name, attempt_id, state, failure.public_message, failure.code)
+            self._record_execution(tool_call_id, tool_name, arguments or {}, state, None, failure.public_message)
             raise
         state = "FAILED" if bool(getattr(result, "isError", False)) else "COMPLETED"
         reason = "MCP Tool returned an error result." if state == "FAILED" else ""
         await self._record_result(tool_call_id, tool_name, attempt_id, state, reason)
+        self._record_execution(tool_call_id, tool_name, arguments or {}, state, result, reason)
         return result
+
+    async def _record_cancelled_result(self, tool_call_id: str, tool_name: str, attempt_id: str) -> None:
+        """Finish cancellation evidence even when the SDK cancels the current Tool task."""
+        record_task = asyncio.create_task(
+            self._record_result(tool_call_id, tool_name, attempt_id, "CANCELLED", "Generation cancelled.")
+        )
+        while not record_task.done():
+            try:
+                await asyncio.shield(record_task)
+            except asyncio.CancelledError:
+                continue
+        if record_task.cancelled():
+            return
+        error = record_task.exception()
+        if error is not None:
+            raise error
 
     async def _record_result(
         self,
@@ -311,18 +396,40 @@ class DurableMcpServer(MCPServer):
     ) -> None:
         """Persist and expose a terminal delivery outcome after the remote call has finished."""
         recorder = self._recorder
-        if recorder is None:
-            raise RuntimeError("Durable MCP result recording requires a dispatch recorder.")
-        await self._traced_operations.record_result(
-            self.name,
-            tool_name,
-            tool_call_id,
-            attempt_id,
-            state,
-            lambda: recorder.after_dispatch(attempt_id, state, reason),
-            error_type,
-        )
+        if recorder is not None:
+            await self._traced_operations.record_result(
+                self.name,
+                tool_name,
+                tool_call_id,
+                attempt_id,
+                state,
+                lambda: recorder.after_dispatch(attempt_id, state, reason),
+                error_type,
+            )
         self._tracker.record_outcome(tool_call_id, state, reason)
+
+    def _record_execution(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        state: str,
+        result: object,
+        reason: str,
+    ) -> None:
+        """Record terminal MCP evidence without depending on local SDK lifecycle hooks."""
+        collector = self._execution_collector
+        definition = self._definitions_by_remote_name.get(tool_name)
+        if collector is None or definition is None:
+            return
+        collector.record_external_execution(
+            tool_call_id,
+            definition,
+            json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            state,
+            result,
+            reason,
+        )
 
     async def list_prompts(self) -> Any:
         """Delegate prompt listing to the borrowed transport when an SDK caller requests it."""
@@ -332,31 +439,6 @@ class DurableMcpServer(MCPServer):
         """Delegate prompt lookup to the borrowed transport when an SDK caller requests it."""
         return await self._connection.server.get_prompt(name, arguments)
 
-    @classmethod
-    def _is_definite_pre_delivery_failure(cls, error: BaseException) -> bool:
-        """Classify connect failures as definitely not delivered, leaving ambiguous failures UNKNOWN."""
-        current: BaseException | None = error
-        visited: set[int] = set()
-        while current is not None and id(current) not in visited:
-            visited.add(id(current))
-            if isinstance(current, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
-                return True
-            current = current.__cause__ or current.__context__
-        return False
-
-    @classmethod
-    def _is_transport_failure(cls, error: BaseException) -> bool:
-        """Return whether an exception makes a pooled HTTP session unsafe to reuse."""
-        current: BaseException | None = error
-        visited: set[int] = set()
-        while current is not None and id(current) not in visited:
-            visited.add(id(current))
-            if isinstance(current, (httpx.TransportError, TimeoutError, ConnectionError)):
-                return True
-            current = current.__cause__ or current.__context__
-        return False
-
-
 @dataclass(frozen=True)
 class McpConnectionDiagnostic:
     """Connection/preflight result exposed to request orchestration without leaking credentials."""
@@ -364,7 +446,8 @@ class McpConnectionDiagnostic:
     server_id: str
     required: bool
     connected: bool
-    error: str = ""
+    failure_code: McpFailureCode | None = None
+    message: str = ""
 
 
 @dataclass(frozen=True)
@@ -388,6 +471,7 @@ class McpServerDiscoveryError:
     """Schema-discovery failure associated with one catalog server identity."""
 
     server_id: str
+    failure_code: McpFailureCode
     message: str
 
 
@@ -411,6 +495,14 @@ class ActiveMcpSession:
 
 class RequiredMcpServerUnavailableError(RuntimeError):
     """Raised before the LLM call when an Agent's required MCP server cannot be prepared."""
+
+    error_code = "MCP_REQUIRED_SERVER_UNAVAILABLE"
+
+    def __init__(self, diagnostics: Sequence[McpConnectionDiagnostic]) -> None:
+        """Build a credential-safe aggregate from failed required server diagnostics."""
+        details = "; ".join(f"{item.server_id}: {item.message}" for item in diagnostics)
+        super().__init__(f"Required MCP server unavailable: {details}")
+        self.diagnostics = tuple(diagnostics)
 
 
 class SdkMcpRuntime:
@@ -450,22 +542,23 @@ class SdkMcpRuntime:
                     leases.append(borrow_result.server)
             failed_required = [item for item in diagnostics if item.required and not item.connected]
             if failed_required:
-                details = "; ".join(f"{item.server_id}: {item.error}" for item in failed_required)
-                raise RequiredMcpServerUnavailableError(f"Required MCP server unavailable: {details}")
+                self._trace_diagnostics(diagnostics)
+                raise RequiredMcpServerUnavailableError(failed_required)
             discovery_result = await self._discover_servers(leases)
             diagnostics = self._merge_discovery_errors(diagnostics, discovery_result.errors)
             failed_required = [item for item in diagnostics if item.required and not item.connected]
             self._trace_diagnostics(diagnostics)
             if failed_required:
-                details = "; ".join(f"{item.server_id}: {item.error}" for item in failed_required)
-                raise RequiredMcpServerUnavailableError(f"Required MCP server unavailable: {details}")
+                raise RequiredMcpServerUnavailableError(failed_required)
             active_servers = tuple(item.server for item in discovery_result.servers)
             definitions = tuple(self._build_definitions(discovery_result.servers))
             yield ActiveMcpSession(active_servers, tuple(diagnostics), definitions, McpDispatchHooks(tracker))
         finally:
-            await asyncio.gather(
-                *(self._connection_pool.release(server._connection, server.transport_failed) for server in leases),
-                return_exceptions=True,
+            await _await_cancellation_safe_cleanup(
+                asyncio.gather(
+                    *(self._connection_pool.release(server._connection, server.transport_failed) for server in leases),
+                    return_exceptions=True,
+                )
             )
 
     async def _borrow_server(
@@ -478,7 +571,14 @@ class SdkMcpRuntime:
         try:
             resolved = self._catalog.resolve(binding.server_id)
             if not resolved.profile.enabled:
-                diagnostic = McpConnectionDiagnostic(binding.server_id, binding.required, False, "Server is disabled")
+                failure = mcp_failure(McpFailureCode.SERVER_DISABLED)
+                diagnostic = McpConnectionDiagnostic(
+                    binding.server_id,
+                    binding.required,
+                    False,
+                    failure.code,
+                    failure.public_message,
+                )
                 return McpServerBorrowResult(diagnostic, None)
             key = McpConnectionKey.from_resolved(resolved)
             connection = await self._connection_pool.borrow(
@@ -499,12 +599,17 @@ class SdkMcpRuntime:
                 server,
             )
         except BaseException as error:
-            logger.warning("MCP connection preflight failed", extra={"server_id": binding.server_id, "error": str(error)})
+            failure = classify_mcp_failure(error)
+            logger.warning(
+                "MCP connection preflight failed",
+                extra={"server_id": binding.server_id, "mcp_failure_code": failure.code},
+            )
             diagnostic = McpConnectionDiagnostic(
                 binding.server_id,
                 binding.required,
                 False,
-                str(error) or type(error).__name__,
+                failure.code,
+                failure.public_message,
             )
             return McpServerBorrowResult(diagnostic, None)
 
@@ -533,19 +638,11 @@ class SdkMcpRuntime:
             retry_backoff_seconds_base=item.profile.retry_backoff_seconds,
             require_approval="never",
         )
-        manager = MCPServerManager(
-            [server],
-            connect_timeout_seconds=item.profile.connection_timeout_seconds,
-            cleanup_timeout_seconds=10,
-            drop_failed_servers=True,
-            strict=True,
-            connect_in_parallel=True,
-        )
-        try:
-            await manager.__aenter__()
-        except BaseException:
-            await manager.cleanup_all()
-            raise
+        manager = TaskAffineMcpConnectionManager(server, item.profile.connection_timeout_seconds)
+        # MCPServerManager.connect_all() already cleans every partially opened server before
+        # propagating an enter failure. Calling cleanup_all() again here can move AnyIO transport
+        # teardown onto the request task after the manager's task-affine worker has exited.
+        await manager.__aenter__()
         if not manager.active_servers:
             await manager.cleanup_all()
             raise RuntimeError(f"MCP server {item.server_id} did not produce an active connection.")
@@ -557,9 +654,15 @@ class SdkMcpRuntime:
         errors: Sequence[McpServerDiscoveryError],
     ) -> list[McpConnectionDiagnostic]:
         """Replace successful connection diagnostics with discovery failures for the same server."""
-        errors_by_server_id = {error.server_id: error.message for error in errors}
+        errors_by_server_id = {error.server_id: error for error in errors}
         return [
-            McpConnectionDiagnostic(item.server_id, item.required, False, errors_by_server_id[item.server_id])
+            McpConnectionDiagnostic(
+                item.server_id,
+                item.required,
+                False,
+                errors_by_server_id[item.server_id].failure_code,
+                errors_by_server_id[item.server_id].message,
+            )
             if item.server_id in errors_by_server_id
             else item
             for item in diagnostics
@@ -575,9 +678,12 @@ class SdkMcpRuntime:
         errors: list[McpServerDiscoveryError] = []
         for server, result in zip(servers, results, strict=True):
             if isinstance(result, BaseException):
-                message = str(result) or type(result).__name__
-                errors.append(McpServerDiscoveryError(server.name, message))
-                logger.warning("MCP schema discovery failed", extra={"server_id": server.name, "error": message})
+                failure = classify_mcp_failure(result)
+                errors.append(McpServerDiscoveryError(server.name, failure.code, failure.public_message))
+                logger.warning(
+                    "MCP schema discovery failed",
+                    extra={"server_id": server.name, "mcp_failure_code": failure.code},
+                )
             else:
                 discovered.append(DiscoveredMcpServer(server, tuple(result)))
         return McpServerDiscoveryResult(tuple(discovered), tuple(errors))
@@ -587,7 +693,9 @@ class SdkMcpRuntime:
         discovered: Sequence[DiscoveredMcpServer],
     ) -> list[ToolDefinition]:
         """Convert discovered MCP schemas into SDK function tools plus AgentBreaker provenance."""
-        batches = [(index, item.server, item.tools) for index, item in enumerate(discovered)]
+        batches: list[tuple[int, MCPServer, list[McpTool]]] = [
+            (index, item.server, list(item.tools)) for index, item in enumerate(discovered)
+        ]
         overrides = MCPUtil._build_prefixed_tool_name_overrides(batches, reserved_names=set())
         definitions: list[ToolDefinition] = []
         for server_index, server, tools in batches:
@@ -598,11 +706,13 @@ class SdkMcpRuntime:
                     False,
                     tool_name_override=overrides[(server_index, tool_index)],
                 )
-                definitions.append(ToolDefinition.from_function_tool(
-                    f"mcp.{server.name}.{tool.name}",
-                    function_tool,
-                    ToolSourceType.MCP,
-                ))
+                definitions.append(
+                    ToolDefinition.from_function_tool(
+                        f"mcp.{server.name}.{tool.name}",
+                        function_tool,
+                        ToolSourceType.MCP,
+                    )
+                )
         return definitions
 
     @staticmethod
@@ -616,6 +726,6 @@ class SdkMcpRuntime:
                     "mcp.server.id": diagnostic.server_id,
                     "mcp.server.required": diagnostic.required,
                     "mcp.server.connected": diagnostic.connected,
-                    "mcp.server.error": diagnostic.error[:500],
+                    "mcp.server.failure_code": diagnostic.failure_code or "",
                 },
             )

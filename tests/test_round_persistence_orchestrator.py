@@ -5,6 +5,8 @@ from typing import Any, cast
 import pytest
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.commons import ResponseBase
 from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmanager.rpc import (
+    AppendConversationRoundProgressRequest,
+    AppendConversationRoundProgressResponse,
     ConversationRoundHistory,
     ConversationRoundMutationResult,
     CreateConversationRoundCheckpointRequest,
@@ -12,6 +14,7 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     FinalizeConversationRoundRequest,
     FinalizeConversationRoundResponse,
     GetConversationRoundHistoryResponse,
+    RoundStatus,
     SaveConversationRoundRequest,
     SaveConversationRoundResponse,
 )
@@ -24,7 +27,8 @@ from agent_runner.context.models import UserProfile
 from agent_runner.observability.runtime_tracing import RuntimeTracing
 from agent_runner.observability.tracing import Tracer
 from agent_runner.runtime.cancellation import ConversationCancellationRegistry
-from agent_runner.runtime.orchestrator import RuntimeOrchestrator
+from agent_runner.runtime.mcp_dispatch import ConversationDispatchRecorder
+from agent_runner.runtime.orchestrator import RuntimeOrchestrator, RuntimeRequestState
 
 
 class FakeRequest:
@@ -87,6 +91,34 @@ class CheckpointConversationClient(FakeConversationClient):
         return FinalizeConversationRoundResponse(
             base=ResponseBase(code=0, success=True),
             data=ConversationRoundMutationResult(committed_revision=1),
+        )
+
+
+class ConcurrentRevisionConversationClient(CheckpointConversationClient):
+    """Hold a dispatch mutation open so cancellation competes for the same revision."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dispatch_started = asyncio.Event()
+        self.release_dispatch = asyncio.Event()
+
+    async def append_round_progress(
+        self, request: AppendConversationRoundProgressRequest
+    ) -> AppendConversationRoundProgressResponse:
+        assert request.expected_revision == 0
+        self.dispatch_started.set()
+        await self.release_dispatch.wait()
+        return AppendConversationRoundProgressResponse(
+            base=ResponseBase(code=0, success=True),
+            data=ConversationRoundMutationResult(committed_revision=1),
+        )
+
+    async def finalize_round(self, request: FinalizeConversationRoundRequest) -> FinalizeConversationRoundResponse:
+        self.finalize_request = request
+        success = request.expected_revision == 1
+        return FinalizeConversationRoundResponse(
+            base=ResponseBase(code=0 if success else 409, success=success, message="" if success else "stale revision"),
+            data=ConversationRoundMutationResult(committed_revision=2) if success else None,
         )
 
 
@@ -244,6 +276,50 @@ async def test_task_cancellation_finalizes_an_existing_checkpoint() -> None:
         await task
 
     assert client.finalize_request is not None
+    assert client.finalize_request.status.name == "CANCELLED"
+
+
+async def test_cancellation_waits_for_an_in_flight_dispatch_revision() -> None:
+    orchestrator, _, _ = _orchestrator(save_success=True)
+    client = ConcurrentRevisionConversationClient()
+    harness = cast(Any, orchestrator)
+    harness.conversation_client = client
+    state = RuntimeRequestState(
+        cancellation_token=cast(Any, FakeToken()),
+        round_start=1,
+        attachment_request_id="attachment-request",
+        next_round_number=1,
+        preflight_completed=True,
+        checkpoint_created=True,
+    )
+    recorder = ConversationDispatchRecorder(client, state, 1, "conv_persistence", 1)  # type: ignore[arg-type]
+    dispatch_task = asyncio.create_task(
+        recorder.before_dispatch("attempt-1", "call-1", 1, "fixture", "write", {"value": "x"})
+    )
+    await client.dispatch_started.wait()
+    dispatch_task.cancel()
+
+    cancellation_task = asyncio.create_task(
+        orchestrator._persist_terminal_round(
+            1,
+            ConversationRequest(conversation_id="conv_persistence", message="Question"),
+            1,
+            1,
+            RoundStatus.CANCELLED,
+            "Generation cancelled.",
+            state=state,
+        )
+    )
+    await asyncio.sleep(0)
+    assert client.finalize_request is None
+
+    client.release_dispatch.set()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch_task
+    await cancellation_task
+
+    assert client.finalize_request is not None
+    assert client.finalize_request.expected_revision == 1
     assert client.finalize_request.status.name == "CANCELLED"
 
 

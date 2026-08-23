@@ -26,7 +26,8 @@ def test_api_version_matches_project_version() -> None:
     assert app.version == "0.0.1"
 
 
-def test_health_root_and_debug_routes() -> None:
+def test_health_root_and_debug_routes(monkeypatch) -> None:
+    monkeypatch.setenv("NACOS_ENABLED", "false")
     app = create_app()
     with TestClient(app) as client:
         health_response = client.get("/health")

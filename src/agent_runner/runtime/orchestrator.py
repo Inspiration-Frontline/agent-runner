@@ -11,8 +11,7 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import suppress
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 from time import monotonic, time_ns
 from typing import Protocol
 from uuid import uuid4
@@ -72,7 +71,7 @@ from agent_runner.api.streaming import (
     ToolStartEvent,
     UsageEvent,
 )
-from agent_runner.config import AgentConfig, ConversationRequest, Settings
+from agent_runner.config import AgentConfig, ConversationRequest, Settings, resolve_project_path
 from agent_runner.context.builder import (
     AgentContext,
     CaptureContentPart,
@@ -95,7 +94,12 @@ from agent_runner.conversation import (
 )
 from agent_runner.mcps.catalog import McpServerCatalog
 from agent_runner.mcps.connection_pool import McpConnectionPool
-from agent_runner.mcps.sdk_runtime import McpSchemaCache, SdkMcpRuntime
+from agent_runner.mcps.sdk_runtime import (
+    McpSchemaCache,
+    RequiredMcpServerUnavailableError,
+    SdkMcpRuntime,
+)
+from agent_runner.mcps.secrets import SecretProvider
 from agent_runner.observability.runtime_tracing import RuntimeTracing
 from agent_runner.observability.tracing import Tracer
 from agent_runner.runtime.cancellation import (
@@ -240,6 +244,7 @@ class RuntimeRequestState:
     agent: AgentDefinition | None = None
     checkpoint_created: bool = False
     checkpoint_revision: int = 0
+    revision_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class FilePreparationError(RuntimeError):
@@ -282,6 +287,7 @@ class RuntimeOrchestrator:
         cancellation_registry: ConversationCancellationRegistry,
         mcp_connection_pool: McpConnectionPool | None = None,
         mcp_schema_cache: McpSchemaCache | None = None,
+        mcp_secret_provider: SecretProvider | None = None,
     ) -> None:
         """
         Initialize the runtime orchestrator with all required components.
@@ -298,9 +304,9 @@ class RuntimeOrchestrator:
         self.tool_registry = tool_registry
         self.context_builder = ContextBuilder(tool_registry, settings)
         mcp_catalog = (
-            McpServerCatalog.from_json(settings.mcp_catalog_json)
+            McpServerCatalog.from_json(settings.mcp_catalog_json, mcp_secret_provider)
             if settings.mcp_catalog_json
-            else McpServerCatalog.from_file(Path(settings.mcp_catalog_path))
+            else McpServerCatalog.from_file(resolve_project_path(settings.mcp_catalog_path), mcp_secret_provider)
         )
         mcp_runtime = SdkMcpRuntime(
             mcp_catalog,
@@ -361,6 +367,12 @@ class RuntimeOrchestrator:
 
         except ConversationBusyError as error:
             yield ErrorEvent(str(error), error_code="CONVERSATION_BUSY", phase="preflight")
+
+        except RequiredMcpServerUnavailableError as error:
+            message = str(error)
+            logger.warning("Required MCP server preflight failed")
+            await self._persist_unexpected_terminal(conversation_request, user_id, state, RoundStatus.FAILED, message)
+            yield ErrorEvent(error_message=message, error_code=error.error_code, phase="mcp_preflight")
 
         except Exception as error:
             logger.exception("Error during agent execution")
@@ -617,21 +629,22 @@ class RuntimeOrchestrator:
                 turn_status = TurnStatus.CANCELLED if status == RoundStatus.CANCELLED else TurnStatus.FAILED
                 turn_error = error_message
             turns.append(self._to_proto_turn(index + 1, captured, state.agent, turn_status, turn_error))
-        request = AppendConversationRoundProgressRequest(
-            user_id=user_id,
-            conversation_id=conversation_request.conversation_id,
-            round_number=self._required_round_number(state),
-            mutation_id=str(uuid4()),
-            expected_revision=state.checkpoint_revision,
-            turns=turns,
-        )
-        with self.runtime_tracing.trace_round_progress(request) as span:
-            response = await self.conversation_client.append_round_progress(request)
-            self.runtime_tracing.record_round_mutation_result(span, response, "round.progress.appended")
-        if response.base is None or not response.base.success or response.data is None:
-            message = response.base.message if response.base is not None else "Round progress RPC failed."
-            raise RuntimeError(message)
-        state.checkpoint_revision = response.data.committed_revision
+        async with state.revision_lock:
+            request = AppendConversationRoundProgressRequest(
+                user_id=user_id,
+                conversation_id=conversation_request.conversation_id,
+                round_number=self._required_round_number(state),
+                mutation_id=str(uuid4()),
+                expected_revision=state.checkpoint_revision,
+                turns=turns,
+            )
+            with self.runtime_tracing.trace_round_progress(request) as span:
+                response = await self.conversation_client.append_round_progress(request)
+                self.runtime_tracing.record_round_mutation_result(span, response, "round.progress.appended")
+            if response.base is None or not response.base.success or response.data is None:
+                message = response.base.message if response.base is not None else "Round progress RPC failed."
+                raise RuntimeError(message)
+            state.checkpoint_revision = response.data.committed_revision
 
     async def _finalize_checkpoint(
         self,
@@ -644,26 +657,27 @@ class RuntimeOrchestrator:
         final_answer: AssistantAnswer | None = None,
     ) -> None:
         """Commit one terminal Round transition and mark terminal persistence as complete."""
-        request = FinalizeConversationRoundRequest(
-            user_id=user_id,
-            conversation_id=conversation_request.conversation_id,
-            round_number=self._required_round_number(state),
-            mutation_id=str(uuid4()),
-            expected_revision=state.checkpoint_revision,
-            status=status,
-            error_message=error_message,
-            end_time=end_time,
-        )
-        if final_answer is not None:
-            request.final_answer = final_answer
-        with self.runtime_tracing.trace_round_finalize(request) as span:
-            response = await self.conversation_client.finalize_round(request)
-            self.runtime_tracing.record_round_mutation_result(span, response, "round.finalized")
-        if response.base is None or not response.base.success or response.data is None:
-            message = response.base.message if response.base is not None else "Round finalize RPC failed."
-            raise RuntimeError(message)
-        state.checkpoint_revision = response.data.committed_revision
-        self._terminal_round_persisted = True
+        async with state.revision_lock:
+            request = FinalizeConversationRoundRequest(
+                user_id=user_id,
+                conversation_id=conversation_request.conversation_id,
+                round_number=self._required_round_number(state),
+                mutation_id=str(uuid4()),
+                expected_revision=state.checkpoint_revision,
+                status=status,
+                error_message=error_message,
+                end_time=end_time,
+            )
+            if final_answer is not None:
+                request.final_answer = final_answer
+            with self.runtime_tracing.trace_round_finalize(request) as span:
+                response = await self.conversation_client.finalize_round(request)
+                self.runtime_tracing.record_round_mutation_result(span, response, "round.finalized")
+            if response.base is None or not response.base.success or response.data is None:
+                message = response.base.message if response.base is not None else "Round finalize RPC failed."
+                raise RuntimeError(message)
+            state.checkpoint_revision = response.data.committed_revision
+            self._terminal_round_persisted = True
 
     async def _handle_model_terminal(
         self,

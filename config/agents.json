@@ -26,6 +26,14 @@
           "required": false
         },
         {
+          "server_id": "tavily",
+          "required": false
+        },
+        {
+          "server_id": "exa",
+          "required": false
+        },
+        {
           "server_id": "openai-docs",
           "required": false
         }

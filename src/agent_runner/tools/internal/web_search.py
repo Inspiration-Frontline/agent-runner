@@ -218,5 +218,5 @@ class _VisibleTextParser(HTMLParser):
     def get_text(self) -> str:
         """Return normalized visible text joined into model-readable lines."""
         # TODO: Apply a shared semantic context trimmer after AgentBreaker defines a unified
-        # replay/tool/RAG context policy. Phase 5 retains all extracted text within the network cap.
+        # replay/tool/RAG context policy. Extracted text is retained within the network cap.
         return "\n".join(self._parts)

@@ -10,7 +10,24 @@
     },
     "context7": {
       "url": "https://mcp.context7.com/mcp",
-      "display_name": "Context7"
+      "display_name": "Context7",
+      "headers": {
+        "Authorization": "Bearer ${secret:CONTEXT7_API_KEY}"
+      }
+    },
+    "tavily": {
+      "url": "https://mcp.tavily.com/mcp/",
+      "display_name": "Tavily",
+      "headers": {
+        "Authorization": "Bearer ${secret:TAVILY_API_KEY}"
+      }
+    },
+    "exa": {
+      "url": "https://mcp.exa.ai/mcp",
+      "display_name": "Exa",
+      "headers": {
+        "x-api-key": "${secret:EXA_API_KEY}"
+      }
     },
     "openai-docs": {
       "url": "https://developers.openai.com/mcp",

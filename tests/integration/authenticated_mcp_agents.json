@@ -1,0 +1,32 @@
+{
+  "agents": [
+    {
+      "agent_id": 1,
+      "version": 1,
+      "name": "authenticated-search-acceptance",
+      "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "system_prompt": "You are AgentBreaker's general assistant. Infer the user's goal from natural language, use an available connected capability when current or external information is required, and provide a concise answer with source URLs. Do not expose internal routing details.",
+      "tools": [],
+      "mcp_servers": [
+        {
+          "server_id": "tavily",
+          "required": false
+        },
+        {
+          "server_id": "context7",
+          "required": false
+        },
+        {
+          "server_id": "exa",
+          "required": false
+        }
+      ],
+      "memory_policy": {
+        "profile": false,
+        "rag": false
+      },
+      "temperature": 0.1,
+      "max_output_tokens": 2048
+    }
+  ]
+}

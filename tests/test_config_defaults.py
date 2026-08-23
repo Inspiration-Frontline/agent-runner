@@ -1,11 +1,21 @@
 import json
 
 import pytest
+from v2.nacos.common.client_config import ClientConfig
 
 from agent_runner.agent_definitions import loader as loader_module
-from agent_runner.config import CONFIG_DIR, ConfigurationManager, Settings, get_env_file, get_settings
+from agent_runner.config import (
+    CONFIG_DIR,
+    PROJECT_ROOT,
+    ConfigurationManager,
+    Settings,
+    get_env_file,
+    get_settings,
+    resolve_project_path,
+)
 from agent_runner.context import profile_adapter, rag_adapter
 from agent_runner.context.builder import ContextBuilder
+from agent_runner.nacos_config import NacosConfigLoader
 
 
 def test_context_builder_reads_current_context_budget() -> None:
@@ -61,10 +71,10 @@ def test_local_env_file_is_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert get_env_file() == CONFIG_DIR / "agent-runner.env"
 
 
-def test_local_settings_do_not_require_manual_env_vars() -> None:
+def test_local_settings_enable_nacos_without_manual_env_vars() -> None:
     settings = get_settings()
 
-    assert settings.nacos_enabled is False
+    assert settings.nacos_enabled is True
     assert settings.local_agent_config_enabled is True
     assert settings.lite_llm_base_url == "http://localhost:4000"
     assert settings.lite_llm_api_key
@@ -120,6 +130,91 @@ def test_mcp_pool_priority_is_nacos_then_file_then_code_default(tmp_path) -> Non
     assert merged.mcp_pool_borrow_timeout_seconds == 6
 
 
+def test_project_relative_configuration_paths_ignore_process_working_directory() -> None:
+    manager = ConfigurationManager(Settings(_env_file=None))
+    manager._nacos_loader = type(
+        "NacosSnapshot",
+        (),
+        {"cached_config": {"mcp": {"catalog_path": "./config/mcp-servers.json"}}},
+    )()
+
+    merged = manager.get_settings()
+
+    assert resolve_project_path(merged.mcp_catalog_path) == CONFIG_DIR / "mcp-servers.json"
+    assert resolve_project_path("./config/agents.json") == CONFIG_DIR / "agents.json"
+    assert resolve_project_path(str(PROJECT_ROOT / "external.json")) == PROJECT_ROOT / "external.json"
+
+
+def test_mcp_secrets_use_latest_nacos_snapshot_with_environment_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENV_ONLY_MCP_KEY", "environment-secret")
+    manager = ConfigurationManager(Settings(_env_file=None))
+    nacos_snapshot = type(
+        "NacosSnapshot",
+        (),
+        {
+            "cached_config": {"mcp": {"secrets": {"NACOS_MCP_KEY": "nacos-secret"}}},
+            "configuration_revision": 3,
+        },
+    )()
+    manager._nacos_loader = nacos_snapshot
+
+    initial_snapshot = manager.get_mcp_secret_snapshot()
+    nacos_snapshot.cached_config = {"mcp": {"secrets": {"NACOS_MCP_KEY": "rotated-secret"}}}
+    nacos_snapshot.configuration_revision = 4
+    rotated_snapshot = manager.get_mcp_secret_snapshot()
+
+    assert initial_snapshot.resolve("${secret:NACOS_MCP_KEY}") == "nacos-secret"
+    assert initial_snapshot.resolve("${secret:ENV_ONLY_MCP_KEY}") == "environment-secret"
+    assert initial_snapshot.configuration_revision == 3
+    assert rotated_snapshot.resolve("${secret:NACOS_MCP_KEY}") == "rotated-secret"
+    assert rotated_snapshot.configuration_revision == 4
+
+
+def test_nacos_secret_replacement_is_atomic_and_empty_content_revokes() -> None:
+    loader = NacosConfigLoader(enabled=False)
+    loader._parse_and_replace_config("mcp:\n  secrets:\n    FIXTURE_KEY: first\n")
+
+    with pytest.raises(ValueError):
+        loader._parse_and_replace_config("- not\n- an\n- object\n")
+
+    assert loader.cached_config == {"mcp": {"secrets": {"FIXTURE_KEY": "first"}}}
+    assert loader.configuration_revision == 1
+
+    loader._parse_and_replace_config("")
+
+    assert loader.cached_config == {}
+    assert loader.configuration_revision == 2
+
+
+async def test_nacos_sdk_logging_is_disabled_at_the_application_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_configs: list[ClientConfig] = []
+
+    class FakeNacosClient:
+        async def get_config(self, config_param: object) -> str:
+            return ""
+
+        async def add_listener(self, data_id: str, group: str, listener: object) -> None:
+            return None
+
+        async def shutdown(self) -> None:
+            return None
+
+    async def create_config_service(client_config: ClientConfig) -> FakeNacosClient:
+        captured_configs.append(client_config)
+        return FakeNacosClient()
+
+    monkeypatch.setattr("agent_runner.nacos_config.NacosConfigService.create_config_service", create_config_service)
+    loader = NacosConfigLoader(enabled=True)
+
+    await loader.initialize()
+    await loader.close()
+
+    assert len(captured_configs) == 1
+    assert captured_configs[0].log_level == "CRITICAL"
+
+
 def test_local_general_agent_uses_the_service_output_budget() -> None:
     config = json.loads((CONFIG_DIR / "agents.json").read_text(encoding="utf-8"))
     general_agent = next(agent for agent in config["agents"] if agent["agent_id"] == 1)
@@ -130,5 +225,7 @@ def test_local_general_agent_uses_the_service_output_budget() -> None:
         "deepwiki",
         "microsoft-learn",
         "context7",
+        "tavily",
+        "exa",
         "openai-docs",
     ]

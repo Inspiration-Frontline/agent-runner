@@ -68,6 +68,7 @@ async def stream_conversation(
         cancellation_registry=services.cancellations,
         mcp_connection_pool=getattr(services, "mcp_connection_pool", None),
         mcp_schema_cache=getattr(services, "mcp_schema_cache", None),
+        mcp_secret_provider=getattr(services, "mcp_secret_provider", None),
     )
     try:
         await orchestrator.acquire_conversation(conversation_request.conversation_id)
