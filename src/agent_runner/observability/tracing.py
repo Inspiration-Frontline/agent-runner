@@ -131,6 +131,20 @@ class Span:
         self._otel_span.set_attribute("error.type", type(error).__name__)
         self._otel_span.set_status(Status(StatusCode.ERROR, type(error).__name__))
 
+    @contextmanager
+    def activate(self) -> Generator["Span"]:
+        """Make this already-created span current in the calling context only."""
+        with trace.use_span(self._otel_span, end_on_exit=False):
+            try:
+                yield self
+            except BaseException as error:
+                self.record_exception(error)
+                raise
+
+    def end(self) -> None:
+        """Finish this span after every context that used it has exited."""
+        self._otel_span.end()
+
 
 class Tracer:
     """Creates real OpenTelemetry spans while keeping the existing local API narrow."""
@@ -153,20 +167,31 @@ class Tracer:
         kind: SpanKind = SpanKind.INTERNAL,
     ) -> Generator[Span]:
         """Activate one span, preserve explicit parentage, and record escaping exceptions."""
+        wrapped = self.start_span(name, attributes, parent_context=parent_context, kind=kind)
+        try:
+            with wrapped.activate():
+                yield wrapped
+        finally:
+            wrapped.end()
+
+    def start_span(
+        self,
+        name: str,
+        attributes: dict[str, Any] | None = None,
+        *,
+        parent_context: Context | None = None,
+        kind: SpanKind = SpanKind.INTERNAL,
+    ) -> Span:
+        """Create a span without binding its context to the current coroutine."""
         parent_span = trace.get_current_span(parent_context).get_span_context() if parent_context else None
         parent_id = _hex_span_id(parent_span) if parent_span is not None and parent_span.is_valid else None
-        with self._otel_tracer.start_as_current_span(
+        otel_span = self._otel_tracer.start_span(
             name,
             context=parent_context,
             kind=kind,
             attributes=attributes,
-        ) as otel_span:
-            wrapped = Span(otel_span, name, parent_id)
-            try:
-                yield wrapped
-            except BaseException as error:
-                wrapped.record_exception(error)
-                raise
+        )
+        return Span(otel_span, name, parent_id)
 
 
 class TracingManager:

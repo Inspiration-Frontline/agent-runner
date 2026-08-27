@@ -178,6 +178,11 @@ async def test_required_preflight_failure_is_typed_and_redacted(caplog: pytest.L
     assert raised.value.error_code == "MCP_REQUIRED_SERVER_UNAVAILABLE"
     assert "MCP server rejected the configured credentials." in str(raised.value)
     assert secret not in str(raised.value)
+    assert "server_id=fixture" in caplog.text
+    assert "required=True" in caplog.text
+    assert "failure_code=MCP_AUTHENTICATION_REJECTED" in caplog.text
+    assert "message=MCP server rejected the configured credentials." in caplog.text
+    assert "Required MCP server preflight failed" not in caplog.text
     assert secret not in caplog.text
 
 

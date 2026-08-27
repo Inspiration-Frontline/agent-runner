@@ -70,24 +70,33 @@ async def stream_conversation(
         mcp_schema_cache=getattr(services, "mcp_schema_cache", None),
         mcp_secret_provider=getattr(services, "mcp_secret_provider", None),
     )
+    conversation_tracing = ConversationTracing(services.tracing.tracer, settings)
+    trace = conversation_tracing.start_request(dict(request.headers), conversation_request)
     try:
-        await orchestrator.acquire_conversation(conversation_request.conversation_id)
+        with trace.activate():
+            await orchestrator.acquire_conversation(conversation_request.conversation_id)
     except ConversationBusyError as error:
+        trace.finish()
         await orchestrator.close()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "CONVERSATION_BUSY", "message": str(error)},
+            headers={"X-Round-Trace-Id": trace.trace_id},
         ) from error
+    except BaseException:
+        trace.finish()
+        await orchestrator.close()
+        raise
 
     async def generate_events() -> AsyncGenerator[str]:
-        conversation_tracing = ConversationTracing(services.tracing.tracer, settings)
-        with conversation_tracing.trace_request(dict(request.headers), conversation_request) as trace:
-            try:
+        try:
+            with trace.activate():
                 async for event in orchestrator.run(conversation_request, user_id, request):
                     trace.record_event(event)
                     yield f"data: {event.model_dump_json()}\n\n"
-            finally:
-                await orchestrator.close()
+        finally:
+            trace.finish()
+            await orchestrator.close()
 
     return StreamingResponse(
         generate_events(),
@@ -96,6 +105,7 @@ async def stream_conversation(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-Round-Trace-Id": trace.trace_id,
         },
     )
 

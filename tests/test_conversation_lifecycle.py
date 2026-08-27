@@ -1,4 +1,6 @@
+import asyncio
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -238,9 +240,8 @@ async def test_second_round_uses_replay_and_persists_full_snapshot() -> None:
     turn = saved.turns[0]
     assert turn.agent_identity is not None
     assert turn.agent_identity.version == 2
-    assert turn.llm_call is not None
-    assert turn.llm_call.request is not None
-    assert [(message.role, message.content) for message in turn.llm_call.request.messages] == [
+    assert turn.request is not None
+    assert [(message.role, message.content) for message in turn.request.messages] == [
         (MessageRole.SYSTEM, "latest instructions"),
         (MessageRole.USER, "My name is Ada."),
         (MessageRole.ASSISTANT, "Nice to meet you."),
@@ -371,7 +372,10 @@ async def test_busy_conversation_returns_http_409_before_stream(monkeypatch: pyt
     route_request = type(
         "RouteRequest",
         (),
-        {"app": type("App", (), {"state": type("State", (), {"services": services})()})()},
+        {
+            "headers": {},
+            "app": type("App", (), {"state": type("State", (), {"services": services})()})(),
+        },
     )()
 
     with pytest.raises(HTTPException) as raised:
@@ -384,6 +388,52 @@ async def test_busy_conversation_returns_http_409_before_stream(monkeypatch: pyt
     assert raised.value.status_code == 409
     assert isinstance(raised.value.detail, dict)
     assert raised.value.detail["code"] == "CONVERSATION_BUSY"
+    assert raised.value.headers is not None
+    assert len(raised.value.headers["X-Round-Trace-Id"]) == 32
+
+
+async def test_stream_response_exposes_round_trace_id_when_body_is_consumed_by_another_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class StreamingOrchestrator:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        async def acquire_conversation(self, conversation_id: str) -> None:
+            pass
+
+        async def run(self, conversation_request, user_id: int, http_request):
+            if False:
+                yield "unreachable"
+
+        async def close(self) -> None:
+            pass
+
+    services = SimpleNamespace(
+        tracing=SimpleNamespace(tracer=Tracer()),
+        cancellations=ConversationCancellationRegistry(),
+        get_settings=get_settings,
+    )
+    route_request = SimpleNamespace(
+        headers={},
+        app=SimpleNamespace(state=SimpleNamespace(services=services)),
+    )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(routes, "RuntimeOrchestrator", StreamingOrchestrator)
+        response = await routes.stream_conversation(
+            route_request,
+            ConversationRequest(conversation_id="conv_trace_header", message="hello"),
+            "1",
+        )
+        trace_id = response.headers["x-round-trace-id"]
+        assert len(trace_id) == 32
+        assert int(trace_id, 16) > 0
+        async def consume_stream() -> list[str]:
+            return [chunk async for chunk in response.body_iterator]
+
+        assert await asyncio.create_task(consume_stream()) == []
+        assert "Failed to detach context" not in caplog.text
 
 
 def _orchestrator(

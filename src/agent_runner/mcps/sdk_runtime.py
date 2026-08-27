@@ -601,7 +601,11 @@ class SdkMcpRuntime:
         except BaseException as error:
             failure = classify_mcp_failure(error)
             logger.warning(
-                "MCP connection preflight failed",
+                "MCP connection preflight failed: server_id=%s required=%s failure_code=%s message=%s",
+                binding.server_id,
+                binding.required,
+                failure.code,
+                failure.public_message,
                 extra={"server_id": binding.server_id, "mcp_failure_code": failure.code},
             )
             diagnostic = McpConnectionDiagnostic(
@@ -681,7 +685,10 @@ class SdkMcpRuntime:
                 failure = classify_mcp_failure(result)
                 errors.append(McpServerDiscoveryError(server.name, failure.code, failure.public_message))
                 logger.warning(
-                    "MCP schema discovery failed",
+                    "MCP schema discovery failed: server_id=%s failure_code=%s message=%s",
+                    server.name,
+                    failure.code,
+                    failure.public_message,
                     extra={"server_id": server.name, "mcp_failure_code": failure.code},
                 )
             else:

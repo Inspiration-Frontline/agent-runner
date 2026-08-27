@@ -83,14 +83,32 @@ class ConversationTrace:
     def __init__(self, span: Span) -> None:
         self._span = span
         self._stats = ConversationStreamTraceStats()
+        self._finished = False
+
+    @property
+    def trace_id(self) -> str:
+        """Return the lowercase W3C trace identifier for the complete Round request."""
+        return self._span.trace_id
 
     def record_event(self, event: object) -> None:
         """Record one emitted SSE event."""
         self._stats.record_event(self._span, event)
 
+    @contextmanager
+    def activate(self) -> Generator["ConversationTrace"]:
+        """Activate the request span in the coroutine currently doing request work."""
+        with self._span.activate():
+            yield self
+
     def finish(self) -> None:
         """Finalize aggregate stream evidence."""
-        self._stats.finish(self._span)
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            self._stats.finish(self._span)
+        finally:
+            self._span.end()
 
 
 class ConversationTracing:
@@ -100,13 +118,12 @@ class ConversationTracing:
         self._tracer = tracer
         self._settings = settings
 
-    @contextmanager
-    def trace_request(
+    def start_request(
         self,
         headers: Mapping[str, str],
         conversation_request: ConversationRequest,
-    ) -> Generator[ConversationTrace]:
-        """Trace the full streaming lifetime from accepted request through terminal SSE."""
+    ) -> ConversationTrace:
+        """Create a Round span that can be activated by the route and its SSE generator."""
         attributes: dict[str, str | int | bool] = {
             "conversation.id": conversation_request.conversation_id,
             "conversation.file_count": len(conversation_request.file_ids),
@@ -121,15 +138,12 @@ class ConversationTracing:
                 self._settings.otel_content_max_chars,
             )
         parent_context = extract_trace_context(headers)
-        with self._tracer.span(
+        span = self._tracer.start_span(
             "conversation.request",
             attributes,
             parent_context=parent_context,
             kind=SpanKind.SERVER,
-        ) as span:
-            trace = ConversationTrace(span)
-            span.add_event("conversation.accepted")
-            try:
-                yield trace
-            finally:
-                trace.finish()
+        )
+        conversation_trace = ConversationTrace(span)
+        span.add_event("conversation.accepted")
+        return conversation_trace

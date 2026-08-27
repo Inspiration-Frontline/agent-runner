@@ -29,7 +29,6 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     FileUrl,
     FinalizeConversationRoundRequest,
     FunctionCall,
-    LlmCall,
     LlmConversationMessage,
     LlmMessageStorageMode,
     LlmRequest,
@@ -370,7 +369,12 @@ class RuntimeOrchestrator:
 
         except RequiredMcpServerUnavailableError as error:
             message = str(error)
-            logger.warning("Required MCP server preflight failed")
+            logger.error(
+                "Required MCP server preflight failed: error_code=%s message=%s diagnostics=%s",
+                error.error_code,
+                message,
+                error.diagnostics,
+            )
             await self._persist_unexpected_terminal(conversation_request, user_id, state, RoundStatus.FAILED, message)
             yield ErrorEvent(error_message=message, error_code=error.error_code, phase="mcp_preflight")
 
@@ -1235,12 +1239,8 @@ class RuntimeOrchestrator:
             for definition in captured.tools
         ]
         request = LlmRequest(
-            provider="litellm",
-            model=agent.model,
             messages=[self._captured_message_to_proto(message) for message in captured.request_messages],
             tools=tool_definitions,
-            temperature=agent.temperature,
-            max_output_tokens=agent.max_output_tokens,
             raw_request=captured.raw_request,
             message_storage_mode=LlmMessageStorageMode[captured.message_storage_mode],
         )
@@ -1278,14 +1278,12 @@ class RuntimeOrchestrator:
         ]
         return ConversationTurn(
             turn_number=turn_number,
-            llm_call=LlmCall(
-                request=request,
-                response=response,
-                request_id=captured.request_id,
-                trace_id=captured.trace_id,
-                start_time=captured.start_time,
-                end_time=captured.llm_end_time,
-            ),
+            request=request,
+            response=response,
+            request_id=captured.request_id,
+            trace_id=captured.trace_id,
+            llm_start_time=captured.start_time,
+            llm_end_time=captured.llm_end_time,
             tool_call_executions=executions,
             status=status,
             error_message=error_message,
