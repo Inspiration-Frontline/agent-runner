@@ -13,14 +13,30 @@ _Result = TypeVar("_Result")
 
 
 class McpTracedOperations:
-    """Decorates MCP operations with tracing without leaking span mechanics into runtime logic."""
+    """Decorates MCP operations with tracing without leaking span mechanics into runtime logic.
+
+    Attributes:
+        _tracer: Application-owned OpenTelemetry facade used by this component.
+    """
 
     def __init__(self, tracer: Tracer) -> None:
-        """Create an adapter over the application's configured tracer."""
+        """Create an adapter over the application's configured tracer.
+
+        Args:
+            tracer: Application-owned OpenTelemetry facade.
+        """
         self._tracer = tracer
 
     async def discover(self, server_id: str, operation: Callable[[], Awaitable[_Result]]) -> _Result:
-        """Execute one ``tools/list`` round trip inside its discovery span."""
+        """Execute one ``tools/list`` round trip inside its discovery span.
+
+        Args:
+            server_id: Stable MCP Catalog server identifier.
+            operation: Asynchronous boundary operation to trace and invoke.
+
+        Returns:
+            The provider result returned by the traced ``tools/list`` operation.
+        """
         with self._tracer.span("mcp.discovery") as span:
             span.set_attribute("mcp.server.id", server_id)
             return await operation()
@@ -33,7 +49,18 @@ class McpTracedOperations:
         attempt_id: str,
         operation: Callable[[], Awaitable[_Result]],
     ) -> _Result:
-        """Execute remote delivery of one model-selected MCP tool call inside its span."""
+        """Execute remote delivery of one model-selected MCP tool call inside its span.
+
+        Args:
+            server_id: Stable MCP Catalog server identifier.
+            tool_name: Provider-visible Tool name.
+            tool_call_id: Provider-generated Tool call identifier.
+            attempt_id: Unique identifier of the remote delivery attempt.
+            operation: Asynchronous boundary operation to trace and invoke.
+
+        Returns:
+            The remote Tool result returned by the traced dispatch operation.
+        """
         with self._tracer.span("mcp.dispatch") as span:
             span.set_attribute("gen_ai.tool.call.id", tool_call_id)
             span.set_attribute("mcp.server.id", server_id)
@@ -51,7 +78,20 @@ class McpTracedOperations:
         operation: Callable[[], Awaitable[_Result]],
         error_type: str = "",
     ) -> _Result:
-        """Execute durable terminal-result recording inside its result span."""
+        """Execute durable terminal-result recording inside its result span.
+
+        Args:
+            server_id: Stable MCP Catalog server identifier.
+            tool_name: Provider-visible Tool name.
+            tool_call_id: Provider-generated Tool call identifier.
+            attempt_id: Unique identifier of the remote delivery attempt.
+            state: Request-scoped mutable orchestration or persistence state.
+            operation: Asynchronous boundary operation to trace and invoke.
+            error_type: Domain error type value used by the operation.
+
+        Returns:
+            The persistence result returned by the traced terminal-recording operation.
+        """
         with self._tracer.span("mcp.result") as span:
             span.set_attribute("gen_ai.tool.call.id", tool_call_id)
             span.set_attribute("mcp.server.id", server_id)

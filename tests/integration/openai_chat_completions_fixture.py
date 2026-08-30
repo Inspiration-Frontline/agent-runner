@@ -41,9 +41,7 @@ def _requested_tool(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Select the named fixture capability from the latest user instruction."""
     active_messages = _active_turn_messages(payload)
     user_text = " ".join(
-        _text_content(message.get("content"))
-        for message in active_messages
-        if message.get("role") == "user"
+        _text_content(message.get("content")) for message in active_messages if message.get("role") == "user"
     ).lower()
     requested_suffix = "search_current_information"
     arguments: dict[str, Any] = {"query": "current Python release information"}
@@ -75,9 +73,7 @@ def _final_answer(payload: dict[str, Any]) -> str:
     """Explain uncertain delivery explicitly; otherwise return stable fixture content."""
     active_messages = _active_turn_messages(payload)
     user_text = " ".join(
-        _text_content(message.get("content"))
-        for message in active_messages
-        if message.get("role") == "user"
+        _text_content(message.get("content")) for message in active_messages if message.get("role") == "user"
     ).lower()
     if "uncertain external delivery" in user_text:
         return "The external action may have completed, but its outcome could not be confirmed. It was not retried."

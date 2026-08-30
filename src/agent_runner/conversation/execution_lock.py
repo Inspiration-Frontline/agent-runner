@@ -14,6 +14,15 @@ class ConversationBusyError(RuntimeError):
 
 
 class ConversationExecutionLock:
+    """Own a renewable Redis lease that serializes Round allocation per Conversation.
+
+    Attributes:
+        _redis: Async Redis client that owns the lease key and renewal scripts.
+        _key: Active Conversation-scoped lease key, or ``None`` before acquisition/after release.
+        _token: Per-acquisition ownership token preventing stale workers from releasing a new lease.
+        _renewal_task: Lifecycle-owned renewal task, active only while this instance holds a lease.
+    """
+
     _LEASE_MS = 180_000
     _RENEW_INTERVAL_SECONDS = 30
     _RELEASE_SCRIPT = """
@@ -35,16 +44,19 @@ return 0
         The lease exists because Round numbers are allocated from a database high-water mark and
         two concurrent model runs could otherwise both persist the same next number. The token is
         unique per request so a stale worker cannot release a newer worker's lease.
+
+        Args:
+            settings: Effective application settings for the operation.
         """
-        settings = settings or Settings()
+        current_settings: Settings = settings or Settings()
         self._redis = aioredis.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            password=settings.redis_password or None,
-            db=settings.redis_db,
+            host=current_settings.redis_host,
+            port=current_settings.redis_port,
+            password=current_settings.redis_password or None,
+            db=current_settings.redis_db,
             decode_responses=True,
-            socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
-            socket_timeout=settings.redis_socket_timeout_seconds,
+            socket_connect_timeout=current_settings.redis_socket_connect_timeout_seconds,
+            socket_timeout=current_settings.redis_socket_timeout_seconds,
         )
         self._key: str | None = None
         self._token: str | None = None
@@ -59,9 +71,9 @@ return 0
         Raises:
             ConversationBusyError: If another active request already owns the key.
         """
-        key = f"agent-runner:execution:{conversation_id}"
-        token = str(uuid4())
-        acquired = await self._redis.set(key, token, nx=True, px=self._LEASE_MS)
+        key: str = f"agent-runner:execution:{conversation_id}"
+        token: str = str(uuid4())
+        acquired: bool | str | bytes | None = await self._redis.set(key, token, nx=True, px=self._LEASE_MS)
         if not acquired:
             raise ConversationBusyError("Another request is already running for this conversation.")
         self._key = key
@@ -78,7 +90,7 @@ return 0
             await asyncio.sleep(self._RENEW_INTERVAL_SECONDS)
             if self._key is None or self._token is None:
                 return
-            renewed = await self._redis.eval(self._RENEW_SCRIPT, 1, self._key, self._token, self._LEASE_MS)
+            renewed: object = await self._redis.eval(self._RENEW_SCRIPT, 1, self._key, self._token, self._LEASE_MS)
             if renewed != 1:
                 return
 

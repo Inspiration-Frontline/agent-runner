@@ -15,8 +15,12 @@ INTERNAL_FUNCTION_TOOLS: tuple[tuple[str, FunctionTool], ...] = (
 
 
 def build_internal_tool_registry() -> ToolRegistry:
-    """Build the request-independent registry of approved built-in Tools."""
-    registry = ToolRegistry()
+    """Build the request-independent registry of approved built-in Tools.
+
+    Returns:
+        build the request-independent registry of approved built-in Tools.
+    """
+    registry: ToolRegistry = ToolRegistry()
     for tool_key, function_tool in INTERNAL_FUNCTION_TOOLS:
         registry.register(ToolDefinition.from_function_tool(tool_key, function_tool))
     return registry

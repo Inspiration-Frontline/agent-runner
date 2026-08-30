@@ -5,16 +5,20 @@ from types import MappingProxyType
 
 from agents import function_tool
 
-_BINARY_OPERATORS: MappingProxyType[type[ast.operator], Callable[[float, float], float]] = MappingProxyType({
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-})
-_UNARY_OPERATORS: MappingProxyType[type[ast.unaryop], Callable[[float], float]] = MappingProxyType({
-    ast.UAdd: operator.pos,
-    ast.USub: operator.neg,
-})
+_BINARY_OPERATORS: MappingProxyType[type[ast.operator], Callable[[float, float], float]] = MappingProxyType(
+    {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+    }
+)
+_UNARY_OPERATORS: MappingProxyType[type[ast.unaryop], Callable[[float], float]] = MappingProxyType(
+    {
+        ast.UAdd: operator.pos,
+        ast.USub: operator.neg,
+    }
+)
 
 
 @function_tool(failure_error_function=None)
@@ -23,16 +27,19 @@ async def calculate_expression(expression: str) -> dict[str, str | int | float]:
 
     Args:
         expression: Code-style arithmetic expression such as (12.5 + 7.5) / 4.
+
+    Returns:
+        Evaluated an arithmetic expression using +, -, *, /, parentheses, and decimal numbers.
     """
-    normalized = expression.strip()
+    normalized: str = expression.strip()
     if not normalized:
         raise ValueError("Expression cannot be blank.")
     if len(normalized) > 1_000:
         raise ValueError("Expression is too long.")
 
     try:
-        parsed = ast.parse(normalized, mode="eval")
-        value = _evaluate(parsed.body, depth=0)
+        parsed: ast.Expression = ast.parse(normalized, mode="eval")
+        value: int | float = _evaluate(parsed.body, depth=0)
     except (SyntaxError, TypeError) as error:
         raise ValueError("Expression contains unsupported syntax.") from error
     if not isinstance(value, int | float):
@@ -41,16 +48,24 @@ async def calculate_expression(expression: str) -> dict[str, str | int | float]:
 
 
 def _evaluate(node: ast.AST, depth: int) -> int | float:
-    """Evaluate the restricted arithmetic AST without executing arbitrary Python code."""
+    """Evaluate the restricted arithmetic AST without executing arbitrary Python code.
+
+    Args:
+        node: Restricted arithmetic AST node to evaluate.
+        depth: Current recursion depth used to enforce the safety limit.
+
+    Returns:
+        Evaluated the restricted arithmetic AST without executing arbitrary Python code.
+    """
     if depth > 64:
         raise ValueError("Expression nesting is too deep.")
     if isinstance(node, ast.Constant):
-        value = node.value
+        value: object = node.value
         if isinstance(value, int | float) and not isinstance(value, bool):
             return value
     if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
-        left = _evaluate(node.left, depth + 1)
-        right = _evaluate(node.right, depth + 1)
+        left: int | float = _evaluate(node.left, depth + 1)
+        right: int | float = _evaluate(node.right, depth + 1)
         return _BINARY_OPERATORS[type(node.op)](left, right)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPERATORS:
         return _UNARY_OPERATORS[type(node.op)](_evaluate(node.operand, depth + 1))

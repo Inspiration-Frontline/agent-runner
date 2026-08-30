@@ -290,9 +290,7 @@ async def test_same_group_references_are_labelled_and_persist_the_frozen_boundar
 async def test_reference_context_overflow_returns_typed_error_before_model() -> None:
     runtime = CountingRuntime()
     orchestrator, _, _ = _orchestrator(runtime)
-    settings = get_settings().model_copy(
-        update={"max_context_tokens": 8, "max_output_tokens": 7}
-    )
+    settings = get_settings().model_copy(update={"max_context_tokens": 8, "max_output_tokens": 7})
     orchestrator.settings = settings
     request = ConversationRequest(
         conversation_id="conv_multi",
@@ -379,7 +377,7 @@ async def test_busy_conversation_returns_http_409_before_stream(monkeypatch: pyt
     )()
 
     with pytest.raises(HTTPException) as raised:
-        await routes.stream_conversation(
+        await routes.stream_conversation_events(
             cast(Any, route_request),
             ConversationRequest(conversation_id="conv_busy", message="hello"),
             "1",
@@ -421,7 +419,7 @@ async def test_stream_response_exposes_round_trace_id_when_body_is_consumed_by_a
 
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(routes, "RuntimeOrchestrator", StreamingOrchestrator)
-        response = await routes.stream_conversation(
+        response = await routes.stream_conversation_events(
             route_request,
             ConversationRequest(conversation_id="conv_trace_header", message="hello"),
             "1",
@@ -429,6 +427,7 @@ async def test_stream_response_exposes_round_trace_id_when_body_is_consumed_by_a
         trace_id = response.headers["x-round-trace-id"]
         assert len(trace_id) == 32
         assert int(trace_id, 16) > 0
+
         async def consume_stream() -> list[str]:
             return [chunk async for chunk in response.body_iterator]
 

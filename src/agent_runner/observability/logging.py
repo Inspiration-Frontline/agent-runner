@@ -6,10 +6,20 @@ import structlog
 
 
 def _add_trace_context(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+    """Add active trace identifiers to a structlog event without copying sensitive payloads.
+
+    Args:
+        _: Unused positional value required by the logging processor protocol.
+        __: Unused keyword values required by the logging processor protocol.
+        event_dict: Structured log event being normalized before emission.
+
+    Returns:
+        Added active trace identifiers to a structlog event without copying sensitive payloads.
+    """
     from agent_runner.observability.tracing import current_span_id, current_trace_id
 
-    trace_id = current_trace_id()
-    span_id = current_span_id()
+    trace_id: str = current_trace_id()
+    span_id: str = current_span_id()
     if trace_id:
         event_dict["trace_id"] = trace_id
     if span_id:
@@ -111,5 +121,12 @@ class ExternalMcpCredentialFilter(logging.Filter):
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Allow application diagnostics while dropping credential-bearing upstream MCP records."""
+        """Allow application diagnostics while dropping credential-bearing upstream MCP records.
+
+        Args:
+            record: Log record emitted by an upstream library or application component.
+
+        Returns:
+            ``True`` when the record may be emitted after filtering.
+        """
         return not record.name.startswith(self._UNSAFE_LOGGER_PREFIXES)

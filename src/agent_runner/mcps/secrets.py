@@ -26,11 +26,11 @@ def validate_secret_template(value: str, require_reference: bool = False) -> str
     Raises:
         ValueError: The template has no required reference or contains malformed Secret syntax.
     """
-    references = tuple(SECRET_REFERENCE_PATTERN.finditer(value))
+    references: tuple[re.Match[str], ...] = tuple(SECRET_REFERENCE_PATTERN.finditer(value))
     if require_reference and not references:
         raise ValueError("MCP credential templates must contain a ${secret:NAME} reference")
 
-    remaining = SECRET_REFERENCE_PATTERN.sub("", value)
+    remaining: str = SECRET_REFERENCE_PATTERN.sub("", value)
     if "${secret:" in remaining:
         raise ValueError("MCP credential template contains an invalid Secret reference")
 
@@ -38,7 +38,14 @@ def validate_secret_template(value: str, require_reference: bool = False) -> str
 
 
 def has_secret_reference(value: str) -> bool:
-    """Return whether a validated template contains at least one Secret reference."""
+    """Return whether a validated template contains at least one Secret reference.
+
+    Args:
+        value: Candidate value to validate, normalize, or serialize.
+
+    Returns:
+        ``True`` when the validated template contains at least one Secret reference.
+    """
     return SECRET_REFERENCE_PATTERN.search(value) is not None
 
 
@@ -52,8 +59,11 @@ class McpSecretSnapshot:
 
     # Key: configured Secret name. Value: raw Secret value from the same Nacos configuration revision.
     values: Mapping[str, str]
+    """Immutable mapping from configured Secret names to raw values in one snapshot."""
     configuration_revision: int
+    """Monotonic configuration revision associated with ``values``."""
     use_environment_fallback: bool = True
+    """Whether unresolved names may fall back to process environment variables."""
 
     @classmethod
     def create(
@@ -62,7 +72,16 @@ class McpSecretSnapshot:
         configuration_revision: int,
         use_environment_fallback: bool = True,
     ) -> "McpSecretSnapshot":
-        """Copy validated values into an immutable snapshot safe for one Catalog resolution."""
+        """Copy validated values into an immutable snapshot safe for one Catalog resolution.
+
+        Args:
+            values: Collection of values consumed in deterministic order.
+            configuration_revision: Monotonic configuration snapshot revision.
+            use_environment_fallback: Whether missing Secret names may use process environment values.
+
+        Returns:
+            Immutable snapshot safe for one Catalog resolution.
+        """
         normalized: dict[str, str] = {}
         for name, value in values.items():
             if SECRET_NAME_PATTERN.fullmatch(name) is None:
@@ -85,12 +104,12 @@ class McpSecretSnapshot:
         Raises:
             ValueError: The reference is malformed or the requested Secret is unavailable.
         """
-        match = SECRET_REFERENCE_PATTERN.fullmatch(reference)
+        match: re.Match[str] | None = SECRET_REFERENCE_PATTERN.fullmatch(reference)
         if match is None:
             raise ValueError("MCP credentials must use ${secret:NAME} references")
 
-        secret_name = match.group(1)
-        value = self.values.get(secret_name)
+        secret_name: str = match.group(1)
+        value: str | None = self.values.get(secret_name)
         if not value and self.use_environment_fallback:
             value = os.getenv(secret_name)
         if not value:
@@ -103,26 +122,46 @@ class SecretProvider(Protocol):
     """Supplies one consistent Secret snapshot for an MCP Server resolution."""
 
     def get_snapshot(self) -> McpSecretSnapshot:
-        """Return the latest immutable Secret snapshot available to a new connection."""
+        """Return the latest immutable Secret snapshot available to a new connection.
+
+        Returns:
+            Latest immutable Secret snapshot available to a new connection.
+        """
 
 
 class EnvironmentSecretProvider:
     """Provide the legacy environment-only Secret boundary for standalone local execution."""
 
     def get_snapshot(self) -> McpSecretSnapshot:
-        """Return an empty snapshot whose resolver falls back to process environment variables."""
+        """Return an empty snapshot whose resolver falls back to process environment variables.
+
+        Returns:
+            return an empty snapshot whose resolver falls back to process environment variables.
+        """
         return McpSecretSnapshot.create({}, configuration_revision=0)
 
 
 class ConfigurationSecretProvider:
-    """Read the latest Nacos-backed Secret snapshot at the outbound MCP boundary."""
+    """Read the latest Nacos-backed Secret snapshot at the outbound MCP boundary.
+
+    Attributes:
+        _snapshot_supplier: Callback returning the latest immutable Secret snapshot.
+    """
 
     def __init__(self, snapshot_supplier: Callable[[], McpSecretSnapshot]) -> None:
-        """Create a provider backed by the application-owned Configuration Manager."""
+        """Create a provider backed by the application-owned Configuration Manager.
+
+        Args:
+            snapshot_supplier: Callback returning the latest immutable Secret snapshot.
+        """
         self._snapshot_supplier = snapshot_supplier
 
     def get_snapshot(self) -> McpSecretSnapshot:
-        """Return the latest atomically published configuration snapshot."""
+        """Return the latest atomically published configuration snapshot.
+
+        Returns:
+            Latest atomically published configuration snapshot.
+        """
         return self._snapshot_supplier()
 
 
@@ -133,6 +172,13 @@ class SecretTemplateResolver:
     snapshot: McpSecretSnapshot
 
     def resolve(self, template: str) -> str:
-        """Resolve a validated URL or Header template without retaining intermediate values."""
+        """Resolve a validated URL or Header template without retaining intermediate values.
+
+        Args:
+            template: Validated template containing optional Secret references.
+
+        Returns:
+            resolve a validated URL or Header template without retaining intermediate values.
+        """
         validate_secret_template(template)
         return SECRET_REFERENCE_PATTERN.sub(lambda match: self.snapshot.resolve(match.group(0)), template)

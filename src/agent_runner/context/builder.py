@@ -18,7 +18,14 @@ _IMAGE_DETAILS: frozenset[ImageDetail] = frozenset({"low", "high", "auto", "orig
 
 
 def is_image_detail(value: str) -> TypeIs[ImageDetail]:
-    """Return whether a string is a supported provider image detail."""
+    """Return whether a string is a supported provider image detail.
+
+    Args:
+        value: Candidate value to validate, normalize, or serialize.
+
+    Returns:
+        ``True`` when the value is a supported provider image detail.
+    """
     return value in _IMAGE_DETAILS
 
 
@@ -27,6 +34,7 @@ class ModelTextPart:
     """Text supplied to the model as one multipart input item."""
 
     text: str
+    """Text content passed to the provider as one multipart item."""
 
 
 @dataclass
@@ -34,8 +42,11 @@ class ModelImagePart:
     """Transient image input whose signed URL exists only for the current model call."""
 
     file_id: str
+    """Stable Conversation Manager file ID used for replay and auditing."""
     url: str
+    """Short-lived signed URL supplied only to the current model call."""
     detail: ImageDetail = "auto"
+    """Provider image-detail hint for this input."""
 
 
 ModelContentPart = ModelTextPart | ModelImagePart
@@ -46,6 +57,7 @@ class CaptureTextPart:
     """Durable text captured for replay and persistence."""
 
     text: str
+    """Text content retained in the durable capture."""
 
 
 @dataclass
@@ -53,7 +65,9 @@ class CaptureFilePart:
     """Durable AgentBreaker file reference that can be re-signed during replay."""
 
     file_id: str
+    """Stable file ID retained instead of an expiring signed URL."""
     detail: ImageDetail = "auto"
+    """Image-detail hint to apply when the file is replayed."""
 
 
 CaptureContentPart = CaptureTextPart | CaptureFilePart
@@ -64,9 +78,13 @@ class RuntimeToolCall:
     """Provider-neutral Tool Call preserved across replay and SDK adapters."""
 
     call_id: str
+    """Provider-generated Tool Call identifier."""
     call_type: str
+    """Provider protocol type, such as ``function``."""
     function_name: str
+    """Function name emitted by the provider."""
     arguments: str
+    """Exact JSON argument text emitted by the provider."""
 
 
 @dataclass
@@ -98,14 +116,26 @@ class CapturedMessage:
     """Provider-neutral message retained for replay before JSON/protobuf conversion."""
 
     role: str
+    """Provider-neutral message role."""
     content: str
+    """Scalar text content retained for replay."""
     capture_content: tuple[CaptureContentPart, ...] = ()
+    """Stable text/file parts retained for durable replay."""
     tool_calls: tuple[RuntimeToolCall, ...] = ()
+    """Tool Calls emitted alongside this assistant message."""
     tool_call_id: str | None = None
+    """Tool Call ID associated with a Tool result message, when applicable."""
 
 
 def message_to_capture(message: Message) -> CapturedMessage:
-    """Convert runtime input into a typed durable capture value."""
+    """Convert runtime input into a typed durable capture value.
+
+    Args:
+        message: Provider-neutral message to convert or persist.
+
+    Returns:
+        convert runtime input into a typed durable capture value.
+    """
     return CapturedMessage(
         role=message.role,
         content=message.content,
@@ -116,7 +146,14 @@ def message_to_capture(message: Message) -> CapturedMessage:
 
 
 def captured_message_to_dict(message: CapturedMessage) -> dict[str, object]:
-    """Serialize a typed capture only at the raw JSON persistence boundary."""
+    """Serialize a typed capture only at the raw JSON persistence boundary.
+
+    Args:
+        message: Provider-neutral message to convert or persist.
+
+    Returns:
+        Serialized a typed capture only at the raw JSON persistence boundary.
+    """
     content: str | list[dict[str, object]] = message.content
     if message.capture_content:
         content = []
@@ -153,7 +190,14 @@ def captured_message_to_dict(message: CapturedMessage) -> dict[str, object]:
 
 
 def message_to_capture_dict(message: Message) -> dict[str, object]:
-    """Compatibility serializer for callers that explicitly cross a JSON boundary."""
+    """Compatibility serializer for callers that explicitly cross a JSON boundary.
+
+    Args:
+        message: Provider-neutral message to convert or persist.
+
+    Returns:
+        JSON-compatible mapping for callers that explicitly cross a serialization boundary.
+    """
     return captured_message_to_dict(message_to_capture(message))
 
 
@@ -199,11 +243,11 @@ class AgentContext:
     rag_chunks: list[RagChunk]
     current_message: Message
     tool_specs: tuple[ToolDefinition, ...] = ()
+    """Resolved Tool schemas exposed to the provider for this request."""
 
 
 class ContextBuilder:
-    """
-    Builder for constructing agent execution context.
+    """Builder for constructing agent execution context.
 
     This class orchestrates the retrieval and assembly of all context
     components needed for agent execution, including conversation history,
@@ -214,15 +258,17 @@ class ContextBuilder:
         rag_adapter: Adapter for retrieving RAG chunks.
         prompt_assembler: Assembler for constructing the system prompt.
         token_budget_manager: Manager for token budget and truncation.
+        tool_registry: Registry used to resolve the Agent's configured Tools.
     """
 
-    def __init__(self, tool_registry: ToolRegistry | None = None, settings: Settings | None = None):
+    def __init__(self, tool_registry: ToolRegistry | None = None, settings: Settings | None = None) -> None:
         """Create adapters that assemble one request's model context.
 
         Args:
             tool_registry: Registry used to expose only configured Tool schemas to the agent.
+            settings: Effective settings used to configure adapters and token limits.
         """
-        current_settings = settings or Settings()
+        current_settings: Settings = settings or Settings()
         self.profile_adapter = ProfileAdapter(current_settings)
         self.rag_adapter = RAGAdapter(current_settings)
         self.prompt_assembler = PromptAssembler()
@@ -252,10 +298,13 @@ class ContextBuilder:
         Returns:
             AgentContext: Complete prompt, replay history, profile/RAG evidence, and Tool schemas.
         """
-        if conversation_history is None:
-            conversation_history = await self._load_conversation_history(conversation_id)
+        effective_conversation_history: list[Message] = (
+            conversation_history
+            if conversation_history is not None
+            else await self._load_conversation_history(conversation_id)
+        )
 
-        user_profile = UserProfile()
+        user_profile: UserProfile = UserProfile()
         if agent_config.memory_policy.profile:
             user_profile = await self.profile_adapter.retrieve(user_id)
 
@@ -267,7 +316,7 @@ class ContextBuilder:
                 user_id=user_id,
             )
 
-        system_prompt = self.prompt_assembler.assemble(
+        system_prompt: str = self.prompt_assembler.assemble(
             base_prompt=agent_config.system_prompt,
             user_profile=user_profile,
             rag_chunks=rag_chunks,
@@ -278,7 +327,7 @@ class ContextBuilder:
         return AgentContext(
             agent_config=agent_config,
             system_prompt=system_prompt,
-            conversation_history=conversation_history,
+            conversation_history=effective_conversation_history,
             user_profile=user_profile,
             rag_chunks=rag_chunks,
             current_message=current_message,

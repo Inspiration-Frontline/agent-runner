@@ -48,7 +48,7 @@ class ToolDefinition:
 
     def __post_init__(self) -> None:
         """Calculate the initial audit digest of this normalized definition."""
-        canonical_definition = {
+        canonical_definition: dict[str, object] = {
             "description": self.description,
             "parameters": self.parameters,
             "source_type": self.source_type.value,
@@ -56,7 +56,7 @@ class ToolDefinition:
             "tool_key": self.tool_key,
             "tool_name": self.tool_name,
         }
-        canonical_json = json.dumps(
+        canonical_json: str = json.dumps(
             canonical_definition,
             ensure_ascii=False,
             separators=(",", ":"),
@@ -71,7 +71,16 @@ class ToolDefinition:
         function_tool: FunctionTool,
         source_type: ToolSourceType = ToolSourceType.INTERNAL,
     ) -> "ToolDefinition":
-        """Add AgentBreaker identity/provenance to an SDK-generated FunctionTool definition."""
+        """Add AgentBreaker identity/provenance to an SDK-generated FunctionTool definition.
+
+        Args:
+            tool_key: Globally stable AgentBreaker Tool identity.
+            function_tool: SDK FunctionTool whose generated schema and callback are preserved.
+            source_type: Domain source type value used by the operation.
+
+        Returns:
+            Added AgentBreaker identity/provenance to an SDK-generated FunctionTool definition.
+        """
         return cls(
             tool_key=tool_key,
             tool_name=function_tool.name,
@@ -115,7 +124,7 @@ class ToolRegistry:
         Args:
             tool: The tool definition to register.
         """
-        existing = self._tools.get(tool.tool_key)
+        existing: ToolDefinition | None = self._tools.get(tool.tool_key)
         if existing and existing.source_type in self._tools_by_source:
             self._tools_by_source[existing.source_type].remove(tool.tool_key)
 
@@ -132,7 +141,7 @@ class ToolRegistry:
             tool_key: Globally unique key of the Tool to unregister.
         """
         if tool_key in self._tools:
-            tool = self._tools[tool_key]
+            tool: ToolDefinition = self._tools[tool_key]
             if tool.source_type in self._tools_by_source:
                 self._tools_by_source[tool.source_type].remove(tool_key)
             del self._tools[tool_key]
@@ -169,7 +178,7 @@ class ToolRegistry:
         Returns:
             list[ToolDefinition]: List of tools of the specified type.
         """
-        tool_keys = self._tools_by_source.get(source_type, [])
+        tool_keys: list[str] = self._tools_by_source.get(source_type, [])
         return [self._tools[key] for key in tool_keys if key in self._tools]
 
     def get_tool_specs(self, tool_keys: list[str]) -> list[dict[str, Any]]:
@@ -182,9 +191,9 @@ class ToolRegistry:
         Returns:
             list[dict[str, Any]]: List of tool specifications in OpenAI format.
         """
-        specs = []
+        specs: list[dict[str, Any]] = []
         for tool_key in tool_keys:
-            tool = self.get(tool_key)
+            tool: ToolDefinition | None = self.get(tool_key)
             if tool:
                 specs.append(
                     {

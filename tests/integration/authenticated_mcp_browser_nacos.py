@@ -143,7 +143,9 @@ async def run() -> None:
             if not isinstance(base, dict) or not isinstance(profile, dict):
                 raise RuntimeError("Nacos backup and profile must be objects")
             content = yaml.safe_dump(merge_profile(base, profile), allow_unicode=True, sort_keys=False)
-        if not await client.publish_config(ConfigParam(data_id=loader.data_id, group=loader.group, content=content, type="yaml")):
+        if not await client.publish_config(
+            ConfigParam(data_id=loader.data_id, group=loader.group, content=content, type="yaml")
+        ):
             raise RuntimeError("Nacos configuration publish failed")
         print(json.dumps({"operation": args.operation, "sha256": hashlib.sha256(content.encode()).hexdigest()}))
     finally:

@@ -17,11 +17,13 @@ from agent_runner.config import Settings
 
 
 async def get_debug_config(request: Request) -> DebugConfigResponse:
-    """
-    Debug endpoint to view current configuration values.
+    """Debug endpoint to view current configuration values.
 
     Returns the merged configuration from Nacos and local files.
     Useful for testing configuration priority and dynamic refresh.
+
+    Args:
+        request: FastAPI request carrying the application service container.
 
     Returns:
         DebugConfigResponse: Current configuration values including:
@@ -50,8 +52,12 @@ async def get_debug_config(request: Request) -> DebugConfigResponse:
 
 
 def create_debug_router() -> APIRouter:
-    """Create development-only routes for one application instance."""
-    router = APIRouter(tags=["debug"])
+    """Create development-only routes for one application instance.
+
+    Returns:
+        Development-only routing table for one application instance.
+    """
+    router: APIRouter = APIRouter(tags=["debug"])
     router.add_api_route(
         "/debug/config",
         get_debug_config,

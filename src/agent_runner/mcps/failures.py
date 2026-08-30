@@ -28,9 +28,13 @@ class McpFailure:
     """One classified MCP failure without exception text, URLs, headers, or Secret values."""
 
     code: McpFailureCode
+    """Stable public failure classification."""
     public_message: str
+    """Client-safe message that excludes exception and credential details."""
     transport_failed: bool
+    """Whether the live transport should be evicted from the pool."""
     definitely_not_delivered: bool
+    """Whether retrying cannot duplicate a remote side effect."""
 
 
 _FAILURES = {
@@ -86,13 +90,27 @@ _FAILURES = {
 
 
 def mcp_failure(code: McpFailureCode) -> McpFailure:
-    """Return the immutable failure metadata for a known stable code."""
+    """Return the immutable failure metadata for a known stable code.
+
+    Args:
+        code: Stable domain failure code to resolve.
+
+    Returns:
+        Immutable failure metadata for the supplied stable code.
+    """
     return _FAILURES[code]
 
 
 def classify_mcp_failure(error: BaseException) -> McpFailure:
-    """Classify nested SDK/HTTP failures without inspecting credential-bearing messages."""
-    errors = tuple(_walk_exceptions(error))
+    """Classify nested SDK/HTTP failures without inspecting credential-bearing messages.
+
+    Args:
+        error: Exception or failure being classified or recorded.
+
+    Returns:
+        Classified nested SDK/HTTP failures without inspecting credential-bearing messages.
+    """
+    errors: tuple[BaseException, ...] = tuple(_walk_exceptions(error))
     if any(isinstance(item, McpSecretUnavailableError) for item in errors):
         return mcp_failure(McpFailureCode.SECRET_MISSING)
     if any(_has_http_status(item, 401) for item in errors):
@@ -109,12 +127,19 @@ def classify_mcp_failure(error: BaseException) -> McpFailure:
 
 
 def _walk_exceptions(error: BaseException) -> list[BaseException]:
-    """Flatten exception groups and causal chains once, tolerating cyclic custom errors."""
-    pending = [error]
+    """Flatten exception groups and causal chains once, tolerating cyclic custom errors.
+
+    Args:
+        error: Exception or failure being classified or recorded.
+
+    Returns:
+        Unique exceptions from groups and causal chains in traversal order.
+    """
+    pending: list[BaseException] = [error]
     visited: set[int] = set()
     flattened: list[BaseException] = []
     while pending:
-        current = pending.pop()
+        current: BaseException = pending.pop()
         if id(current) in visited:
             continue
         visited.add(id(current))
@@ -129,5 +154,13 @@ def _walk_exceptions(error: BaseException) -> list[BaseException]:
 
 
 def _has_http_status(error: BaseException, expected_status: int) -> bool:
-    """Read an HTTP status structurally from httpx without rendering its request URL."""
+    """Read an HTTP status structurally from httpx without rendering its request URL.
+
+    Args:
+        error: Exception or failure being classified or recorded.
+        expected_status: Domain expected status value used by the operation.
+
+    Returns:
+        ``True`` when the exception is an HTTP error with the expected status code.
+    """
     return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == expected_status

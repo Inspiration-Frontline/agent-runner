@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Mapping
+from typing import Any
 
 import httpx
 
@@ -22,10 +23,12 @@ class RAGAdapter:
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Initialize the RAG adapter with service URL and HTTP client.
+
+        Args:
+            settings: Effective application settings for the operation.
         """
-        Initialize the RAG adapter with service URL and HTTP client.
-        """
-        current_settings = settings or Settings()
+        current_settings: Settings = settings or Settings()
         self.base_url = current_settings.knowledge_service_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
@@ -49,7 +52,7 @@ class RAGAdapter:
             list[RagChunk]: Normalized relevant chunks, or an empty list if retrieval fails.
         """
         try:
-            response = await self.client.post(
+            response: httpx.Response = await self.client.post(
                 f"{self.base_url}/api/v1/rag/retrieve",
                 json={
                     "query": query,
@@ -59,10 +62,10 @@ class RAGAdapter:
                 },
             )
             if response.status_code == 200:
-                data = response.json()
+                data: Any = response.json()
                 if not isinstance(data, Mapping):
                     return []
-                chunks = data.get("chunks", [])
+                chunks: Any = data.get("chunks", [])
                 if not isinstance(chunks, list):
                     return []
                 return [

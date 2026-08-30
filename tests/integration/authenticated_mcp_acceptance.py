@@ -242,9 +242,7 @@ async def verify_static_form(
 
         secrets.replace({"FIXTURE_KEY": f"wrong-{form}"}, 2)
         expected_code = (
-            McpFailureCode.AUTHENTICATION_REJECTED
-            if rejection_status == 401
-            else McpFailureCode.AUTHORIZATION_DENIED
+            McpFailureCode.AUTHENTICATION_REJECTED if rejection_status == 401 else McpFailureCode.AUTHORIZATION_DENIED
         )
         try:
             async with runtime.session([MCPServerBinding("fixture", required=True)]):

@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class NacosConfigLoader:
-    """
-    Nacos configuration loader with async support.
+    """Nacos configuration loader with async support.
 
     This class handles loading configuration from Nacos configuration center:
     - Supports YAML format configuration
@@ -35,6 +34,12 @@ class NacosConfigLoader:
         group: Configuration group in Nacos.
         namespace: Nacos namespace for configuration isolation.
         enabled: Whether Nacos configuration is enabled.
+        server_address: Nacos server address used to create the configuration client.
+        username: Optional Nacos account used for authenticated configuration reads.
+        password: Optional Nacos password paired with ``username``.
+        _cached_config: Validated cached configuration.
+        _configuration_revision: Monotonic configuration snapshot revision.
+        _listener_task: Lifecycle-owned asynchronous task for listener.
     """
 
     def __init__(
@@ -46,7 +51,7 @@ class NacosConfigLoader:
         username: str = "nacos",
         password: str = "nacos",
         enabled: bool = True,
-    ):
+    ) -> None:
         """
         Initialize the Nacos configuration loader.
 
@@ -84,7 +89,7 @@ class NacosConfigLoader:
             return
 
         try:
-            client_config = (
+            client_config: Any = (
                 ClientConfigBuilder()
                 .server_address(self.server_address)
                 .namespace_id(self.namespace)
@@ -124,11 +129,11 @@ class NacosConfigLoader:
             return {}
 
         try:
-            config_param = ConfigParam(data_id=self.data_id, group=self.group)
-            content = await self.config_client.get_config(config_param)
+            config_param: Any = ConfigParam(data_id=self.data_id, group=self.group)
+            content: Any = await self.config_client.get_config(config_param)
 
             if content:
-                parsed_config = self._parse_and_replace_config(content)
+                parsed_config: dict[str, Any] = self._parse_and_replace_config(content)
                 logger.debug(f"Loaded configuration from Nacos: {self.data_id}")
                 return parsed_config
 
@@ -150,38 +155,37 @@ class NacosConfigLoader:
         if not self.config_client:
             return
 
-        async def config_listener(namespace_id: str, group: str, data_id: str, content: str) -> None:
-            """
-            Callback function for configuration changes.
-
-            Args:
-                namespace_id: The namespace ID of the configuration.
-                group: The group of the configuration.
-                data_id: The Data ID of the configuration.
-                content: The new configuration content.
-            """
-            logger.info(f"Configuration changed in Nacos: data_id={data_id}, group={group}")
-            try:
-                # An empty callback means the Data ID was cleared or removed. Publishing an empty
-                # snapshot revokes cached Secrets instead of retaining credentials that no longer
-                # exist in the configuration center.
-                self._parse_and_replace_config(content)
-                logger.info("Configuration cache updated from Nacos")
-            except Exception as error:
-                logger.warning(
-                    "Failed to parse updated Nacos configuration",
-                    extra={"error_type": type(error).__name__},
-                )
-
         try:
             await self.config_client.add_listener(
                 data_id=self.data_id,
                 group=self.group,
-                listener=config_listener,
+                listener=self._handle_config_change,
             )
             logger.info(f"Started configuration listener for {self.data_id}")
         except Exception as e:
             logger.warning(f"Failed to add configuration listener: {e}")
+
+    async def _handle_config_change(self, namespace_id: str, group: str, data_id: str, content: str) -> None:
+        """Apply one Nacos change callback after parsing and validating the complete document.
+
+        Args:
+            namespace_id: Nacos namespace that emitted the callback.
+            group: Nacos configuration group that emitted the callback.
+            data_id: Nacos Data ID that changed.
+            content: Replacement YAML document, possibly empty when the Data ID is removed.
+        """
+        logger.info(f"Configuration changed in Nacos: data_id={data_id}, group={group}")
+        try:
+            # An empty callback means the Data ID was cleared or removed. Publishing an empty
+            # snapshot revokes cached Secrets instead of retaining credentials that no longer
+            # exist in the configuration center.
+            self._parse_and_replace_config(content)
+            logger.info("Configuration cache updated from Nacos")
+        except Exception as error:
+            logger.warning(
+                "Failed to parse updated Nacos configuration",
+                extra={"error_type": type(error).__name__},
+            )
 
     async def get_config(self) -> dict[str, Any]:
         """
@@ -200,30 +204,56 @@ class NacosConfigLoader:
 
     @property
     def cached_config(self) -> dict[str, Any]:
-        """Return the latest parsed Nacos document used for synchronous settings reads."""
+        """Return the latest parsed Nacos document used for synchronous settings reads.
+
+        Returns:
+            The latest parsed Nacos document used for synchronous settings reads.
+        """
         return self._cached_config
 
     @property
     def configuration_revision(self) -> int:
-        """Return the monotonic revision assigned to the latest valid Nacos snapshot."""
+        """Return the monotonic revision assigned to the latest valid Nacos snapshot.
+
+        Returns:
+            The monotonic revision assigned to the latest valid Nacos snapshot.
+        """
         return self._configuration_revision
 
     @staticmethod
     def _parse_config(content: str) -> dict[str, Any]:
-        """Parse one YAML document and reject non-object roots before publishing it."""
-        parsed_config = yaml.safe_load(content) or {}
+        """Parse one YAML document and reject non-object roots before publishing it.
+
+        Args:
+            content: Text or serialized content processed by the operation.
+
+        Returns:
+            Parsed one YAML document and reject non-object roots before publishing it.
+        """
+        parsed_config: Any | dict[Any, Any] = yaml.safe_load(content) or {}
         if not isinstance(parsed_config, dict):
             raise ValueError("Nacos configuration root must be a YAML object")
         return parsed_config
 
     def _replace_cached_config(self, parsed_config: dict[str, Any]) -> None:
-        """Atomically publish one valid snapshot and increment its monotonic revision."""
+        """Atomically publish one valid snapshot and increment its monotonic revision.
+
+        Args:
+            parsed_config: Validated configuration snapshot ready for atomic publication.
+        """
         self._cached_config = parsed_config
         self._configuration_revision += 1
 
     def _parse_and_replace_config(self, content: str) -> dict[str, Any]:
-        """Parse a complete Nacos document before atomically publishing its new revision."""
-        parsed_config = self._parse_config(content)
+        """Parse a complete Nacos document before atomically publishing its new revision.
+
+        Args:
+            content: Text or serialized content processed by the operation.
+
+        Returns:
+            Parsed a complete Nacos document before atomically publishing its new revision.
+        """
+        parsed_config: dict[str, Any] = self._parse_config(content)
         self._replace_cached_config(parsed_config)
         return parsed_config
 

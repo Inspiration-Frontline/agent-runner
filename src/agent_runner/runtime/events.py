@@ -132,7 +132,7 @@ class RuntimeEventBus:
         handlers: list[RuntimeEventHandler] = self._handlers.get(event.event_type, [])
         for handler in handlers:
             try:
-                result = handler(event)
+                result: None | Awaitable[None] = handler(event)
                 if inspect.isawaitable(result):
                     await result
             except Exception:

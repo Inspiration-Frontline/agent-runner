@@ -22,8 +22,7 @@ logger = logging.getLogger(__name__)
 # And load agents from agent-configuration-center.
 # But before implementing the load_agent() rpc method, we need to have a clear definition of agent.
 class AgentConfigLoader:
-    """
-    Agent configuration loader with Redis caching support.
+    """Agent configuration loader with Redis caching support.
 
     This class handles loading agent configurations from multiple sources:
     1. Redis cache (first priority for performance)
@@ -40,16 +39,20 @@ class AgentConfigLoader:
         redis_client: Redis client for caching agent configurations.
         local_config_path: Path to local agent configuration JSON file.
         cache_ttl_seconds: TTL for cached configurations in Redis.
+        local_agent_config_enabled: Whether filesystem Agent definitions may be used as a fallback.
+        max_output_tokens: Maximum allowed output tokens.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
-        """
-        Initialize the agent configuration loader.
+        """Initialize the agent configuration loader.
 
         Sets up HTTP client for remote calls, Redis client for caching,
         and resolves the local configuration file path.
+
+        Args:
+            settings: Effective application settings for the operation.
         """
-        current_settings = settings or Settings()
+        current_settings: Settings = settings or Settings()
         self.base_url = current_settings.agent_config_center_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
@@ -93,17 +96,17 @@ class AgentConfigLoader:
             ValueError: If the agent configuration cannot be found or loaded.
             httpx.HTTPError: If remote API call fails.
         """
-        cache_key = f"agent_config:{agent_id}:{version or 'latest'}"
+        cache_key: str = f"agent_config:{agent_id}:{version or 'latest'}"
 
         # Try to load from Redis cache first
-        cached_config = await self._get_from_cache(cache_key)
+        cached_config: AgentConfig | None = await self._get_from_cache(cache_key)
         if cached_config:
             logger.debug(f"Loaded agent config from cache: {cache_key}")
             return cached_config
 
         # Try local configuration if enabled
         if self.local_agent_config_enabled:
-            local_config = self._load_local_config(agent_id, version)
+            local_config: AgentConfig | None = self._load_local_config(agent_id, version)
             if local_config:
                 await self._set_cache(cache_key, local_config)
                 logger.debug(f"Loaded agent config from local file: {cache_key}")
@@ -111,14 +114,14 @@ class AgentConfigLoader:
 
         # Fetch from remote configuration center
         try:
-            url = f"{self.base_url}/api/v1/agents/{agent_id}"
+            url: str = f"{self.base_url}/api/v1/agents/{agent_id}"
             if version:
                 url += f"?version={version}"
 
-            response = await self.client.get(url)
+            response: httpx.Response = await self.client.get(url)
             if response.status_code == 200:
-                data = response.json()
-                config = self._parse_config(data)
+                data: Any = response.json()
+                config: AgentConfig = self._parse_config(data)
                 await self._set_cache(cache_key, config)
                 logger.debug(f"Loaded agent config from remote service: {cache_key}")
                 return config
@@ -143,9 +146,9 @@ class AgentConfigLoader:
             if self.redis_client is None:
                 return None
 
-            cached_data = await self.redis_client.get(cache_key)
+            cached_data: bytes | str | None = await self.redis_client.get(cache_key)
             if cached_data:
-                data = json.loads(cached_data)
+                data: Any = json.loads(cached_data)
                 return self._parse_config(data)
         except Exception as e:
             logger.warning(f"Failed to get config from Redis cache: {e}")
@@ -163,7 +166,7 @@ class AgentConfigLoader:
             if self.redis_client is None:
                 return
 
-            config_data = {
+            config_data: dict[str, object] = {
                 "agent_id": config.agent_id,
                 "version": config.version,
                 "name": config.name,
@@ -197,13 +200,13 @@ class AgentConfigLoader:
             return None
 
         with self.local_config_path.open("r", encoding="utf-8-sig") as config_file:
-            data = json.load(config_file)
+            data: Any = json.load(config_file)
 
-        agents = data.get("agents", [])
+        agents: Any = data.get("agents", [])
         if isinstance(agents, dict):
             agents = list(agents.values())
 
-        matching_agents = [
+        matching_agents: list[Any] = [
             agent
             for agent in agents
             if agent.get("agent_id") == agent_id and (version is None or agent.get("version") == version)
@@ -223,8 +226,8 @@ class AgentConfigLoader:
         Returns:
             AgentConfig: The parsed agent configuration object.
         """
-        memory_policy_data = data.get("memory_policy", {})
-        memory_policy = MemoryPolicy(
+        memory_policy_data: Any = data.get("memory_policy", {})
+        memory_policy: MemoryPolicy = MemoryPolicy(
             profile=memory_policy_data.get("profile", True),
             rag=memory_policy_data.get("rag", True),
         )
@@ -259,8 +262,8 @@ class AgentConfigLoader:
 
             if agent_id:
                 # Find and delete all cache keys for this agent
-                pattern = f"agent_config:{agent_id}:*"
-                keys = await self.redis_client.keys(pattern)
+                pattern: str = f"agent_config:{agent_id}:*"
+                keys: list[bytes | str] = await self.redis_client.keys(pattern)
                 if keys:
                     await self.redis_client.delete(*keys)
                     logger.info(f"Invalidated cache for agent {agent_id}: {len(keys)} keys")

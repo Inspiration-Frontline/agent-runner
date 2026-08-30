@@ -172,11 +172,13 @@ async def test_durable_server_records_cancelled_dispatch_before_propagating_canc
         tracker=DispatchTurnTracker(),
         traced_operations=McpTracedOperations(Tracer()),
     )
-    task = asyncio.create_task(server.call_tool(
-        "write",
-        {"password": "sensitive", "value": 1},
-        {"agentbreaker/tool_call_id": "call-7", "agentbreaker/turn_number": 2},
-    ))
+    task = asyncio.create_task(
+        server.call_tool(
+            "write",
+            {"password": "sensitive", "value": 1},
+            {"agentbreaker/tool_call_id": "call-7", "agentbreaker/turn_number": 2},
+        )
+    )
     await remote_started.wait()
     task.cancel()
 
@@ -338,9 +340,7 @@ async def test_durable_server_captures_mcp_execution_without_sdk_lifecycle_hook(
 
     assert isinstance(result, SimpleNamespace)
     assert result.isError is False
-    assert collector.executions == [
-        ("call-7", definition, '{"query":"Python"}', "COMPLETED", result, "")
-    ]
+    assert collector.executions == [("call-7", definition, '{"query":"Python"}', "COMPLETED", result, "")]
 
 
 class FakeProgressClient:

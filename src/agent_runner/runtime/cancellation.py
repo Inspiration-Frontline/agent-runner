@@ -119,9 +119,9 @@ class CancellationManager:
         """
         import uuid
 
-        token_id = token_id or str(uuid.uuid4())
-        token = CancellationToken()
-        self._tokens[token_id] = token
+        effective_token_id: str = token_id or str(uuid.uuid4())
+        token: CancellationToken = CancellationToken()
+        self._tokens[effective_token_id] = token
         return token
 
     def get_token(self, token_id: str) -> CancellationToken | None:
@@ -141,7 +141,7 @@ class CancellationManager:
         Args:
             token_id: Previously assigned token ID.
         """
-        token = self._tokens.get(token_id)
+        token: CancellationToken | None = self._tokens.get(token_id)
         if token:
             token.cancel()
 
@@ -172,6 +172,9 @@ class ConversationCancellationRegistry:
     user ID is part of the key so a caller cannot cancel another user's Conversation by guessing
     its identifier, and identity-checked unregistering prevents an old request from deleting a
     newer request's token after a retry.
+
+    Attributes:
+        _tokens: Collection of tokens consumed in deterministic order.
     """
 
     def __init__(self) -> None:
@@ -221,7 +224,7 @@ class ConversationCancellationRegistry:
             ``True`` when a token was found and signalled, otherwise ``False`` when no generation
             is currently registered.
         """
-        token = self._tokens.get((user_id, conversation_id))
+        token: CancellationToken | None = self._tokens.get((user_id, conversation_id))
         if token is None:
             return False
         token.cancel()
@@ -245,6 +248,6 @@ class ConversationCancellationRegistry:
         Returns:
             ``None``.
         """
-        key = (user_id, conversation_id)
+        key: tuple[int, str] = (user_id, conversation_id)
         if self._tokens.get(key) is token:
             del self._tokens[key]

@@ -17,9 +17,7 @@ def test_openai_adapter_methods_do_not_exceed_fifty_lines() -> None:
     path = Path(__file__).parents[1] / "src" / "agent_runner" / "runtime" / "openai_agents_sdk_adapter.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     adapter = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "OpenAIAgentsSdkAdapter"
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "OpenAIAgentsSdkAdapter"
     )
     violations = {
         node.name: node.end_lineno - node.lineno + 1

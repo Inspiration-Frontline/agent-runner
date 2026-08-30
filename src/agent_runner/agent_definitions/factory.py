@@ -9,8 +9,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: Why do we need the separate AgentConfig & AgentDefinition?
 class AgentFactory:
-    """
-    Factory for creating and managing agent instances.
+    """Factory for creating and managing agent instances.
 
     This factory handles the creation of AgentDefinition objects from
     AgentConfig instances, maintains an in-memory registry of created agents,
@@ -18,11 +17,14 @@ class AgentFactory:
 
     Attributes:
         _agent_registry: In-memory registry mapping agent_id to AgentDefinition instances.
+        _mcp_catalog: Validated MCP Catalog used to resolve Agent bindings.
     """
 
     def __init__(self, mcp_catalog: McpServerCatalog | None = None) -> None:
-        """
-        Initialize the agent factory with an empty registry.
+        """Initialize the agent factory with an empty registry.
+
+        Args:
+            mcp_catalog: Validated MCP Catalog used to resolve Agent bindings.
         """
         # Key: public Agent ID. Value: latest validated runtime definition for that Agent.
         self._agent_registry: dict[int, AgentDefinition] = {}
@@ -41,7 +43,7 @@ class AgentFactory:
         Note:
             The created agent is automatically registered in the internal registry.
         """
-        agent = AgentDefinition(
+        agent: AgentDefinition = AgentDefinition(
             agent_id=config.agent_id,
             version=config.version,
             name=config.name,
@@ -61,7 +63,7 @@ class AgentFactory:
             temperature=config.temperature,
         )
 
-        unknown_servers = [
+        unknown_servers: list[str] = [
             binding.server_id for binding in agent.mcp_servers if not self._mcp_catalog.contains(binding.server_id)
         ]
         if unknown_servers:
@@ -91,7 +93,7 @@ class AgentFactory:
         Returns:
             AgentDefinition: The created agent instance with overrides applied.
         """
-        agent = await self.create(config)
+        agent: AgentDefinition = await self.create(config)
 
         if model:
             agent.model = model

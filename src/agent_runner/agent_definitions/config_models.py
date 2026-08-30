@@ -16,7 +16,9 @@ class MemoryPolicy:
     """
 
     profile: bool = True
+    """Whether profile context is enabled for this definition."""
     rag: bool = True
+    """Whether retrieval-augmented context is enabled for this definition."""
 
     # TODO: I don't think it is correct, I think we should:
     # 1. Load memory policy from the configuration center, it is part of the agent definition. So, I don't think we need this class, we should add "profile_keywords" & "rag_knowledge_base_ids" to the AgentDefinition class.
@@ -24,7 +26,9 @@ class MemoryPolicy:
     # Because different agents may take responsibilities for different applications/businesses, they may need different memory of user profiles. Thus it should be a list[str].
     # Because an agent can access more than 1 knowledge bases, thus it should be a list[int].
     profile_keywords: list[str] = field(default_factory=list)
+    """Profile attribute keywords selected by the Agent definition."""
     rag_knowledge_base_ids: list[int] = field(default_factory=list)
+    """Knowledge-base identifiers selected for retrieval."""
 
 
 @dataclass(frozen=True)
@@ -32,7 +36,9 @@ class MCPServerBinding:
     """One typed Agent-to-Catalog binding."""
 
     server_id: str
+    """Stable MCP Server catalog identifier."""
     required: bool = True
+    """Whether failure to connect prevents the Agent request from running."""
 
 
 @dataclass
@@ -59,15 +65,26 @@ class AgentDefinition:
     """
 
     agent_id: int
+    """Stable identifier of the configured Agent."""
     version: int
+    """Version of the Agent definition."""
     name: str
+    """Human-readable Agent name used in tracing and handoff."""
     description: str
+    """Human-readable summary of the Agent's responsibility."""
     model: str
+    """Provider model identifier used for execution."""
     system_prompt: str
+    """Base system instruction supplied to the model."""
     tools: list[str] = field(default_factory=list)
+    """Globally unique built-in Tool keys enabled for the Agent."""
     mcp_servers: list[MCPServerBinding] = field(default_factory=list)
+    """MCP Server bindings enabled for the Agent."""
     memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
+    """External profile and retrieval context policy."""
     max_output_tokens: int = 4096
+    """Maximum output tokens requested from the provider."""
     temperature: float = 0.7
+    """Provider sampling temperature."""
     # Key: extension metadata name. Value: JSON-compatible Agent configuration metadata.
     metadata: dict[str, Any] = field(default_factory=dict)

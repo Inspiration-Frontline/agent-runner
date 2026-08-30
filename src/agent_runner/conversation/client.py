@@ -30,16 +30,26 @@ from agent_runner.observability.tracing import inject_trace_context
 
 
 class ConversationManagerClient:
+    """Thin typed RPC boundary for Conversation Manager persistence and replay.
+
+    Attributes:
+        _runtime: Fancy gRPC client runtime owned and closed by this request-scoped client.
+        _service: Generated Conversation RPC client bound to the configured service endpoint.
+    """
+
     def __init__(self, settings: Settings | None = None) -> None:
         """Create the request-scoped RPC client used for durable conversation state.
 
         Runner keeps this client thin because Conversation Manager owns authorization, Round
         numbering, file reservation, and PostgreSQL persistence; the client only translates the
         request-scoped calls and applies bounded retry/timeout settings.
+
+        Args:
+            settings: Effective application settings for the operation.
         """
-        settings = settings or Settings()
-        config = GrpcRuntimeConfig(
-            urls={"conversation-manager": [settings.conversation_rpc_url]},
+        current_settings: Settings = settings or Settings()
+        config: Any = GrpcRuntimeConfig(
+            urls={"conversation-manager": [current_settings.conversation_rpc_url]},
             timeout=5.0,
             retries=1,
             retry_backoff=0.15,
@@ -49,6 +59,11 @@ class ConversationManagerClient:
 
     @staticmethod
     def _get_trace_metadata() -> list[tuple[str, str]]:
+        """Build outbound RPC metadata from the currently active W3C trace context.
+
+        Returns:
+            build outbound RPC metadata from the currently active W3C trace context.
+        """
         headers: dict[str, str] = {}
         inject_trace_context(headers)
         return list(headers.items())
@@ -63,7 +78,7 @@ class ConversationManagerClient:
         Returns:
             Typed history response containing the latest persisted Round number.
         """
-        response = await self._service.get_conversation_round_history(
+        response: Any = await self._service.get_conversation_round_history(
             GetConversationRoundHistoryRequest(user_id=user_id, conversation_id=conversation_id),
             metadata=self._get_trace_metadata(),
         )
@@ -78,7 +93,7 @@ class ConversationManagerClient:
         Returns:
             Domain response envelope; validation conflicts are data, while transport failures raise.
         """
-        response = await self._service.save_conversation_round(
+        response: Any = await self._service.save_conversation_round(
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
         return cast(SaveConversationRoundResponse, response)
@@ -86,7 +101,15 @@ class ConversationManagerClient:
     async def create_round_checkpoint(
         self, request: CreateConversationRoundCheckpointRequest
     ) -> CreateConversationRoundCheckpointResponse:
-        response = await self._service.create_conversation_round_checkpoint(
+        """Create the durable in-progress Round checkpoint before streaming begins.
+
+        Args:
+            request: Checkpoint identity, request snapshot, Agent identity, and MCP bindings.
+
+        Returns:
+            Typed checkpoint response containing the committed revision or a business error.
+        """
+        response: Any = await self._service.create_conversation_round_checkpoint(
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
         return cast(CreateConversationRoundCheckpointResponse, response)
@@ -94,13 +117,29 @@ class ConversationManagerClient:
     async def append_round_progress(
         self, request: AppendConversationRoundProgressRequest
     ) -> AppendConversationRoundProgressResponse:
-        response = await self._service.append_conversation_round_progress(
+        """Append one immutable Turn/progress mutation to an existing checkpoint.
+
+        Args:
+            request: Turn evidence and optimistic-lock revision for the Round.
+
+        Returns:
+            Typed progress response containing the committed revision or a business error.
+        """
+        response: Any = await self._service.append_conversation_round_progress(
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
         return cast(AppendConversationRoundProgressResponse, response)
 
     async def finalize_round(self, request: FinalizeConversationRoundRequest) -> FinalizeConversationRoundResponse:
-        response = await self._service.finalize_conversation_round(
+        """Finalize one checkpoint with its terminal Round status and final answer.
+
+        Args:
+            request: Terminal status, answer/error projection, and expected revision.
+
+        Returns:
+            Typed finalization response containing the committed revision or a business error.
+        """
+        response: Any = await self._service.finalize_conversation_round(
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
         return cast(FinalizeConversationRoundResponse, response)
@@ -126,7 +165,7 @@ class ConversationManagerClient:
         Returns:
             Per-file state and aggregate readiness/failure flags.
         """
-        response = await self._service.prepare_conversation_files(
+        response: Any = await self._service.prepare_conversation_files(
             PrepareConversationFilesRequest(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -151,7 +190,7 @@ class ConversationManagerClient:
         Returns:
             Typed model-context response used to reconstruct provider-neutral history.
         """
-        response = await self._service.get_conversation_replay(
+        response: Any = await self._service.get_conversation_replay(
             GetConversationReplayRequest(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -168,8 +207,17 @@ class ConversationManagerClient:
         destination_conversation_id: str,
         references: list[ConversationReference],
     ) -> PrepareConversationReferencesResponse:
-        """Authorize and resolve frozen same-Group Conversation evidence in one RPC."""
-        response = await self._service.prepare_conversation_references(
+        """Authorize and resolve frozen same-Group Conversation evidence in one RPC.
+
+        Args:
+            user_id: Trusted authenticated user identifier.
+            destination_conversation_id: Stable identifier of the destination conversation.
+            references: Collection of references consumed in deterministic order.
+
+        Returns:
+            The authorized and resolved frozen same-Group Conversation evidence.
+        """
+        response: Any = await self._service.prepare_conversation_references(
             PrepareConversationReferencesRequest(
                 user_id=user_id,
                 destination_conversation_id=destination_conversation_id,

@@ -32,9 +32,7 @@ def test_active_span_uses_lowercase_w3c_trace_id() -> None:
 def test_extracts_w3c_parent_context() -> None:
     expected_trace_id = "0123456789abcdef0123456789abcdef"
     expected_parent_id = "0123456789abcdef"
-    parent_context = tracing.extract_trace_context(
-        {"traceparent": f"00-{expected_trace_id}-{expected_parent_id}-01"}
-    )
+    parent_context = tracing.extract_trace_context({"traceparent": f"00-{expected_trace_id}-{expected_parent_id}-01"})
 
     with tracing.Tracer().span("test.child", parent_context=parent_context) as span:
         assert span.trace_id == expected_trace_id

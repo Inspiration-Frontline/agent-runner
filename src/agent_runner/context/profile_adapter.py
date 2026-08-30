@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Mapping
+from typing import Any
 
 import httpx
 
@@ -22,10 +23,12 @@ class ProfileAdapter:
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Initialize the profile adapter with service URL and HTTP client.
+
+        Args:
+            settings: Effective application settings for the operation.
         """
-        Initialize the profile adapter with service URL and HTTP client.
-        """
-        current_settings = settings or Settings()
+        current_settings: Settings = settings or Settings()
         self.base_url = current_settings.user_profiler_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
@@ -40,9 +43,9 @@ class ProfileAdapter:
             UserProfile: Normalized profile data, or an empty profile if retrieval fails.
         """
         try:
-            response = await self.client.get(f"{self.base_url}/api/v1/profile/{user_id}")
+            response: httpx.Response = await self.client.get(f"{self.base_url}/api/v1/profile/{user_id}")
             if response.status_code == 200:
-                payload = response.json()
+                payload: Any = response.json()
                 if isinstance(payload, Mapping):
                     return UserProfile.from_mapping(payload)
                 logger.warning("Profile service returned a non-object payload for user %s", user_id)
@@ -65,7 +68,7 @@ class ProfileAdapter:
             bool: True if update succeeded, False otherwise.
         """
         try:
-            response = await self.client.patch(
+            response: httpx.Response = await self.client.patch(
                 f"{self.base_url}/api/v1/profile/{user_id}",
                 json={attribute.name: attribute.value for attribute in profile_data.attributes},
             )

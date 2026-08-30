@@ -39,13 +39,15 @@ def run_case(
     agent_id: int,
 ) -> dict[str, Any]:
     env = os.environ.copy()
-    env.update({
-        "SERVER_PORT": runner_url.rsplit(":", maxsplit=1)[1],
-        "DEFAULT_AGENT_ID": str(agent_id),
-        "LOCAL_AGENT_CONFIG_PATH": str(project_root / "tests" / "integration" / "mcp_validation_agents.json"),
-        "NACOS_ENABLED": "false",
-        "OPEN_BROWSER_ON_STARTUP": "false",
-    })
+    env.update(
+        {
+            "SERVER_PORT": runner_url.rsplit(":", maxsplit=1)[1],
+            "DEFAULT_AGENT_ID": str(agent_id),
+            "LOCAL_AGENT_CONFIG_PATH": str(project_root / "tests" / "integration" / "mcp_validation_agents.json"),
+            "NACOS_ENABLED": "false",
+            "OPEN_BROWSER_ON_STARTUP": "false",
+        }
+    )
     stdout_path = output_dir / f"mcp-validation-runner-{agent_id}.out.log"
     stderr_path = output_dir / f"mcp-validation-runner-{agent_id}.err.log"
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
@@ -81,11 +83,7 @@ def run_case(
                     sse = "\n".join(response.iter_lines())
             sse_path = output_dir / f"mcp-validation-agent-{agent_id}.sse"
             sse_path.write_text(sse, encoding="utf-8")
-            events = [
-                json.loads(line.removeprefix("data: "))
-                for line in sse.splitlines()
-                if line.startswith("data: ")
-            ]
+            events = [json.loads(line.removeprefix("data: ")) for line in sse.splitlines() if line.startswith("data: ")]
             time.sleep(4)
             return {
                 "agent_id": agent_id,
@@ -124,8 +122,7 @@ def main() -> None:
     output_dir = (project_root / args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     results = [
-        run_case(project_root, args.gateway_url, args.runner_url, output_dir, agent_id)
-        for agent_id in args.agent_ids
+        run_case(project_root, args.gateway_url, args.runner_url, output_dir, agent_id) for agent_id in args.agent_ids
     ]
     manifest = output_dir / "mcp-live-acceptance.json"
     manifest.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")

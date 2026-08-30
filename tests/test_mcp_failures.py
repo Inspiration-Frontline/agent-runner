@@ -152,9 +152,7 @@ class RejectingPool:
 
 
 def rejecting_runtime(secret: str, status_code: int) -> SdkMcpRuntime:
-    catalog = McpServerCatalog.from_json(
-        '{"mcpServers":{"fixture":{"url":"https://example.test/mcp"}}}'
-    )
+    catalog = McpServerCatalog.from_json('{"mcpServers":{"fixture":{"url":"https://example.test/mcp"}}}')
     wrapped = UserError("SDK failed")
     wrapped.__cause__ = ExceptionGroup("connect", [status_error(status_code, secret)])
     return SdkMcpRuntime(

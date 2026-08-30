@@ -10,6 +10,7 @@ class TruncatableMessage(Protocol):
     """Minimal typed message contract required by truncation strategies."""
 
     content: str
+    """Message text considered when estimating and reducing context size."""
 
 
 MessageValue = TypeVar("MessageValue", bound=TruncatableMessage)
@@ -75,7 +76,7 @@ class TokenBudgetManager:
         max_tokens: Default maximum tokens for budgets.
     """
 
-    def __init__(self, max_tokens: int = 128000):
+    def __init__(self, max_tokens: int = 128000) -> None:
         """
         Initialize the token budget manager.
 
@@ -132,9 +133,7 @@ class TokenBudgetManager:
         else:
             return self._sliding_window_truncation(messages, budget)
 
-    def _sliding_window_truncation(
-        self, messages: Sequence[MessageValue], budget: TokenBudget
-    ) -> list[MessageValue]:
+    def _sliding_window_truncation(self, messages: Sequence[MessageValue], budget: TokenBudget) -> list[MessageValue]:
         """
         Truncate messages using a sliding window approach.
 
@@ -149,10 +148,10 @@ class TokenBudgetManager:
             Messages retained by the sliding window.
         """
         truncated: list[MessageValue] = []
-        total_tokens = 0
+        total_tokens: int = 0
 
         for message in reversed(messages):
-            message_tokens = self.estimate_tokens(message.content)
+            message_tokens: int = self.estimate_tokens(message.content)
             if total_tokens + message_tokens <= budget.remaining_tokens:
                 truncated.insert(0, message)
                 total_tokens += message_tokens
@@ -161,9 +160,7 @@ class TokenBudgetManager:
 
         return truncated
 
-    def _importance_truncation(
-        self, messages: Sequence[MessageValue], budget: TokenBudget
-    ) -> list[MessageValue]:
+    def _importance_truncation(self, messages: Sequence[MessageValue], budget: TokenBudget) -> list[MessageValue]:
         """
         Truncate messages based on importance scoring.
 

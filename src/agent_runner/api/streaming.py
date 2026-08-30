@@ -51,20 +51,33 @@ class StreamEvent(BaseModel):
     """
 
     type: StreamEventType
+    """Semantic event kind used by the browser SSE consumer."""
     content: str | None = None
+    """Visible text fragment for a token-delta event."""
     tool: str | None = None
+    """Display name or key of the Tool involved in the event."""
     tool_call_id: str | None = None
+    """Provider-generated Tool Call ID correlating start and result events."""
     # Key: Tool argument name. Value: model-generated JSON-compatible argument value.
     tool_args: dict[str, Any] | None = None
     tool_result: Any = None
+    """JSON-compatible result returned by a Tool execution."""
     tool_status: str | None = None
+    """Execution status associated with a Tool result event."""
     prompt_tokens: int | None = None
+    """Prompt token count reported by the provider, when available."""
     completion_tokens: int | None = None
+    """Completion token count reported by the provider, when available."""
     total_tokens: int | None = None
+    """Total token count reported by the provider, when available."""
     error_message: str | None = None
+    """Client-safe error text for an error event."""
     error_code: str | None = None
+    """Stable client-visible error classification."""
     phase: str | None = None
+    """Stable runtime stage associated with an error or attachment event."""
     pending_files: int | None = None
+    """Number of selected files that remain unready during preparation."""
 
 
 class TokenDeltaEvent(StreamEvent):
@@ -93,12 +106,12 @@ class ToolStartEvent(StreamEvent):
     """
 
     def __init__(self, tool: str, tool_call_id: str, tool_args: dict[str, Any] | None = None) -> None:
-        """
-        Initialize a tool start event.
+        """Initialize a tool start event.
 
         Args:
             tool: The identifier of the tool being executed.
             tool_args: Optional arguments passed to the tool.
+            tool_call_id: Provider-generated Tool call identifier.
         """
         super().__init__(
             type=StreamEventType.TOOL_START,
@@ -118,12 +131,13 @@ class ToolResultEvent(StreamEvent):
     """
 
     def __init__(self, tool: str, tool_call_id: str, tool_result: Any, tool_status: str) -> None:
-        """
-        Initialize a tool result event.
+        """Initialize a tool result event.
 
         Args:
             tool: The identifier of the tool that was executed.
             tool_result: The result returned by the tool execution.
+            tool_call_id: Provider-generated Tool call identifier.
+            tool_status: Domain tool status value used by the operation.
         """
         super().__init__(
             type=StreamEventType.TOOL_RESULT,
@@ -143,11 +157,12 @@ class ErrorEvent(StreamEvent):
     """
 
     def __init__(self, error_message: str, error_code: str | None = None, phase: str | None = None) -> None:
-        """
-        Initialize an error event.
+        """Initialize an error event.
 
         Args:
             error_message: Description of the error that occurred.
+            error_code: Stable client-visible failure classification.
+            phase: Stable runtime stage in which the public error occurred.
         """
         super().__init__(
             type=StreamEventType.ERROR,
@@ -167,7 +182,11 @@ class AttachmentProcessingEvent(StreamEvent):
     """Transient status emitted while confirmed files are still being prepared."""
 
     def __init__(self, pending_files: int) -> None:
-        """Create a transient event reporting how many selected files remain unready."""
+        """Create a transient event reporting how many selected files remain unready.
+
+        Args:
+            pending_files: Number of selected files that are still being prepared.
+        """
         super().__init__(
             type=StreamEventType.ATTACHMENT_PROCESSING,
             phase="attachment_preparation",
