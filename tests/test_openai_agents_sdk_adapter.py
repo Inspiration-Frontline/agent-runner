@@ -134,9 +134,9 @@ def test_sdk_message_role_rejects_unsupported_role() -> None:
 
 @pytest.mark.parametrize(
     ("detail", "expected"),
-    [("low", "low"), ("high", "high"), ("auto", "auto"), ("original", "original"), ("", "auto")],
+    [("low", "high"), ("high", "high"), ("auto", "high"), ("original", "high"), ("", "high")],
 )
-def test_orchestrator_normalizes_image_detail(detail: str, expected: str) -> None:
+def test_orchestrator_applies_fixed_high_image_detail(detail: str, expected: str) -> None:
     assert RuntimeOrchestrator._get_image_detail(detail) == expected
 
 

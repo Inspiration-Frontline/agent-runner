@@ -43,7 +43,8 @@ def test_attachment_input_separates_signed_sdk_urls_from_stable_capture() -> Non
             mime_type="image/png",
             kind=ConversationFileKind.IMAGE,
             status=ConversationFileStatus.READY,
-            download_url="https://signed.example/image",
+            download_url="https://signed.example/original-image",
+            model_input_url="https://signed.example/model-input-image",
         ),
         PreparedConversationFile(
             file_id="file_document",
@@ -60,9 +61,11 @@ def test_attachment_input_separates_signed_sdk_urls_from_stable_capture() -> Non
     assert attachment_input.additional_instruction == ""
     assert "Exact extracted evidence." in attachment_input.current_message
     assert isinstance(attachment_input.model_content[1], ModelImagePart)
-    assert attachment_input.model_content[1].url == "https://signed.example/image"
+    assert attachment_input.model_content[1].url == "https://signed.example/model-input-image"
+    assert attachment_input.model_content[1].detail == "high"
     assert isinstance(attachment_input.capture_content[1], CaptureFilePart)
     assert attachment_input.capture_content[1].file_id == "file_image"
+    assert attachment_input.capture_content[1].detail == "high"
     assert "signed.example" not in str(attachment_input.capture_content)
 
     user_request = orchestrator._build_user_request(request)
@@ -70,6 +73,26 @@ def test_attachment_input_separates_signed_sdk_urls_from_stable_capture() -> Non
         "agentbreaker-file://file_image",
         "agentbreaker-file://file_document",
     ]
+    assert [part.file_url.detail for part in user_request.content_parts if part.file_url] == ["high", "high"]
+
+
+def test_attachment_input_rejects_image_without_sanitized_model_input() -> None:
+    orchestrator = object.__new__(RuntimeOrchestrator)
+    request = ConversationRequest(
+        conversation_id="conv_attachments",
+        file_ids=["file_image"],
+    )
+    prepared_file = PreparedConversationFile(
+        file_id="file_image",
+        original_filename="diagram.png",
+        mime_type="image/png",
+        kind=ConversationFileKind.IMAGE,
+        status=ConversationFileStatus.READY,
+        download_url="https://signed.example/original-image",
+    )
+
+    with pytest.raises(RuntimeError, match="sanitized image input is not available"):
+        orchestrator._build_attachment_input(request, [prepared_file])
 
 
 def test_attachment_only_instruction_uses_the_ui_locale_without_visible_fake_text() -> None:
@@ -119,3 +142,15 @@ def test_plain_text_attachment_input_uses_empty_typed_parts() -> None:
     assert attachment_input.current_message == "Continue from the previous answer"
     assert attachment_input.model_content == ()
     assert attachment_input.capture_content == ()
+
+
+def test_image_input_detection_distinguishes_multimodal_requests() -> None:
+    image_message = Message(
+        role="user",
+        content="inspect",
+        model_content=(ModelImagePart(file_id="file_image", url="https://example.invalid/model.png"),),
+    )
+    text_message = Message(role="user", content="hello")
+
+    assert RuntimeOrchestrator._has_image_input(image_message)
+    assert not RuntimeOrchestrator._has_image_input(text_message)

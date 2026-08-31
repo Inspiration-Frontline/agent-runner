@@ -45,7 +45,7 @@ class ModelImagePart:
     """Stable Conversation Manager file ID used for replay and auditing."""
     url: str
     """Short-lived signed URL supplied only to the current model call."""
-    detail: ImageDetail = "auto"
+    detail: ImageDetail = "high"
     """Provider image-detail hint for this input."""
 
 
@@ -66,7 +66,7 @@ class CaptureFilePart:
 
     file_id: str
     """Stable file ID retained instead of an expiring signed URL."""
-    detail: ImageDetail = "auto"
+    detail: ImageDetail = "high"
     """Image-detail hint to apply when the file is replayed."""
 
 

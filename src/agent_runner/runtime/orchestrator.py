@@ -91,7 +91,6 @@ from agent_runner.context.builder import (
     ModelImagePart,
     ModelTextPart,
     RuntimeToolCall,
-    is_image_detail,
 )
 from agent_runner.conversation import (
     ConversationBusyError,
@@ -1126,6 +1125,12 @@ class RuntimeOrchestrator:
 
                 converted: StreamEvent = self._convert_event(event)
                 if isinstance(converted, ErrorEvent):
+                    if self._has_image_input(context.current_message):
+                        converted = ErrorEvent(
+                            error_message="The image model is temporarily unavailable. Retry this message later.",
+                            error_code="IMAGE_MODEL_UNAVAILABLE",
+                            phase="model",
+                        )
                     terminal_status = RoundStatus.FAILED
                     terminal_error = converted.error_message or "Model execution failed."
                     yield converted
@@ -1908,7 +1913,7 @@ class RuntimeOrchestrator:
             ):
                 raise RuntimeError("A historical image attachment could not be resolved for replay.")
             for file in response.data.files:
-                signed_urls[file.file_id] = file.download_url
+                signed_urls[file.file_id] = self._get_model_input_url(file)
 
         for message in messages:
             if not message.capture_content:
@@ -1964,10 +1969,11 @@ class RuntimeOrchestrator:
                 model_parts.append(
                     ModelImagePart(
                         file_id=file.file_id,
-                        url=file.download_url,
+                        url=RuntimeOrchestrator._get_model_input_url(file),
+                        detail="high",
                     )
                 )
-                capture_parts.append(CaptureFilePart(file_id=file.file_id))
+                capture_parts.append(CaptureFilePart(file_id=file.file_id, detail="high"))
                 search_texts.append(file.original_filename)
                 continue
 
@@ -2013,7 +2019,7 @@ class RuntimeOrchestrator:
             parts.append(
                 ContentPart(
                     type="file_url",
-                    file_url=FileUrl(url=f"agentbreaker-file://{file_id}"),
+                    file_url=FileUrl(url=f"agentbreaker-file://{file_id}", detail="high"),
                 )
             )
         return UserRequest(content_parts=parts)
@@ -2042,15 +2048,36 @@ class RuntimeOrchestrator:
 
     @staticmethod
     def _get_image_detail(detail: str) -> ImageDetail:
-        """Validate persisted image detail before using it at a provider boundary.
+        """Apply the fixed Phase 14 image-detail policy at the provider boundary.
 
         Args:
-            detail: Provider image-detail policy to validate.
+            detail: Persisted legacy value, intentionally ignored by the fixed policy.
 
         Returns:
-            Validated persisted image detail before using it at a provider boundary.
+            The fixed high-detail policy for uploaded images.
         """
-        return detail if is_image_detail(detail) else "auto"
+        del detail
+        return "high"
+
+    @staticmethod
+    def _get_model_input_url(file: PreparedConversationFile) -> str:
+        """Require the sanitized model-input URL for an image attachment.
+
+        Args:
+            file: Authorized ready file returned by Conversation Manager.
+
+        Returns:
+            Short-lived URL for the sanitized image derivative.
+
+        Raises:
+            FilePreparationError: If Conversation Manager did not provide the required derivative.
+        """
+        if file.model_input_url:
+            return file.model_input_url
+        raise FilePreparationError(
+            f"{file.original_filename}: The sanitized image input is not available.",
+            "FILE_PREPARATION_FAILED",
+        )
 
     @staticmethod
     def _get_stable_file_id(url: str) -> str | None:
@@ -2171,6 +2198,18 @@ class RuntimeOrchestrator:
         if isinstance(normalized_event, ModelError):
             return ErrorEvent(error_message=normalized_event.message)
         raise TypeError(f"Unsupported model stream event: {type(normalized_event).__name__}")
+
+    @staticmethod
+    def _has_image_input(message: Message) -> bool:
+        """Return whether the current provider request contains an uploaded image.
+
+        Args:
+            message: Current user message after attachment preparation.
+
+        Returns:
+            ``True`` when at least one transient provider part is an image.
+        """
+        return any(isinstance(part, ModelImagePart) for part in message.model_content)
 
     @staticmethod
     def _coerce_legacy_model_event(event: dict[str, object]) -> ModelStreamEvent:
