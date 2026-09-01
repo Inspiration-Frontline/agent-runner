@@ -142,6 +142,8 @@ class StreamingSdkExecution:
     """Completion timestamps for each provider model response."""
     model_completed_usages: list[tuple[int, int, int]] = field(default_factory=list)
     """Prompt/completion/total usage triples by provider response."""
+    partial_response_text: str = ""
+    """Text deltas from the current provider response before a completed event is observed."""
 
 
 @dataclass(frozen=True)
@@ -351,6 +353,8 @@ class OpenAIAgentsSdkAdapter:
                 converted: ModelTokenDelta | ModelToolStarted | ModelToolCompleted | ModelUsage | ModelError | None = (
                     self._convert_stream_event(event, execution.prepared.collector)
                 )
+                if isinstance(converted, ModelTokenDelta):
+                    execution.partial_response_text += converted.content
                 if converted is not None:
                     yield converted
         except asyncio.CancelledError:
@@ -376,6 +380,7 @@ class OpenAIAgentsSdkAdapter:
         if not isinstance(event, RawResponsesStreamEvent) or not isinstance(event.data, ResponseCompletedEvent):
             return
         usage: ResponseUsage | None = event.data.response.usage
+        execution.partial_response_text = ""
         execution.model_completed_times.append(get_epoch_millis())
         execution.model_completed_usages.append(
             (
@@ -408,6 +413,7 @@ class OpenAIAgentsSdkAdapter:
             model_completed_times=execution.model_completed_times,
             model_completed_usages=execution.model_completed_usages,
             cancellation_token=cancellation_token,
+            partial_response_text=execution.partial_response_text,
         )
 
     async def run(
@@ -532,7 +538,14 @@ class OpenAIAgentsSdkAdapter:
                 temperature=agent.temperature,
                 max_tokens=agent.max_output_tokens,
                 include_usage=True,
-                extra_args={"timeout": self.settings.lite_llm_request_timeout_seconds},
+                extra_args={
+                    # LiteLLM accepts a numeric timeout and forwards it to the OpenAI client.
+                    # Passing an httpx.Timeout instance causes LiteLLM's request metadata
+                    # serializer to fail before the network call starts.
+                    "timeout": self.settings.lite_llm_request_timeout_seconds,
+                    "num_retries": self.settings.lite_llm_max_retries,
+                    "max_retries": self.settings.lite_llm_max_retries,
+                },
                 retry=ModelRetrySettings(max_retries=self.settings.lite_llm_max_retries),
                 parallel_tool_calls=True,
             ),
@@ -801,6 +814,7 @@ class OpenAIAgentsSdkAdapter:
         model_completed_times: list[int],
         model_completed_usages: list[tuple[int, int, int]],
         cancellation_token: CancellationToken | None,
+        partial_response_text: str,
     ) -> AgentRunCapture:
         """Reconstruct durable provider-neutral Turns from one SDK run.
 
@@ -814,14 +828,15 @@ class OpenAIAgentsSdkAdapter:
             model_completed_times: Collection of model completed times consumed in deterministic order.
             model_completed_usages: Collection of model completed usages consumed in deterministic order.
             cancellation_token: Request-scoped cooperative cancellation token.
+            partial_response_text: Text observed before an incomplete provider response was cancelled.
 
         Returns:
             Reconstructed durable provider-neutral Turns from one SDK run.
         """
         initial_messages: list[CapturedMessage] = self._build_initial_capture_messages(context)
         raw_responses: list[ModelResponse] = list(result.raw_responses)
-        cancelled: bool = cancellation_token is not None and cancellation_token.is_cancelled()
-        if not raw_responses and collector.list_calls():
+        cancelled: bool = self._is_cancelled(cancellation_token)
+        if not raw_responses and (collector.list_calls() or partial_response_text):
             return self._build_observed_partial_capture(
                 initial_messages=initial_messages,
                 definitions=definitions,
@@ -831,12 +846,22 @@ class OpenAIAgentsSdkAdapter:
                 model_completed_times=model_completed_times,
                 model_completed_usages=model_completed_usages,
                 cancelled=cancelled,
+                response_content=partial_response_text,
             )
-        options: CaptureBuildOptions = CaptureBuildOptions(
-            definitions, collector, trace_id, model_completed_times, cancelled
-        )
+        options: CaptureBuildOptions = self._build_capture_options(definitions, collector, trace_id, model_completed_times, cancelled)
         turns: list[CapturedModelTurn] = self._build_captured_turns(raw_responses, initial_messages, run_start, options)
         return AgentRunCapture(turns=turns, final_output=str(result.final_output or ""))
+
+    @staticmethod
+    def _build_capture_options(
+        definitions: list[ToolDefinition],
+        collector: ToolExecutionCollector,
+        trace_id: str,
+        model_completed_times: list[int],
+        cancelled: bool,
+    ) -> CaptureBuildOptions:
+        """Create immutable options shared by captured Turn reconstruction."""
+        return CaptureBuildOptions(definitions, collector, trace_id, model_completed_times, cancelled)
 
     def _build_initial_capture_messages(self, context: AgentContext) -> list[CapturedMessage]:
         """Build the complete stable message snapshot supplied to the first model call.
@@ -851,6 +876,11 @@ class OpenAIAgentsSdkAdapter:
         messages.extend(self._to_capture_message(item) for item in context.conversation_history)
         messages.append(self._to_capture_message(context.current_message))
         return messages
+
+    @staticmethod
+    def _is_cancelled(cancellation_token: CancellationToken | None) -> bool:
+        """Return whether the request token has been cancelled."""
+        return cancellation_token is not None and cancellation_token.is_cancelled()
 
     def _build_captured_turns(
         self,
@@ -1060,6 +1090,7 @@ class OpenAIAgentsSdkAdapter:
         model_completed_times: list[int],
         model_completed_usages: list[tuple[int, int, int]],
         cancelled: bool,
+        response_content: str = "",
     ) -> AgentRunCapture:
         """Preserve observed Tool evidence when cancellation removes SDK raw output.
         Args:
@@ -1071,6 +1102,7 @@ class OpenAIAgentsSdkAdapter:
             model_completed_times: Collection of model completed times consumed in deterministic order.
             model_completed_usages: Collection of model completed usages consumed in deterministic order.
             cancelled: Whether request cancellation was observed.
+            response_content: Visible response text observed before cancellation or failure.
 
         Returns:
             Capture containing the observed partial Turn.
@@ -1086,9 +1118,9 @@ class OpenAIAgentsSdkAdapter:
         prompt_tokens, completion_tokens, total_tokens = model_completed_usages[-1] if model_completed_usages else (0, 0, 0)
         turn: CapturedModelTurn = self._build_partial_turn(
             normalized_initial_messages, definitions, tool_calls, executions, trace_id, run_start,
-            llm_end, turn_end, prompt_tokens, completion_tokens, total_tokens, cancelled,
+            llm_end, turn_end, prompt_tokens, completion_tokens, total_tokens, cancelled, response_content,
         )
-        return AgentRunCapture(turns=[turn], final_output="")
+        return AgentRunCapture(turns=[turn], final_output=response_content)
 
     def _build_partial_turn(
         self,
@@ -1104,6 +1136,7 @@ class OpenAIAgentsSdkAdapter:
         completion_tokens: int,
         total_tokens: int,
         cancelled: bool,
+        response_content: str,
     ) -> CapturedModelTurn:
         """Create the single failed or cancelled Turn for partial SDK evidence.
         Args:
@@ -1119,24 +1152,16 @@ class OpenAIAgentsSdkAdapter:
             completion_tokens: Completion-token count reported by the provider.
             total_tokens: Total token count reported by the provider.
             cancelled: Whether request cancellation was observed.
+            response_content: Visible response text observed before cancellation or failure.
         Returns:
             The single failed or cancelled Turn for partial SDK evidence.
         """
         return CapturedModelTurn(
-            request_messages=messages,
-            message_storage_mode="FULL_SNAPSHOT",
-            tools=definitions,
-            response_content="",
-            response_tool_calls=tool_calls,
-            tool_executions=executions,
-            request_id=str(uuid4()),
-            trace_id=trace_id,
-            start_time=run_start,
-            llm_end_time=llm_end,
-            end_time=turn_end,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
+            request_messages=messages, message_storage_mode="FULL_SNAPSHOT", tools=definitions,
+            response_content=response_content, response_tool_calls=tool_calls, tool_executions=executions,
+            request_id=str(uuid4()), trace_id=trace_id, start_time=run_start,
+            llm_end_time=llm_end, end_time=turn_end, prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens, total_tokens=total_tokens,
             raw_request=self._build_raw_request(messages, definitions),
             raw_response=self._build_partial_raw_response(tool_calls, cancelled),
         )

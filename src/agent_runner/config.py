@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     """API key sent to the local LiteLLM gateway; never returned by debug endpoints."""
     lite_llm_request_timeout_seconds: float = Field(default=120.0, validation_alias="LITE_LLM_REQUEST_TIMEOUT_SECONDS")
     """Maximum duration of one LiteLLM request."""
+    lite_llm_connect_timeout_seconds: float = Field(
+        default=3.0,
+        gt=0,
+        le=30,
+        validation_alias="LITE_LLM_CONNECT_TIMEOUT_SECONDS",
+    )
+    """Maximum duration for establishing a connection to the local LiteLLM gateway."""
     lite_llm_max_retries: int = Field(default=0, validation_alias="LITE_LLM_MAX_RETRIES")
     """Number of provider retries delegated to the LiteLLM client."""
 
@@ -301,6 +308,7 @@ class ConfigurationManager:
                 "base_url": "lite_llm_base_url",
                 "api_key": "lite_llm_api_key",
                 "request_timeout_seconds": "lite_llm_request_timeout_seconds",
+                "connect_timeout_seconds": "lite_llm_connect_timeout_seconds",
                 "max_retries": "lite_llm_max_retries",
             },
             "services": {

@@ -154,6 +154,8 @@ def test_build_sdk_agent_uses_agents_sdk_model() -> None:
     assert sdk_agent.model_settings.include_usage is True
     assert sdk_agent.model_settings.extra_args is not None
     assert sdk_agent.model_settings.extra_args["timeout"] == 120.0
+    assert sdk_agent.model_settings.extra_args["num_retries"] == 0
+    assert sdk_agent.model_settings.extra_args["max_retries"] == 0
     assert model_factory.created_models == ["Qwen/Qwen3-235B-A22B-Instruct-2507"]
 
 

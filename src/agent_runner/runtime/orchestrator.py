@@ -25,6 +25,7 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     ContentPart,
     ConversationFileKind,
     ConversationFileStatus,
+    ConversationRoundHistory,
     ConversationTurn,
     CreateConversationRoundCheckpointRequest,
     CreateConversationRoundCheckpointResponse,
@@ -127,6 +128,8 @@ from agent_runner.tools.internal.catalog import build_internal_tool_registry
 from agent_runner.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+IMAGE_MODEL_UNAVAILABLE_MESSAGE: str = "The image model is temporarily unavailable. Retry this message later."
 
 
 class DisconnectAwareRequest(Protocol):
@@ -286,6 +289,8 @@ class RuntimeRequestState:
     """Whether durable checkpoint creation has succeeded."""
     checkpoint_revision: int = 0
     """Latest optimistic-concurrency revision for Round mutations."""
+    contains_image_input: bool = False
+    """Whether the prepared model request contains at least one image part."""
     revision_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Lock serializing progress, dispatch, and finalization mutations."""
 
@@ -535,6 +540,7 @@ class RuntimeOrchestrator:
         if state.agent is None:
             raise RuntimeError("Agent context preparation completed without a resolved Agent.")
         context: AgentContext = context_result.context
+        state.contains_image_input = self._has_image_input(context.current_message)
 
         model_result: ModelStreamComplete | None = None
         with self.runtime_tracing.trace_agent_run(
@@ -1026,15 +1032,16 @@ class RuntimeOrchestrator:
         persistence_task: asyncio.Task[None] = asyncio.create_task(
             self._persist_unexpected_terminal(conversation_request, user_id, state, status, message)
         )
-        while not persistence_task.done():
-            try:
-                await asyncio.shield(persistence_task)
-            except asyncio.CancelledError:
-                if persistence_task.cancelled():
-                    raise
-                logger.info("Waiting for cancelled request terminal persistence")
-
-        await persistence_task
+        current_task: asyncio.Task[None] | None = asyncio.current_task()
+        try:
+            await asyncio.shield(persistence_task)
+        except asyncio.CancelledError:
+            # The parent request is already cancelled, so clear that one cancellation request
+            # before awaiting the detached persistence task. Re-entering shield in a loop causes a
+            # busy-spin because asyncio immediately re-delivers the pending cancellation.
+            if current_task is not None:
+                current_task.uncancel()
+            await persistence_task
 
     async def _finalize_request(
         self,
@@ -1125,12 +1132,9 @@ class RuntimeOrchestrator:
 
                 converted: StreamEvent = self._convert_event(event)
                 if isinstance(converted, ErrorEvent):
-                    if self._has_image_input(context.current_message):
-                        converted = ErrorEvent(
-                            error_message="The image model is temporarily unavailable. Retry this message later.",
-                            error_code="IMAGE_MODEL_UNAVAILABLE",
-                            phase="model",
-                        )
+                    converted = self._normalize_model_error(
+                        converted, self._has_image_input(context.current_message)
+                    )
                     terminal_status = RoundStatus.FAILED
                     terminal_error = converted.error_message or "Model execution failed."
                     yield converted
@@ -1144,6 +1148,15 @@ class RuntimeOrchestrator:
 
                 if await http_request.is_disconnected():
                     cancellation_token.cancel()
+        except Exception as error:
+            logger.exception("Model stream failed before producing a terminal event")
+            converted = self._normalize_model_error(
+                ErrorEvent(str(error) or "Model execution failed.", error_code="EXECUTION_FAILED", phase="model"),
+                self._has_image_input(context.current_message),
+            )
+            terminal_status = RoundStatus.FAILED
+            terminal_error = converted.error_message or "Model execution failed."
+            yield converted
         finally:
             await runtime_stream.aclose()
 
@@ -1327,10 +1340,10 @@ class RuntimeOrchestrator:
 
         The first Conversation Manager RPC is owner-scoped. Besides authorizing the destination,
         it returns ``latest_round_number``, the durable high-water mark from which this run selects
-        ``next_round_number``. When the mark is non-zero, the second RPC asks Conversation Manager
-        to reconstruct MODEL_CONTEXT at that exact boundary. Preflight performs no model call and
-        writes no data; it prevents unauthorized or unreplayable requests from entering expensive
-        file, model, and Tool phases.
+        ``next_round_number``. When active history exists, the second RPC asks Conversation Manager
+        to reconstruct MODEL_CONTEXT at the latest active boundary. These values differ after tail
+        deletion because retired Round numbers remain part of the high-water sequence. Preflight
+        performs no model call and writes no data.
 
         Args:
             conversation_request: Validated public Conversation request.
@@ -1357,13 +1370,12 @@ class RuntimeOrchestrator:
             )
 
         conversation_history: list[Message] = []
-        if history.data.latest_round_number > 0:
-            # Replay uses the same high-water boundary returned above, so context and the selected
-            # next Round cannot be based on two different snapshots inside this execution lease.
+        replay_round_number: int | None = self._select_replay_round_number(history.data)
+        if replay_round_number is not None:
             replay: GetConversationReplayResponse = await self.conversation_client.get_model_context(
                 user_id,
                 conversation_request.conversation_id,
-                history.data.latest_round_number,
+                replay_round_number,
             )
             if replay.base is None or not replay.base.success:
                 message = replay.base.message if replay.base is not None else "Conversation replay RPC failed."
@@ -1382,6 +1394,22 @@ class RuntimeOrchestrator:
             next_round_number=history.data.latest_round_number + 1,
             conversation_history=tuple(conversation_history),
         )
+
+    @staticmethod
+    def _select_replay_round_number(history: ConversationRoundHistory) -> int | None:
+        """Select the latest active Round, with compatibility for legacy history responses.
+
+        Args:
+            history: Conversation Manager history response payload.
+
+        Returns:
+            Latest active Round number, or ``None`` when no replay is needed.
+        """
+        if history.rounds:
+            return max(round_item.round_number for round_item in history.rounds)
+        # Older Conversation Manager clients omitted summaries while still reporting the active
+        # high-water number. Retain their replay behavior until all callers expose summaries.
+        return history.latest_round_number if history.latest_round_number > 0 else None
 
     async def _prepare_reference_context(
         self,
@@ -2210,6 +2238,25 @@ class RuntimeOrchestrator:
             ``True`` when at least one transient provider part is an image.
         """
         return any(isinstance(part, ModelImagePart) for part in message.model_content)
+
+    @staticmethod
+    def _normalize_model_error(error: ErrorEvent, contains_image_input: bool) -> ErrorEvent:
+        """Return a client-safe model error without leaking provider implementation details.
+
+        Args:
+            error: Original model-layer error event.
+            contains_image_input: Whether the current request contains an image part.
+
+        Returns:
+            Original text-only error or the stable image-model availability error.
+        """
+        if not contains_image_input:
+            return error
+        return ErrorEvent(
+            error_message=IMAGE_MODEL_UNAVAILABLE_MESSAGE,
+            error_code="IMAGE_MODEL_UNAVAILABLE",
+            phase="model",
+        )
 
     @staticmethod
     def _coerce_legacy_model_event(event: dict[str, object]) -> ModelStreamEvent:
