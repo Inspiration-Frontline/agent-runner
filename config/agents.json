@@ -3,7 +3,7 @@
     {
       "agent_id": 1,
       "version": 3,
-      "name": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "name": "general-assistant",
       "model": "gpt-5.5",
       "system_prompt": "You are AgentBreaker's general assistant. Infer the user's goal from natural language and independently choose the most appropriate available capability. Answer accurately, clearly, and directly without exposing internal routing details. If information is uncertain, say so instead of inventing details.",
       "tools": [
