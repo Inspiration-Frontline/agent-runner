@@ -1,4 +1,7 @@
+import asyncio
 import logging
+from contextlib import suppress
+from urllib.parse import SplitResult, urlsplit
 
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.models.interface import Model
@@ -23,6 +26,7 @@ class LiteLLMModelFactory:
         base_url: Absolute URL for base.
         api_key: Credential passed only to the configured provider boundary.
         request_timeout_seconds: Maximum duration in seconds for one provider request.
+        connect_timeout_seconds: Maximum duration in seconds for the gateway reachability check.
     """
 
     DEFAULT_PROVIDER_PREFIX: str = "openai/"
@@ -57,6 +61,7 @@ class LiteLLMModelFactory:
         base_url: str | None = None,
         api_key: str | None = None,
         request_timeout_seconds: float | None = None,
+        connect_timeout_seconds: float | None = None,
         settings: Settings | None = None,
         tracer: Tracer | None = None,
     ) -> None:
@@ -66,6 +71,7 @@ class LiteLLMModelFactory:
             base_url: Absolute URL for base.
             api_key: Credential passed only to the configured provider boundary.
             request_timeout_seconds: Maximum duration in seconds for one provider request.
+            connect_timeout_seconds: Maximum duration in seconds for the gateway reachability check.
             settings: Effective application settings for the operation.
             tracer: Application-owned OpenTelemetry facade.
         """
@@ -79,6 +85,40 @@ class LiteLLMModelFactory:
             if request_timeout_seconds is not None
             else current_settings.lite_llm_request_timeout_seconds
         )
+        self.connect_timeout_seconds: float = (
+            connect_timeout_seconds
+            if connect_timeout_seconds is not None
+            else current_settings.lite_llm_connect_timeout_seconds
+        )
+
+    async def ensure_reachable(self) -> None:
+        """Fail quickly when the configured LiteLLM gateway cannot accept TCP connections.
+
+        This transport-only probe intentionally avoids a LiteLLM-specific health endpoint so the
+        same model boundary remains compatible with other OpenAI-compatible proxies. The actual
+        model request remains authoritative for authentication and provider availability.
+
+        Raises:
+            ValueError: If the configured base URL has no supported scheme or host.
+            ConnectionError: If a connection cannot be established within the configured timeout.
+        """
+        parsed_url: SplitResult = urlsplit(self.base_url)
+        if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname is None:
+            raise ValueError("LiteLLM base URL must contain an HTTP(S) scheme and host.")
+
+        port: int = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+        writer: asyncio.StreamWriter
+        try:
+            async with asyncio.timeout(self.connect_timeout_seconds):
+                _, writer = await asyncio.open_connection(parsed_url.hostname, port)
+        except (OSError, TimeoutError) as error:
+            raise ConnectionError(
+                f"LiteLLM gateway is unavailable at {parsed_url.hostname}:{port}."
+            ) from error
+
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
 
     def create_model(self, model: str) -> Model:
         """

@@ -6,6 +6,8 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     ConversationReference,
     CreateConversationRoundCheckpointRequest,
     CreateConversationRoundCheckpointResponse,
+    DeleteRoundsRequest,
+    DeleteRoundsResponse,
     FinalizeConversationRoundRequest,
     FinalizeConversationRoundResponse,
     GetConversationReplayRequest,
@@ -83,6 +85,30 @@ class ConversationManagerClient:
             metadata=self._get_trace_metadata(),
         )
         return cast(GetConversationRoundHistoryResponse, response)
+
+    async def delete_rounds(
+        self, user_id: int, conversation_id: str, round_numbers: list[int]
+    ) -> DeleteRoundsResponse:
+        """Tombstone one retryable active Round suffix through the internal mutation boundary.
+
+        Args:
+            user_id: Trusted authenticated Conversation owner.
+            conversation_id: Conversation whose active tail is being retried.
+            round_numbers: Positive active suffix selected for logical deletion.
+
+        Returns:
+            Typed deletion response containing deleted numbers or a business rejection.
+        """
+        response: Any = await self._service.delete_rounds(
+            DeleteRoundsRequest(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                round_numbers=round_numbers,
+            ),
+            timeout=10.0,
+            metadata=self._get_trace_metadata(),
+        )
+        return cast(DeleteRoundsResponse, response)
 
     async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         """Persist one terminal Round through the Manager RPC.

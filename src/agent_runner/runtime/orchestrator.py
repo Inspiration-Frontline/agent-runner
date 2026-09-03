@@ -26,9 +26,11 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     ConversationFileKind,
     ConversationFileStatus,
     ConversationRoundHistory,
+    ConversationRoundSummary,
     ConversationTurn,
     CreateConversationRoundCheckpointRequest,
     CreateConversationRoundCheckpointResponse,
+    DeleteRoundsResponse,
     FileUrl,
     FinalizeConversationRoundRequest,
     FinalizeConversationRoundResponse,
@@ -611,6 +613,10 @@ class RuntimeOrchestrator:
             await self.acquire_conversation(conversation_request.conversation_id)
         self.cancellation_registry.register(user_id, conversation_request.conversation_id, state.cancellation_token)
 
+        retry_failure: PreparationFailure | None = await self._prepare_round_retry(conversation_request, user_id)
+        if retry_failure is not None:
+            return retry_failure
+
         # Preflight happens before billable model/Tool work. Conversation Manager authorizes the
         # destination and returns the durable high-water/replay boundary used for this entire run.
         with self.runtime_tracing.trace_preflight(
@@ -658,6 +664,93 @@ class RuntimeOrchestrator:
         )
         return reference_result
 
+    async def _prepare_round_retry(
+        self,
+        conversation_request: ConversationRequest,
+        user_id: int,
+    ) -> PreparationFailure | None:
+        """Validate and tombstone a failed or cancelled active tail before normal preflight.
+
+        The route has already acquired the per-Conversation execution lease, so no other Runner can
+        append a Round between validation and the internal deletion. Conversation Manager applies
+        its shorter mutation lock and database transaction around the actual tombstone.
+
+        Args:
+            conversation_request: Validated request optionally identifying a retry Round.
+            user_id: Trusted authenticated Conversation owner.
+
+        Returns:
+            A public-safe failure when retry preparation is rejected, otherwise ``None``.
+        """
+        retry_round_number: int | None = conversation_request.retry_round_number
+        if retry_round_number is None:
+            return None
+
+        history: GetConversationRoundHistoryResponse = await self.conversation_client.get_round_history(
+            user_id, conversation_request.conversation_id
+        )
+        validation_failure: PreparationFailure | None = self._validate_retry_round(history, retry_round_number)
+        if validation_failure is not None:
+            return validation_failure
+
+        response: DeleteRoundsResponse = await self.conversation_client.delete_rounds(
+            user_id,
+            conversation_request.conversation_id,
+            [retry_round_number],
+        )
+        if response.base is None or not response.base.success or response.data is None or response.data.failures:
+            message: str = response.base.message if response.base is not None else "Round retry preparation failed."
+            return PreparationFailure(
+                ErrorEvent(message, error_code="ROUND_RETRY_FAILED", phase="retry_preparation")
+            )
+
+        return None
+
+    @staticmethod
+    def _validate_retry_round(
+        history: GetConversationRoundHistoryResponse,
+        retry_round_number: int,
+    ) -> PreparationFailure | None:
+        """Require retry to target the latest active failed or cancelled Round.
+
+        Args:
+            history: Owner-scoped compact Conversation history.
+            retry_round_number: Round selected by the browser for replacement.
+
+        Returns:
+            A public-safe validation failure, otherwise ``None``.
+        """
+        if history.base is None or not history.base.success or history.data is None:
+            message: str = history.base.message if history.base is not None else "Conversation history RPC failed."
+            return PreparationFailure(
+                ErrorEvent(message, error_code="CONVERSATION_ACCESS_DENIED", phase="retry_preparation")
+            )
+
+        active_rounds: list[ConversationRoundSummary] = list(history.data.rounds)
+        if not active_rounds:
+            return PreparationFailure(
+                ErrorEvent(
+                    "The requested Round is not available for retry.",
+                    error_code="ROUND_RETRY_NOT_ALLOWED",
+                    phase="retry_preparation",
+                )
+            )
+
+        latest_round: ConversationRoundSummary = max(active_rounds, key=lambda item: item.round_number)
+        if latest_round.round_number != retry_round_number or latest_round.status not in {
+            RoundStatus.FAILED,
+            RoundStatus.CANCELLED,
+        }:
+            return PreparationFailure(
+                ErrorEvent(
+                    "Only the latest failed or cancelled Round can be retried.",
+                    error_code="ROUND_RETRY_NOT_ALLOWED",
+                    phase="retry_preparation",
+                )
+            )
+
+        return None
+
     async def _create_agent_context(
         self,
         conversation_request: ConversationRequest,
@@ -676,7 +769,7 @@ class RuntimeOrchestrator:
             conversation_history: Historical messages loaded for the current Conversation.
 
         Returns:
-            build bounded context and instantiate the resolved Agent for this request only.
+            Prepared Agent context, or a typed failure after any required persistence.
         """
         build_result: AgentContextBuildReady | PreparationFailure = await self._build_agent_context(
             conversation_request,
@@ -1350,7 +1443,7 @@ class RuntimeOrchestrator:
             user_id: Trusted authenticated user identifier.
 
         Returns:
-            load the read-only state required before a request may execute.
+            Authorized replay context and next Round number, or a typed preflight failure.
         """
         # GetRoundHistory is both the destination authorization check and the authoritative source
         # of the Round high-water mark. Runner never derives the next number from local state.
@@ -1397,7 +1490,7 @@ class RuntimeOrchestrator:
 
     @staticmethod
     def _select_replay_round_number(history: ConversationRoundHistory) -> int | None:
-        """Select the latest active Round, with compatibility for legacy history responses.
+        """Select the latest active Round without treating the high-water mark as replayable.
 
         Args:
             history: Conversation Manager history response payload.
@@ -1407,9 +1500,7 @@ class RuntimeOrchestrator:
         """
         if history.rounds:
             return max(round_item.round_number for round_item in history.rounds)
-        # Older Conversation Manager clients omitted summaries while still reporting the active
-        # high-water number. Retain their replay behavior until all callers expose summaries.
-        return history.latest_round_number if history.latest_round_number > 0 else None
+        return None
 
     async def _prepare_reference_context(
         self,

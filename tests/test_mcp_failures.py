@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -19,7 +20,10 @@ from agent_runner.mcps.connection_pool import (
 )
 from agent_runner.mcps.failures import McpFailureCode, classify_mcp_failure
 from agent_runner.mcps.sdk_runtime import (
+    DispatchEvidenceRecorder,
+    DispatchTurnTracker,
     McpConnectionDiagnostic,
+    McpServerBorrowResult,
     RequiredMcpServerUnavailableError,
     SdkMcpRuntime,
 )
@@ -151,6 +155,57 @@ class RejectingPool:
         raise AssertionError("No connection should be released after a failed borrow")
 
 
+class ConcurrentBorrowProbe:
+    """Blocks each borrow until every configured binding has started.
+
+    Attributes:
+        expected_count: Number of binding calls required to release the probe.
+        started_ids: Server IDs observed before the shared release point.
+        release: Event opened after every expected binding has started.
+    """
+
+    def __init__(self, expected_count: int) -> None:
+        """Create a probe for one expected concurrent borrow batch.
+
+        Args:
+            expected_count: Number of binding calls required to release the probe.
+        """
+        self.expected_count = expected_count
+        self.started_ids: list[str] = []
+        self.release = asyncio.Event()
+
+    async def borrow(
+        self,
+        binding: MCPServerBinding,
+        recorder: DispatchEvidenceRecorder | None,
+        tracker: DispatchTurnTracker,
+    ) -> McpServerBorrowResult:
+        """Record one call and wait until all sibling binding calls have started.
+
+        Args:
+            binding: Agent binding currently being borrowed.
+            recorder: Optional dispatch recorder passed through the runtime.
+            tracker: Request-scoped dispatch tracker passed through the runtime.
+
+        Returns:
+            Optional-failure diagnostic for the binding after the shared release.
+        """
+        del recorder, tracker
+        self.started_ids.append(binding.server_id)
+        if len(self.started_ids) == self.expected_count:
+            self.release.set()
+
+        await asyncio.wait_for(self.release.wait(), timeout=0.5)
+        diagnostic = McpConnectionDiagnostic(
+            binding.server_id,
+            binding.required,
+            False,
+            McpFailureCode.CONNECTION_FAILED,
+            "MCP server is unavailable.",
+        )
+        return McpServerBorrowResult(diagnostic, None)
+
+
 def rejecting_runtime(secret: str, status_code: int) -> SdkMcpRuntime:
     catalog = McpServerCatalog.from_json('{"mcpServers":{"fixture":{"url":"https://example.test/mcp"}}}')
     wrapped = UserError("SDK failed")
@@ -194,8 +249,27 @@ async def test_optional_preflight_failure_degrades_with_typed_diagnostic() -> No
         assert len(session.diagnostics) == 1
         diagnostic = session.diagnostics[0]
         assert diagnostic.failure_code == McpFailureCode.AUTHORIZATION_DENIED
-        assert diagnostic.message == "MCP credentials do not permit this operation."
-        assert secret not in diagnostic.message
+    assert diagnostic.message == "MCP credentials do not permit this operation."
+    assert secret not in diagnostic.message
+
+
+async def test_binding_preflight_is_concurrent_and_preserves_definition_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = SdkMcpRuntime(McpServerCatalog.empty(), settings=Settings())
+    probe = ConcurrentBorrowProbe(expected_count=3)
+    monkeypatch.setattr(runtime, "_borrow_server", probe.borrow)
+    bindings = [
+        MCPServerBinding("first", required=False),
+        MCPServerBinding("second", required=False),
+        MCPServerBinding("third", required=False),
+    ]
+
+    async with runtime.session(bindings) as session:
+        diagnostic_ids = [diagnostic.server_id for diagnostic in session.diagnostics]
+
+    assert probe.started_ids == ["first", "second", "third"]
+    assert diagnostic_ids == ["first", "second", "third"]
 
 
 async def test_manager_enter_failure_is_not_cleaned_up_twice(monkeypatch: pytest.MonkeyPatch) -> None:

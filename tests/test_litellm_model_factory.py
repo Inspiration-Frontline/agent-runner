@@ -1,4 +1,6 @@
+import asyncio
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from agents import Model, ModelSettings
@@ -41,6 +43,40 @@ def test_created_model_targets_external_proxy() -> None:
     assert model.base_url == "http://localhost:4000"
     assert model.api_key == "sk-test"
     assert factory.request_timeout_seconds == 3
+
+
+@pytest.mark.asyncio
+async def test_reachability_check_uses_configured_gateway_and_closes_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = AsyncMock(spec=asyncio.StreamWriter)
+    open_connection = AsyncMock(return_value=(asyncio.StreamReader(), writer))
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    factory = LiteLLMModelFactory(
+        base_url="https://litellm.example.test/v1",
+        api_key="sk-test",
+        connect_timeout_seconds=1,
+    )
+
+    await factory.ensure_reachable()
+
+    open_connection.assert_awaited_once_with("litellm.example.test", 443)
+    writer.close.assert_called_once_with()
+    writer.wait_closed.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_reachability_check_reports_unavailable_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    open_connection = AsyncMock(side_effect=OSError("connection refused"))
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    factory = LiteLLMModelFactory(
+        base_url="http://localhost:4000",
+        api_key="sk-test",
+        connect_timeout_seconds=1,
+    )
+
+    with pytest.raises(ConnectionError, match="LiteLLM gateway is unavailable at localhost:4000"):
+        await factory.ensure_reachable()
 
 
 def test_token_limit_takes_precedence_over_provider_stop_reason() -> None:

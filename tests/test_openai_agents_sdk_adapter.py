@@ -17,6 +17,11 @@ from agent_runner.tools.registry import ToolDefinition, ToolRegistry
 class DummyModelFactory:
     def __init__(self) -> None:
         self.created_models: list[str] = []
+        self.reachability_checks: int = 0
+
+    async def ensure_reachable(self) -> None:
+        """Record one model-gateway reachability check."""
+        self.reachability_checks += 1
 
     def create_model(self, model: str) -> str:
         self.created_models.append(model)
@@ -256,12 +261,14 @@ async def test_run_registers_configured_tools_on_sdk_agent(monkeypatch: pytest.M
 
     monkeypatch.setattr(Runner, "run", fake_run)
 
-    response = await OpenAIAgentsSdkAdapter(model_factory=DummyModelFactory()).run(
+    model_factory = DummyModelFactory()
+    response = await OpenAIAgentsSdkAdapter(model_factory=model_factory).run(
         agent,
         context,
         tool_registry=registry,
     )
 
+    assert model_factory.reachability_checks == 1
     sdk_agent = captured["starting_agent"]
     assert [tool.name for tool in sdk_agent.tools] == ["echo_value"]
     assert captured["input"] == [{"role": "user", "content": "echo this"}]

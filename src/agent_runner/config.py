@@ -471,6 +471,7 @@ class ConversationRequest(BaseModel):
         conversation_id: Optional conversation ID for continuing an existing conversation.
                         If None, a new conversation will be started.
         file_ids: Optional immutable attachment IDs to freeze and prepare before model execution.
+        retry_round_number: Failed or cancelled tail Round replaced by this request.
         message: The user's message content to process.
     """
 
@@ -482,6 +483,8 @@ class ConversationRequest(BaseModel):
     """Visible user text; may be empty when attachments are supplied."""
     file_ids: list[str] = Field(default_factory=list, max_length=5)
     """Stable uploaded file IDs selected for this request."""
+    retry_round_number: int | None = Field(default=None, gt=0)
+    """Failed or cancelled active tail Round to tombstone before this retry executes."""
     # TODO: Move this limit to Nacos and expose the same effective value to Conversation Manager,
     # Agent Runner, and UI instead of maintaining independent validation constants.
     references: list[ConversationReferenceRequest] = Field(default_factory=list, max_length=10)

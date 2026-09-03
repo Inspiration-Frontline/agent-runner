@@ -80,6 +80,9 @@ def _is_sdk_message_role(role: str) -> TypeIs[SdkMessageRole]:
 class AgentModelFactory(Protocol):
     """Small model-factory boundary used by the SDK adapter and its tests."""
 
+    async def ensure_reachable(self) -> None:
+        """Verify that the configured model gateway can accept a connection."""
+
     def create_model(self, model: str) -> str | Model:
         """Create an SDK-compatible model for one Agent definition.
 
@@ -267,6 +270,9 @@ class OpenAIAgentsSdkAdapter:
             Normalized SDK events while retaining durable capture evidence.
         """
         self.last_capture = AgentRunCapture()
+
+        await self.model_factory.ensure_reachable()
+
         async with self.mcp_runtime.session(agent.mcp_servers, dispatch_recorder) as mcp_session:
             execution: StreamingSdkExecution = self._start_streaming_execution(
                 agent,
@@ -441,6 +447,8 @@ class OpenAIAgentsSdkAdapter:
         """
         if cancellation_token and cancellation_token.is_cancelled():
             raise asyncio.CancelledError("Execution cancelled")
+
+        await self.model_factory.ensure_reachable()
 
         async with self.mcp_runtime.session(agent.mcp_servers, dispatch_recorder) as mcp_session:
             prepared: PreparedSdkExecution = self._prepare_sdk_execution(

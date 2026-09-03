@@ -9,6 +9,9 @@ from agent_breaker_conversation_manager_protos.ifl.agentbreaker.conversationmana
     ConversationReference,
     ConversationReplay,
     ConversationRoundHistory,
+    ConversationRoundSummary,
+    DeleteRoundsResponse,
+    DeleteRoundsResult,
     GetConversationReplayResponse,
     GetConversationRoundHistoryResponse,
     LlmConversationMessage,
@@ -66,7 +69,17 @@ class FakeConversationClient:
     ) -> GetConversationRoundHistoryResponse:
         return GetConversationRoundHistoryResponse(
             base=ResponseBase(code=0, success=True),
-            data=ConversationRoundHistory(conversation_id=conversation_id, latest_round_number=1),
+            data=ConversationRoundHistory(
+                conversation_id=conversation_id,
+                latest_round_number=1,
+                rounds=[
+                    ConversationRoundSummary(
+                        conversation_id=conversation_id,
+                        round_number=1,
+                        status=RoundStatus.COMPLETED,
+                    )
+                ],
+            ),
         )
 
     async def get_model_context(
@@ -117,6 +130,100 @@ class FakeConversationClient:
                     ],
                 )
             ],
+        )
+
+
+class RetryConversationClient(FakeConversationClient):
+    """Provides a mutable active tail for retry-preparation tests.
+
+    Attributes:
+        status: Status exposed for the retry target.
+        retry_round_number: Active Round selected by the request.
+        delete_succeeds: Whether the internal deletion RPC accepts the retry.
+        deleted_round_numbers: Round suffixes submitted to the internal deletion boundary.
+        history_calls: Number of owner-scoped history reads made by the orchestrator.
+    """
+
+    def __init__(
+        self,
+        status: RoundStatus,
+        retry_round_number: int = 1,
+        delete_succeeds: bool = True,
+    ) -> None:
+        """Configure one active retry target and the deletion outcome.
+
+        Args:
+            status: Durable status returned for the active tail.
+            retry_round_number: Round number exposed as the current active tail.
+            delete_succeeds: Whether retry preparation tombstones the selected Round.
+        """
+        super().__init__()
+        self.status = status
+        self.retry_round_number = retry_round_number
+        self.delete_succeeds = delete_succeeds
+        self.deleted_round_numbers: list[list[int]] = []
+        self.history_calls = 0
+
+    async def get_round_history(
+        self,
+        user_id: int,
+        conversation_id: str,
+    ) -> GetConversationRoundHistoryResponse:
+        """Return the retry target once, then the post-tombstone high-water state.
+
+        Args:
+            user_id: Trusted authenticated owner.
+            conversation_id: Conversation under retry.
+
+        Returns:
+            Owner-scoped history retaining the original high-water mark.
+        """
+        self.history_calls += 1
+        rounds: list[ConversationRoundSummary] = []
+        if self.history_calls == 1:
+            rounds.append(
+                ConversationRoundSummary(
+                    conversation_id=conversation_id,
+                    round_number=self.retry_round_number,
+                    status=self.status,
+                )
+            )
+
+        return GetConversationRoundHistoryResponse(
+            base=ResponseBase(code=0, success=True),
+            data=ConversationRoundHistory(
+                conversation_id=conversation_id,
+                latest_round_number=self.retry_round_number,
+                rounds=rounds,
+            ),
+        )
+
+    async def delete_rounds(
+        self,
+        user_id: int,
+        conversation_id: str,
+        round_numbers: list[int],
+    ) -> DeleteRoundsResponse:
+        """Capture the internal retry mutation and return its configured outcome.
+
+        Args:
+            user_id: Trusted authenticated owner.
+            conversation_id: Conversation under retry.
+            round_numbers: Active suffix selected for tombstoning.
+
+        Returns:
+            Successful deletion details or a typed business rejection.
+        """
+        self.deleted_round_numbers.append(round_numbers)
+        if self.delete_succeeds:
+            return DeleteRoundsResponse(
+                base=ResponseBase(code=0, success=True),
+                data=DeleteRoundsResult(deleted_round_numbers=round_numbers),
+            )
+
+        return DeleteRoundsResponse(
+            base=ResponseBase(code=2011, success=False, message="Round retry preparation failed."),
+            data=DeleteRoundsResult(),
         )
 
 
@@ -344,6 +451,85 @@ async def test_disconnect_is_persisted_as_cancelled_round() -> None:
     assert saved.round_number == 2
     assert saved.status == RoundStatus.CANCELLED
     assert saved.turns == []
+
+
+@pytest.mark.parametrize("status", [RoundStatus.FAILED, RoundStatus.CANCELLED])
+async def test_retry_tombstones_failed_or_cancelled_tail_before_creating_new_round(status: RoundStatus) -> None:
+    runtime = CountingRuntime()
+    orchestrator, _, context_builder = _orchestrator(runtime)
+    retry_client = RetryConversationClient(status)
+    orchestrator.conversation_client = retry_client
+
+    events = [
+        event
+        async for event in orchestrator.run(
+            ConversationRequest(
+                conversation_id="conv_multi",
+                message="Try this again",
+                retry_round_number=1,
+            ),
+            1,
+            FakeRequest(),
+        )
+    ]
+
+    assert events[-1].type == StreamEventType.DONE
+    assert retry_client.deleted_round_numbers == [[1]]
+    assert retry_client.saved_requests[0].round_number == 2
+    assert context_builder.history == []
+    assert runtime.called is True
+
+
+async def test_retry_rejects_completed_tail_before_deletion_or_model_work() -> None:
+    runtime = CountingRuntime()
+    orchestrator, _, _ = _orchestrator(runtime)
+    retry_client = RetryConversationClient(RoundStatus.COMPLETED)
+    orchestrator.conversation_client = retry_client
+
+    events = [
+        event
+        async for event in orchestrator.run(
+            ConversationRequest(
+                conversation_id="conv_multi",
+                message="Do not retry this",
+                retry_round_number=1,
+            ),
+            1,
+            FakeRequest(),
+        )
+    ]
+
+    assert events[-1].type == StreamEventType.ERROR
+    assert events[-1].error_code == "ROUND_RETRY_NOT_ALLOWED"
+    assert retry_client.deleted_round_numbers == []
+    assert retry_client.saved_requests == []
+    assert runtime.called is False
+
+
+async def test_retry_deletion_failure_stops_before_model_work() -> None:
+    runtime = CountingRuntime()
+    orchestrator, _, _ = _orchestrator(runtime)
+    retry_client = RetryConversationClient(RoundStatus.FAILED, delete_succeeds=False)
+    orchestrator.conversation_client = retry_client
+
+    events = [
+        event
+        async for event in orchestrator.run(
+            ConversationRequest(
+                conversation_id="conv_multi",
+                message="Retry after deletion",
+                retry_round_number=1,
+            ),
+            1,
+            FakeRequest(),
+        )
+    ]
+
+    assert events[-1].type == StreamEventType.ERROR
+    assert events[-1].error_code == "ROUND_RETRY_FAILED"
+    assert retry_client.deleted_round_numbers == [[1]]
+    assert retry_client.saved_requests == []
+    assert runtime.called is False
 
 
 async def test_busy_conversation_returns_http_409_before_stream(monkeypatch: pytest.MonkeyPatch) -> None:

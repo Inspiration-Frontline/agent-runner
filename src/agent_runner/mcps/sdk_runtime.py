@@ -794,11 +794,12 @@ class SdkMcpRuntime:
         leases: list[DurableMcpServer] = []
         diagnostics: list[McpConnectionDiagnostic] = []
         try:
-            for binding in bindings:
-                borrow_result: McpServerBorrowResult = await self._borrow_server(binding, recorder, tracker)
+            borrow_results: list[McpServerBorrowResult] = await self._borrow_servers(bindings, recorder, tracker)
+            for borrow_result in borrow_results:
                 diagnostics.append(borrow_result.diagnostic)
                 if borrow_result.server is not None:
                     leases.append(borrow_result.server)
+
             failed_required: list[McpConnectionDiagnostic] = [
                 item for item in diagnostics if item.required and not item.connected
             ]
@@ -821,6 +822,28 @@ class SdkMcpRuntime:
                     return_exceptions=True,
                 )
             )
+
+    async def _borrow_servers(
+        self,
+        bindings: list[MCPServerBinding],
+        recorder: DispatchEvidenceRecorder | None,
+        tracker: DispatchTurnTracker,
+    ) -> list[McpServerBorrowResult]:
+        """Borrow independent MCP bindings concurrently while preserving definition order.
+
+        Args:
+            bindings: Agent bindings consumed in their configured order.
+            recorder: Optional recorder for durable remote-dispatch evidence.
+            tracker: Request-scoped turn and Tool outcome tracker.
+
+        Returns:
+            Per-binding borrow results in the same order as ``bindings``.
+        """
+        return list(
+            await asyncio.gather(
+                *(self._borrow_server(binding, recorder, tracker) for binding in bindings)
+            )
+        )
 
     async def _borrow_server(
         self,
