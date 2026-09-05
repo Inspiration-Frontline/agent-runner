@@ -61,6 +61,7 @@ LOCAL_DEFAULTS = {
 
 async def publish_config(loader: NacosConfigLoader, content: str) -> None:
     """Publish configuration to Nacos using the SDK's internal client."""
+
     if not loader.config_client:
         raise RuntimeError("Nacos client not initialized")
 
@@ -72,6 +73,7 @@ async def publish_config(loader: NacosConfigLoader, content: str) -> None:
             type="yaml",
         )
     )
+
     if not published:
         raise RuntimeError(f"Failed to publish config to Nacos: data_id={loader.data_id}, group={loader.group}")
     print(f"Published config to Nacos: data_id={loader.data_id}, group={loader.group}")
@@ -89,9 +91,11 @@ async def wait_for_debug_config(
             resp = await client.get("http://localhost:8000/v1/agent/debug/config")
             resp.raise_for_status()
             payload = resp.json()
+
             if not isinstance(payload, dict):
                 raise TypeError("Debug config endpoint must return a JSON object.")
             last_config = payload
+
             if all(last_config.get(key) == value for key, value in expected.items()):
                 return last_config
             await asyncio.sleep(1)
@@ -168,6 +172,7 @@ async def test_dynamic_refresh(loader: NacosConfigLoader) -> None:
 async def cleanup(loader: NacosConfigLoader) -> None:
     """Remove test config from Nacos."""
     print("\n=== CLEANUP ===")
+
     if loader.config_client:
         await loader.config_client.remove_config(
             ConfigParam(
@@ -188,6 +193,7 @@ async def main() -> None:
     print("  3. NACOS_ENABLED=true in environment")
 
     loader = NacosConfigLoader.from_env()
+
     try:
         await loader.initialize()
         await test_config_priority(loader)
@@ -195,6 +201,7 @@ async def main() -> None:
         print("\nOK ALL TESTS PASSED")
     except Exception as e:
         print(f"\nERROR TEST FAILED: {e}")
+
         raise
     finally:
         await cleanup(loader)

@@ -26,6 +26,7 @@ def resolve_project_path(configured_path: str) -> Path:
         Path: The absolute configured path, or the project-root-relative path.
     """
     path: Path = Path(configured_path)
+
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
@@ -46,6 +47,7 @@ def get_env_file() -> Path:
     - prod: config/agent-runner.prod.env
     """
     env_file_override: str | None = os.getenv("AGENT_RUNNER_ENV_FILE")
+
     if env_file_override:
         return Path(env_file_override).expanduser().resolve()
 
@@ -56,6 +58,7 @@ def get_env_file() -> Path:
         "stg": CONFIG_DIR / "agent-runner.stg.env",
         "prod": CONFIG_DIR / "agent-runner.prod.env",
     }
+
     return env_file_map.get(environment, CONFIG_DIR / "agent-runner.env")
 
 
@@ -272,8 +275,10 @@ class ConfigurationManager:
         Returns:
             Settings: The merged settings instance.
         """
+
         if not self._base_settings.nacos_enabled:
             logger.info("Nacos is disabled, using local configuration only")
+
             return self._base_settings
 
         try:
@@ -355,6 +360,7 @@ class ConfigurationManager:
         updates: dict[str, Any] = {}
         for nacos_section, field_map in field_mapping.items():
             section_config: Any = nacos_config.get(nacos_section, {})
+
             if isinstance(section_config, dict):
                 for nacos_key, field_name in field_map.items():
                     if nacos_key in section_config:
@@ -377,6 +383,7 @@ class ConfigurationManager:
         Returns:
             Settings: The current merged settings.
         """
+
         if not self._base_settings.nacos_enabled:
             return self._base_settings
 
@@ -409,10 +416,12 @@ class ConfigurationManager:
             raise ValueError("Nacos mcp.secrets must be a YAML object")
 
         configuration_revision: Any | int = getattr(self._nacos_loader, "configuration_revision", 0)
+
         return McpSecretSnapshot.create(raw_secrets, configuration_revision)
 
     async def close(self) -> None:
         """Release the loader owned by this application-scoped manager."""
+
         if self._nacos_loader is not None:
             await self._nacos_loader.close()
             self._nacos_loader = None
@@ -424,6 +433,7 @@ def get_settings() -> Settings:
     Returns:
         load a fresh file-backed settings snapshot for standalone component use.
     """
+
     return Settings()
 
 
@@ -467,8 +477,10 @@ class ConversationRequest(BaseModel):
     Attributes:
         agent_id: Unique identifier of the agent to invoke.
         version: Optional version of the agent configuration to use.
+
                 If None, the latest version will be loaded.
         conversation_id: Optional conversation ID for continuing an existing conversation.
+
                         If None, a new conversation will be started.
         file_ids: Optional immutable attachment IDs to freeze and prepare before model execution.
         retry_round_number: Failed or cancelled tail Round replaced by this request.
@@ -503,6 +515,7 @@ class ConversationRequest(BaseModel):
         Returns:
             Normalized message whitespace before request-level validation runs.
         """
+
         return value.strip()
 
     @field_validator("file_ids")
@@ -517,10 +530,13 @@ class ConversationRequest(BaseModel):
             Validated duplicate or blank stable attachment IDs supplied by the caller.
         """
         normalized: list[str] = [file_id.strip() for file_id in value]
+
         if any(not file_id for file_id in normalized):
             raise ValueError("file_ids cannot contain blank values")
+
         if len(set(normalized)) != len(normalized):
             raise ValueError("file_ids must be unique")
+
         return normalized
 
     @field_validator("references")
@@ -535,8 +551,10 @@ class ConversationRequest(BaseModel):
             Validated duplicate source Conversations before any downstream RPC.
         """
         source_ids: list[str] = [reference.source_conversation_id for reference in value]
+
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("referenced Conversations must be unique")
+
         return value
 
     @model_validator(mode="after")
@@ -546,10 +564,13 @@ class ConversationRequest(BaseModel):
         Returns:
             The validated request after enforcing text-or-attachment presence.
         """
+
         if not self.message and not self.file_ids:
             raise ValueError("message or file_ids is required")
+
         if any(reference.source_conversation_id == self.conversation_id for reference in self.references):
             raise ValueError("a Conversation cannot reference itself")
+
         return self
 
 

@@ -61,8 +61,10 @@ async def manage_application_lifecycle(
         mcp_schema_cache=mcp_schema_cache,
         mcp_secret_provider=mcp_secret_provider,
     )
+
     if settings.debug_endpoints_enabled or settings.environment in {"local", "dev"}:
         application.include_router(create_debug_router(), prefix="/v1/agent")
+
     try:
         yield
     finally:
@@ -77,6 +79,7 @@ async def redirect_to_docs() -> RedirectResponse:
     Returns:
         Redirect response targeting the interactive API documentation.
     """
+
     return RedirectResponse(url="/docs")
 
 
@@ -86,6 +89,7 @@ async def get_health_status() -> HealthResponse:
     Returns:
         Current service health status.
     """
+
     return HealthResponse(status="healthy")
 
 

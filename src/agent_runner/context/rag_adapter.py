@@ -51,6 +51,7 @@ class RAGAdapter:
         Returns:
             list[RagChunk]: Normalized relevant chunks, or an empty list if retrieval fails.
         """
+
         try:
             response: httpx.Response = await self.client.post(
                 f"{self.base_url}/api/v1/rag/retrieve",
@@ -61,13 +62,17 @@ class RAGAdapter:
                     "top_k": top_k,
                 },
             )
+
             if response.status_code == 200:
                 data: Any = response.json()
+
                 if not isinstance(data, Mapping):
                     return []
                 chunks: Any = data.get("chunks", [])
+
                 if not isinstance(chunks, list):
                     return []
+
                 return [
                     RagChunk(
                         content=str(chunk.get("content", "")),
@@ -77,6 +82,7 @@ class RAGAdapter:
                     if isinstance(chunk, Mapping) and chunk.get("content")
                 ]
             logger.warning(f"Failed to retrieve RAG chunks: {response.status_code}")
+
             return []
         except Exception:
             logger.exception("Error retrieving RAG chunks")

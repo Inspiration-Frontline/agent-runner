@@ -170,6 +170,7 @@ class AttachmentInput:
         Returns:
             build the strongly typed current user message consumed by the context builder.
         """
+
         return Message(
             role="user",
             content=self.current_message,
@@ -328,6 +329,7 @@ class RuntimeOrchestrator:
     - Request cancellation handling
 
     The orchestrator follows a request-scoped lifecycle, creating fresh instances
+
     for each request rather than maintaining long-term state.
 
     Attributes:
@@ -440,12 +442,14 @@ class RuntimeOrchestrator:
             await self._persist_terminal_after_cancellation(
                 conversation_request, user_id, state, RoundStatus.CANCELLED, "Generation cancelled."
             )
+
             raise
 
         except GeneratorExit:
             await self._persist_terminal_after_cancellation(
                 conversation_request, user_id, state, RoundStatus.CANCELLED, "Generation cancelled."
             )
+
             raise
 
         except ConversationBusyError as error:
@@ -493,13 +497,16 @@ class RuntimeOrchestrator:
         conversation_result: ConversationContextReady | PreparationFailure = await self._prepare_conversation_context(
             conversation_request, user_id, state
         )
+
         if isinstance(conversation_result, PreparationFailure):
             yield conversation_result.event
             return
+
         conversation_history: list[Message] = list(conversation_result.messages)
 
         # Step 2: Prepare uploaded files.
         prepared_files: list[PreparedConversationFile] = []
+
         if conversation_request.file_ids:
             try:
                 with self.runtime_tracing.trace_file_preparation(len(conversation_request.file_ids)):
@@ -529,6 +536,7 @@ class RuntimeOrchestrator:
             context_result: AgentContextReady | PreparationFailure = await self._create_agent_context(
                 conversation_request, user_id, state, prepared_files, conversation_history
             )
+
             if isinstance(context_result, PreparationFailure):
                 self.runtime_tracing.record_context_failure(
                     context_span,
@@ -536,11 +544,14 @@ class RuntimeOrchestrator:
                 )
             else:
                 self.runtime_tracing.record_context_ready(context_span, context_result.context, state.agent)
+
         if isinstance(context_result, PreparationFailure):
             yield context_result.event
             return
+
         if state.agent is None:
             raise RuntimeError("Agent context preparation completed without a resolved Agent.")
+
         context: AgentContext = context_result.context
         state.contains_image_input = self._has_image_input(context.current_message)
 
@@ -577,14 +588,17 @@ class RuntimeOrchestrator:
                 if model_result is not None and model_result.terminal_status is not None
                 else None,
             )
+
         if model_result is None:
             raise RuntimeError("Model stream completed without a terminal result.")
 
         terminal_decision: ModelTerminalDecision = await self._handle_model_terminal(
             conversation_request, user_id, state, model_result
         )
+
         if terminal_decision.error_event is not None:
             yield terminal_decision.error_event
+
         if terminal_decision.should_stop:
             return
 
@@ -609,11 +623,13 @@ class RuntimeOrchestrator:
         Returns:
             Prepared request context and its selected Round metadata.
         """
+
         if not getattr(self, "_lock_acquired", False):
             await self.acquire_conversation(conversation_request.conversation_id)
         self.cancellation_registry.register(user_id, conversation_request.conversation_id, state.cancellation_token)
 
         retry_failure: PreparationFailure | None = await self._prepare_round_retry(conversation_request, user_id)
+
         if retry_failure is not None:
             return retry_failure
 
@@ -626,6 +642,7 @@ class RuntimeOrchestrator:
             preflight_result: ConversationPreflight | PreparationFailure = await self._load_conversation_preflight(
                 conversation_request, user_id
             )
+
             if isinstance(preflight_result, PreparationFailure):
                 self.runtime_tracing.record_preflight_failure(
                     preflight_span,
@@ -637,13 +654,16 @@ class RuntimeOrchestrator:
                     preflight_result.next_round_number,
                     len(preflight_result.conversation_history),
                 )
+
         if isinstance(preflight_result, PreparationFailure):
             return preflight_result
+
         preflight: ConversationPreflight = preflight_result
 
         state.next_round_number = preflight.next_round_number
         state.preflight_completed = True
         conversation_history: list[Message] = list(preflight.conversation_history)
+
         if not conversation_request.references:
             return ConversationContextReady(tuple(conversation_history))
 
@@ -651,6 +671,7 @@ class RuntimeOrchestrator:
             reference_result: ReferenceContextReady | PreparationFailure = await self._prepare_reference_context(
                 conversation_request, user_id
             )
+
         if isinstance(reference_result, ReferenceContextReady):
             conversation_history.extend(reference_result.messages)
             return ConversationContextReady(tuple(conversation_history))
@@ -662,6 +683,7 @@ class RuntimeOrchestrator:
             state,
             reference_result.event.error_message or "Conversation reference preparation failed.",
         )
+
         return reference_result
 
     async def _prepare_round_retry(
@@ -683,13 +705,16 @@ class RuntimeOrchestrator:
             A public-safe failure when retry preparation is rejected, otherwise ``None``.
         """
         retry_round_number: int | None = conversation_request.retry_round_number
+
         if retry_round_number is None:
             return None
 
         history: GetConversationRoundHistoryResponse = await self.conversation_client.get_round_history(
             user_id, conversation_request.conversation_id
         )
+
         validation_failure: PreparationFailure | None = self._validate_retry_round(history, retry_round_number)
+
         if validation_failure is not None:
             return validation_failure
 
@@ -698,11 +723,11 @@ class RuntimeOrchestrator:
             conversation_request.conversation_id,
             [retry_round_number],
         )
+
         if response.base is None or not response.base.success or response.data is None or response.data.failures:
             message: str = response.base.message if response.base is not None else "Round retry preparation failed."
-            return PreparationFailure(
-                ErrorEvent(message, error_code="ROUND_RETRY_FAILED", phase="retry_preparation")
-            )
+
+            return PreparationFailure(ErrorEvent(message, error_code="ROUND_RETRY_FAILED", phase="retry_preparation"))
 
         return None
 
@@ -720,13 +745,16 @@ class RuntimeOrchestrator:
         Returns:
             A public-safe validation failure, otherwise ``None``.
         """
+
         if history.base is None or not history.base.success or history.data is None:
             message: str = history.base.message if history.base is not None else "Conversation history RPC failed."
+
             return PreparationFailure(
                 ErrorEvent(message, error_code="CONVERSATION_ACCESS_DENIED", phase="retry_preparation")
             )
 
         active_rounds: list[ConversationRoundSummary] = list(history.data.rounds)
+
         if not active_rounds:
             return PreparationFailure(
                 ErrorEvent(
@@ -737,6 +765,7 @@ class RuntimeOrchestrator:
             )
 
         latest_round: ConversationRoundSummary = max(active_rounds, key=lambda item: item.round_number)
+
         if latest_round.round_number != retry_round_number or latest_round.status not in {
             RoundStatus.FAILED,
             RoundStatus.CANCELLED,
@@ -778,6 +807,7 @@ class RuntimeOrchestrator:
             conversation_history,
             state.attachment_request_id,
         )
+
         if isinstance(build_result, PreparationFailure):
             await self._persist_known_failure(
                 conversation_request,
@@ -785,10 +815,12 @@ class RuntimeOrchestrator:
                 state,
                 build_result.event.error_message or "Context preparation failed.",
             )
+
             return build_result
 
         state.agent = await self.agent_factory.create(build_result.agent_config)
         await self._create_round_checkpoint(conversation_request, user_id, state)
+
         return AgentContextReady(build_result.context)
 
     async def _create_round_checkpoint(
@@ -804,10 +836,13 @@ class RuntimeOrchestrator:
             user_id: Trusted authenticated user identifier.
             state: Request-scoped mutable orchestration or persistence state.
         """
+
         if not hasattr(self.conversation_client, "create_round_checkpoint"):
             return
+
         if state.agent is None:
             raise RuntimeError("Cannot checkpoint an unresolved Agent.")
+
         request: CreateConversationRoundCheckpointRequest = CreateConversationRoundCheckpointRequest(
             user_id=user_id,
             conversation_id=conversation_request.conversation_id,
@@ -832,9 +867,11 @@ class RuntimeOrchestrator:
                 await self.conversation_client.create_round_checkpoint(request)
             )
             self.runtime_tracing.record_round_mutation_result(span, response, "round.checkpoint.created")
+
         if response.base is None or not response.base.success or response.data is None:
             message: str = response.base.message if response.base is not None else "Round checkpoint RPC failed."
             raise RuntimeError(message)
+
         state.checkpoint_created = True
         state.checkpoint_revision = response.data.committed_revision
 
@@ -857,17 +894,22 @@ class RuntimeOrchestrator:
             status: Terminal domain status being recorded or persisted.
             error_message: Client-safe failure or cancellation explanation.
         """
+
         if state.agent is None or not capture.turns:
             return
+
         turns: list[ConversationTurn] = []
         for index, captured in enumerate(capture.turns):
             is_last: bool = index == len(capture.turns) - 1
             turn_status: TurnStatus = TurnStatus.COMPLETED
             turn_error: str = ""
+
             if is_last and status != RoundStatus.COMPLETED:
                 turn_status = TurnStatus.CANCELLED if status == RoundStatus.CANCELLED else TurnStatus.FAILED
                 turn_error = error_message
+
             turns.append(self._to_proto_turn(index + 1, captured, state.agent, turn_status, turn_error))
+
         async with state.revision_lock:
             request: AppendConversationRoundProgressRequest = AppendConversationRoundProgressRequest(
                 user_id=user_id,
@@ -882,8 +924,10 @@ class RuntimeOrchestrator:
                     await self.conversation_client.append_round_progress(request)
                 )
                 self.runtime_tracing.record_round_mutation_result(span, response, "round.progress.appended")
+
             if response.base is None or not response.base.success or response.data is None:
                 message: str = response.base.message if response.base is not None else "Round progress RPC failed."
+
                 raise RuntimeError(message)
             state.checkpoint_revision = response.data.committed_revision
 
@@ -919,13 +963,16 @@ class RuntimeOrchestrator:
                 error_message=error_message,
                 end_time=end_time,
             )
+
             if final_answer is not None:
                 request.final_answer = final_answer
             with self.runtime_tracing.trace_round_finalize(request) as span:
                 response: FinalizeConversationRoundResponse = await self.conversation_client.finalize_round(request)
                 self.runtime_tracing.record_round_mutation_result(span, response, "round.finalized")
+
             if response.base is None or not response.base.success or response.data is None:
                 message: str = response.base.message if response.base is not None else "Round finalize RPC failed."
+
                 raise RuntimeError(message)
             state.checkpoint_revision = response.data.committed_revision
             self._terminal_round_persisted = True
@@ -948,6 +995,7 @@ class RuntimeOrchestrator:
         Returns:
             Whether the terminal outcome was persisted and the request may finish.
         """
+
         if model_result.terminal_status is not None:
             await self._persist_terminal_round(
                 user_id,
@@ -960,6 +1008,7 @@ class RuntimeOrchestrator:
                 capture=model_result.capture,
                 state=state,
             )
+
             return ModelTerminalDecision(should_stop=True)
 
         if model_result.response_text.strip():
@@ -967,6 +1016,7 @@ class RuntimeOrchestrator:
 
         message: str = "The model returned an empty response."
         await self._persist_known_failure(conversation_request, user_id, state, message, model_result.capture)
+
         return ModelTerminalDecision(
             should_stop=True,
             error_event=ErrorEvent(message, error_code="EMPTY_MODEL_RESPONSE", phase="model"),
@@ -990,9 +1040,12 @@ class RuntimeOrchestrator:
         Returns:
             Stream containing persistence progress and the final success event.
         """
+
         if state.agent is None:
             raise RuntimeError("A completed model response has no resolved Agent.")
+
         yield SavingEvent()
+
         try:
             if state.checkpoint_created:
                 await self._append_round_capture(
@@ -1032,10 +1085,13 @@ class RuntimeOrchestrator:
         except Exception as error:
             logger.exception("Failed to persist completed round")
             yield ErrorEvent(str(error), error_code="PERSISTENCE_FAILED", phase="persistence")
+
             return
+
         if saved is not None and (saved.base is None or not saved.base.success):
             message: str = saved.base.message if saved.base is not None else "Round persistence RPC failed."
             yield ErrorEvent(message, error_code="PERSISTENCE_FAILED", phase="persistence")
+
             return
 
         yield PersistedEvent()
@@ -1087,6 +1143,7 @@ class RuntimeOrchestrator:
             status: Terminal domain status being recorded or persisted.
             message: Provider-neutral message to convert or persist.
         """
+
         if not state.preflight_completed or state.next_round_number is None:
             return
         await self._persist_terminal_round(
@@ -1126,6 +1183,7 @@ class RuntimeOrchestrator:
             self._persist_unexpected_terminal(conversation_request, user_id, state, status, message)
         )
         current_task: asyncio.Task[None] | None = asyncio.current_task()
+
         try:
             await asyncio.shield(persistence_task)
         except asyncio.CancelledError:
@@ -1151,6 +1209,7 @@ class RuntimeOrchestrator:
         """
         self.cancellation_registry.unregister(user_id, conversation_request.conversation_id, state.cancellation_token)
         await self._cleanup(state.cancellation_token)
+
         if getattr(self, "_lock_acquired", False):
             await self.execution_lock.release()
             self._lock_acquired = False
@@ -1165,8 +1224,10 @@ class RuntimeOrchestrator:
         Returns:
             Preflight-selected Round number for the request.
         """
+
         if state.next_round_number is None:
             raise RuntimeError("Round number is unavailable before successful preflight.")
+
         return state.next_round_number
 
     async def _stream_model(
@@ -1218,20 +1279,21 @@ class RuntimeOrchestrator:
                     terminal_status = RoundStatus.CANCELLED
                     terminal_error = "Generation cancelled."
                     break
+
                 if cancellation_token.is_cancelled():
                     terminal_status = RoundStatus.CANCELLED
                     terminal_error = "Generation cancelled."
                     break
 
                 converted: StreamEvent = self._convert_event(event)
+
                 if isinstance(converted, ErrorEvent):
-                    converted = self._normalize_model_error(
-                        converted, self._has_image_input(context.current_message)
-                    )
+                    converted = self._normalize_model_error(converted, self._has_image_input(context.current_message))
                     terminal_status = RoundStatus.FAILED
                     terminal_error = converted.error_message or "Model execution failed."
                     yield converted
                     break
+
                 if isinstance(converted, TokenDeltaEvent):
                     response_text += converted.content or ""
                 elif isinstance(converted, UsageEvent):
@@ -1255,6 +1317,7 @@ class RuntimeOrchestrator:
 
         capture: AgentRunCapture = getattr(self.openai_runtime, "last_capture", AgentRunCapture())
         disconnected: bool = await http_request.is_disconnected()
+
         if terminal_status is not None or cancellation_token.is_cancelled() or disconnected:
             yield ModelStreamComplete(
                 response_text=response_text,
@@ -1263,6 +1326,7 @@ class RuntimeOrchestrator:
                 terminal_status=terminal_status or RoundStatus.CANCELLED,
                 terminal_error=terminal_error or "Generation cancelled.",
             )
+
             return
 
         if not capture.turns:
@@ -1334,26 +1398,31 @@ class RuntimeOrchestrator:
                 attachment_request_id,
                 conversation_request.file_ids,
             )
+
             if prepared.base is None or not prepared.base.success or prepared.data is None:
                 message: str = prepared.base.message if prepared.base is not None else "File preparation RPC failed."
                 raise FilePreparationError(message, "FILE_PREPARATION_FAILED")
 
             prepared_files: list[PreparedConversationFile] = list(prepared.data.files)
+
             if prepared.data.any_failed:
                 raise FilePreparationError(
                     self._get_file_preparation_error(prepared_files),
                     "FILE_PREPARATION_FAILED",
                 )
+
             if prepared.data.all_ready:
                 yield FilePreparationComplete(tuple(prepared_files))
                 return
 
             elapsed: float = monotonic() - preparation_started
+
             if elapsed >= settings.file_preparation_timeout_seconds:
                 raise FilePreparationError(
                     "File preparation timed out. The files may still finish processing; retry the request later.",
                     "FILE_PREPARATION_TIMEOUT",
                 )
+
             if not processing_event_emitted:
                 pending_files: int = sum(file.status != ConversationFileStatus.READY for file in prepared_files)
                 yield AttachmentProcessingEvent(pending_files)
@@ -1387,6 +1456,7 @@ class RuntimeOrchestrator:
             conversation_request.conversation_id,
             attachment_request_id,
         )
+
         settings: Settings = self.settings
         attachment_input: AttachmentInput = self._build_attachment_input(conversation_request, prepared_files)
         agent_config: AgentConfig = await self.config_loader.load(settings.default_agent_id)
@@ -1412,6 +1482,7 @@ class RuntimeOrchestrator:
         )
         maximum_input_tokens: int = max(1, settings.max_context_tokens - settings.max_output_tokens)
         estimated_input_tokens: int = len(context_text) // 4
+
         if estimated_input_tokens > maximum_input_tokens:
             return PreparationFailure(
                 ErrorEvent(
@@ -1450,9 +1521,12 @@ class RuntimeOrchestrator:
         history: GetConversationRoundHistoryResponse = await self.conversation_client.get_round_history(
             user_id, conversation_request.conversation_id
         )
+
         if history.base is None or not history.base.success:
             message: str = history.base.message if history.base is not None else "Conversation history RPC failed."
+
             return PreparationFailure(ErrorEvent(message, error_code="CONVERSATION_ACCESS_DENIED", phase="preflight"))
+
         if history.data is None:
             return PreparationFailure(
                 ErrorEvent(
@@ -1464,15 +1538,19 @@ class RuntimeOrchestrator:
 
         conversation_history: list[Message] = []
         replay_round_number: int | None = self._select_replay_round_number(history.data)
+
         if replay_round_number is not None:
             replay: GetConversationReplayResponse = await self.conversation_client.get_model_context(
                 user_id,
                 conversation_request.conversation_id,
                 replay_round_number,
             )
+
             if replay.base is None or not replay.base.success:
                 message = replay.base.message if replay.base is not None else "Conversation replay RPC failed."
+
                 return PreparationFailure(ErrorEvent(message, error_code="REPLAY_FAILED", phase="preflight"))
+
             if replay.data is None:
                 return PreparationFailure(
                     ErrorEvent(
@@ -1498,8 +1576,10 @@ class RuntimeOrchestrator:
         Returns:
             Latest active Round number, or ``None`` when no replay is needed.
         """
+
         if history.rounds:
             return max(round_item.round_number for round_item in history.rounds)
+
         return None
 
     async def _prepare_reference_context(
@@ -1521,10 +1601,12 @@ class RuntimeOrchestrator:
             conversation_request.conversation_id,
             self._to_proto_references(conversation_request),
         )
+
         if response.base is None or not response.base.success:
             message: str = (
                 response.base.message if response.base is not None else "Conversation reference preparation failed."
             )
+
             return PreparationFailure(
                 ErrorEvent(
                     message,
@@ -1567,8 +1649,10 @@ class RuntimeOrchestrator:
         turns: list[ConversationTurn] = [
             self._to_proto_turn(index + 1, turn, agent) for index, turn in enumerate(capture.turns)
         ]
+
         if not turns:
             raise ValueError("A completed Agent run did not capture any model Turns.")
+
         return SaveConversationRoundRequest(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -1620,6 +1704,7 @@ class RuntimeOrchestrator:
             )
             for definition in captured.tools
         ]
+
         request: LlmRequest = LlmRequest(
             messages=[self._captured_message_to_proto(message) for message in captured.request_messages],
             tools=tool_definitions,
@@ -1629,12 +1714,14 @@ class RuntimeOrchestrator:
         response_tool_calls: list[ToolCall] = [
             self._captured_tool_call_to_proto(call) for call in captured.response_tool_calls
         ]
+
         if response_tool_calls:
             finish_reason: str = "tool_calls"
         elif captured.completion_tokens >= agent.max_output_tokens:
             finish_reason = "length"
         else:
             finish_reason = "stop"
+
         response: LlmResponse = LlmResponse(
             message=AssistantMessage(content=captured.response_content, tool_calls=response_tool_calls),
             finish_reason=finish_reason,
@@ -1645,6 +1732,7 @@ class RuntimeOrchestrator:
             ),
             raw_response=captured.raw_response,
         )
+
         executions: list[ToolCallExecution] = [
             ToolCallExecution(
                 tool_call_id=execution.tool_call_id,
@@ -1660,6 +1748,7 @@ class RuntimeOrchestrator:
             )
             for execution in captured.tool_executions
         ]
+
         return ConversationTurn(
             turn_number=turn_number,
             request=request,
@@ -1690,6 +1779,7 @@ class RuntimeOrchestrator:
         Returns:
             Typed capture message for the compatibility fallback path.
         """
+
         return CapturedMessage(
             role=message.role,
             content=message.content,
@@ -1711,6 +1801,7 @@ class RuntimeOrchestrator:
         tool_calls: list[ToolCall] = [self._runtime_tool_call_to_proto(call) for call in message.tool_calls]
         content_parts: list[ContentPart] = self._captured_content_parts_to_proto(message.capture_content)
         tool_call_id: str = message.tool_call_id if message.tool_call_id is not None else ""
+
         return LlmConversationMessage(
             role=role,
             content="" if content_parts else message.content,
@@ -1730,6 +1821,7 @@ class RuntimeOrchestrator:
             Stable text parts and ``agentbreaker-file://`` references suitable for persistence.
         """
         parts: list[ContentPart] = []
+
         for item in content:
             if isinstance(item, CaptureTextPart):
                 parts.append(ContentPart(type="text", text=item.text))
@@ -1743,6 +1835,7 @@ class RuntimeOrchestrator:
                     ),
                 )
             )
+
         return parts
 
     @staticmethod
@@ -1755,6 +1848,7 @@ class RuntimeOrchestrator:
         Returns:
             Typed persistence Tool call.
         """
+
         return ToolCall(
             id=call.tool_call_id,
             type="function",
@@ -1771,6 +1865,7 @@ class RuntimeOrchestrator:
         Returns:
             convert a provider-neutral replay Tool Call into the persistence protobuf type.
         """
+
         return ToolCall(
             id=call.call_id,
             type=call.call_type,
@@ -1803,11 +1898,14 @@ class RuntimeOrchestrator:
             capture: Partial model/Tool evidence, if available.
             state: Request-scoped mutable orchestration or persistence state.
         """
+
         if getattr(self, "_terminal_round_persisted", False):
             return
+
         if state is not None and state.checkpoint_created:
             try:
                 effective_capture: AgentRunCapture = capture or AgentRunCapture()
+
                 await self._append_round_capture(
                     user_id,
                     conversation_request,
@@ -1816,6 +1914,7 @@ class RuntimeOrchestrator:
                     status,
                     error_message,
                 )
+
                 await self._finalize_checkpoint(
                     user_id,
                     conversation_request,
@@ -1826,17 +1925,22 @@ class RuntimeOrchestrator:
                 )
             except Exception:
                 logger.exception("Failed to finalize incremental terminal Round")
+
             return
         turns: list[ConversationTurn] = []
+
         if agent is not None and capture is not None:
             for index, captured in enumerate(capture.turns):
                 is_last: bool = index == len(capture.turns) - 1
                 turn_status: TurnStatus = TurnStatus.COMPLETED
                 turn_error: str = ""
+
                 if is_last and status != RoundStatus.COMPLETED:
                     turn_status = TurnStatus.CANCELLED if status == RoundStatus.CANCELLED else TurnStatus.FAILED
                     turn_error = error_message
+
                 turns.append(self._to_proto_turn(index + 1, captured, agent, turn_status, turn_error))
+
         request: SaveConversationRoundRequest = SaveConversationRoundRequest(
             user_id=user_id,
             conversation_id=conversation_request.conversation_id,
@@ -1850,8 +1954,10 @@ class RuntimeOrchestrator:
             references=self._to_proto_references(conversation_request),
             trace_id=self.runtime_tracing.get_current_trace_id(),
         )
+
         try:
             response: SaveConversationRoundResponse = await self._save_round(request)
+
             if response.base is None or not response.base.success:
                 logger.error("Failed to persist terminal round: %s", response.base)
             else:
@@ -1871,6 +1977,7 @@ class RuntimeOrchestrator:
         with self.runtime_tracing.trace_round_persistence(request) as span:
             response: SaveConversationRoundResponse = await self.conversation_client.save_round(request)
             self.runtime_tracing.record_round_persistence_result(span, response)
+
             return response
 
     def _to_context_messages(self, messages: list[LlmConversationMessage]) -> list[Message]:
@@ -1890,11 +1997,13 @@ class RuntimeOrchestrator:
             MessageRole.DEVELOPER: "developer",
         }
         context_messages: list[Message] = []
+
         for message in messages:
             if message.role not in role_names:
                 continue
 
             runtime_tool_calls: list[RuntimeToolCall] = []
+
             for tool_call in message.tool_calls:
                 if tool_call.function is None:
                     raise ValueError(f"Replay Tool Call {tool_call.id!r} is missing its function payload.")
@@ -1909,10 +2018,12 @@ class RuntimeOrchestrator:
             tool_calls: tuple[RuntimeToolCall, ...] = tuple(runtime_tool_calls)
             content: str = message.content
             capture_content: tuple[CaptureContentPart, ...] = ()
+
             if message.content_parts:
                 capture_content = tuple(
                     self._proto_content_part_to_capture_part(part) for part in message.content_parts
                 )
+
                 content = "\n".join(part.text for part in capture_content if isinstance(part, CaptureTextPart))
 
             context_messages.append(
@@ -1924,6 +2035,7 @@ class RuntimeOrchestrator:
                     tool_call_id=message.tool_call_id or None,
                 )
             )
+
         return context_messages
 
     @staticmethod
@@ -1945,18 +2057,22 @@ class RuntimeOrchestrator:
                 ),
             )
         ]
+
         role_labels: dict[MessageRole, str] = {
             MessageRole.USER: "User",
             MessageRole.ASSISTANT: "Assistant",
         }
+
         for reference in references:
             source_boundary: ProtoConversationReference | None = reference.reference
+
             if source_boundary is None:
                 raise ValueError("Prepared Conversation reference is missing its frozen source boundary.")
 
             transcript: str = "\n\n".join(
                 f"{role_labels.get(item.role, 'Message')}: {item.content}" for item in reference.context_messages
             )
+
             messages.append(
                 Message(
                     role="user",
@@ -1968,6 +2084,7 @@ class RuntimeOrchestrator:
                     ),
                 )
             )
+
         return messages
 
     @staticmethod
@@ -1980,6 +2097,7 @@ class RuntimeOrchestrator:
         Returns:
             Proto references preserving user-provided order and boundaries.
         """
+
         return [
             ProtoConversationReference(
                 source_conversation_id=reference.source_conversation_id,
@@ -2007,6 +2125,7 @@ class RuntimeOrchestrator:
             RuntimeError: If an image reference cannot be authorized or signed.
         """
         image_file_ids: list[str] = []
+
         for message in messages:
             for part in message.capture_content:
                 if not isinstance(part, CaptureFilePart):
@@ -2024,6 +2143,7 @@ class RuntimeOrchestrator:
                 f"{request_id}-replay-{offset // 5}",
                 batch,
             )
+
             if (
                 response.base is None
                 or not response.base.success
@@ -2031,6 +2151,7 @@ class RuntimeOrchestrator:
                 or not response.data.all_ready
             ):
                 raise RuntimeError("A historical image attachment could not be resolved for replay.")
+
             for file in response.data.files:
                 signed_urls[file.file_id] = self._get_model_input_url(file)
 
@@ -2039,6 +2160,7 @@ class RuntimeOrchestrator:
                 continue
 
             model_parts: list[ModelContentPart] = []
+
             for part in message.capture_content:
                 if isinstance(part, CaptureTextPart):
                     model_parts.append(ModelTextPart(text=part.text))
@@ -2052,6 +2174,7 @@ class RuntimeOrchestrator:
                             detail=part.detail,
                         )
                     )
+
             message.model_content = tuple(model_parts)
 
     @staticmethod
@@ -2073,16 +2196,19 @@ class RuntimeOrchestrator:
             One object containing provider-neutral model parts, durable capture parts, searchable
             text, and the attachment-only language instruction.
         """
+
         if not prepared_files:
             return AttachmentInput(conversation_request.message, (), ())
 
         model_parts: list[ModelContentPart] = []
         capture_parts: list[CaptureContentPart] = []
+
         if conversation_request.message:
             model_parts.append(ModelTextPart(text=conversation_request.message))
             capture_parts.append(CaptureTextPart(text=conversation_request.message))
 
         search_texts: list[str] = [conversation_request.message] if conversation_request.message else []
+
         for file in prepared_files:
             if file.kind == ConversationFileKind.IMAGE:
                 model_parts.append(
@@ -2105,6 +2231,7 @@ class RuntimeOrchestrator:
             search_texts.append(file_text)
 
         instruction: str = ""
+
         if not conversation_request.message:
             instruction = (
                 "The user sent attachments without visible text. Analyze the supplied files and respond in Simplified Chinese."
@@ -2112,6 +2239,7 @@ class RuntimeOrchestrator:
                 else "The user sent attachments without visible text. Analyze the supplied files and respond in English."
             )
         current_message: str = "\n\n".join(text for text in search_texts if text)
+
         return AttachmentInput(
             current_message=current_message,
             model_content=tuple(model_parts),
@@ -2129,11 +2257,14 @@ class RuntimeOrchestrator:
         Returns:
             Scalar text for ordinary messages, or mutually exclusive content parts for attachments.
         """
+
         if not conversation_request.file_ids:
             return UserRequest(content=conversation_request.message)
         parts: list[ContentPart] = []
+
         if conversation_request.message:
             parts.append(ContentPart(type="text", text=conversation_request.message))
+
         for file_id in conversation_request.file_ids:
             parts.append(
                 ContentPart(
@@ -2141,6 +2272,7 @@ class RuntimeOrchestrator:
                     file_url=FileUrl(url=f"agentbreaker-file://{file_id}", detail="high"),
                 )
             )
+
         return UserRequest(content_parts=parts)
 
     def _proto_content_part_to_capture_part(self, part: ContentPart) -> CaptureContentPart:
@@ -2152,14 +2284,17 @@ class RuntimeOrchestrator:
         Returns:
             Strongly typed durable content consumed by replay image resolution.
         """
+
         if part.type == "text":
             return CaptureTextPart(text=part.text)
 
         file_url: FileUrl | None = part.file_url
         stable_url: str = file_url.url if file_url is not None else ""
         file_id: str | None = self._get_stable_file_id(stable_url)
+
         if not file_id:
             raise ValueError("Persisted file content must use an AgentBreaker stable reference.")
+
         return CaptureFilePart(
             file_id=file_id,
             detail=self._get_image_detail(file_url.detail if file_url is not None else ""),
@@ -2176,6 +2311,7 @@ class RuntimeOrchestrator:
             The fixed high-detail policy for uploaded images.
         """
         del detail
+
         return "high"
 
     @staticmethod
@@ -2191,8 +2327,10 @@ class RuntimeOrchestrator:
         Raises:
             FilePreparationError: If Conversation Manager did not provide the required derivative.
         """
+
         if file.model_input_url:
             return file.model_input_url
+
         raise FilePreparationError(
             f"{file.original_filename}: The sanitized image input is not available.",
             "FILE_PREPARATION_FAILED",
@@ -2209,6 +2347,7 @@ class RuntimeOrchestrator:
             Stable ID when the trusted prefix is present; otherwise ``None``.
         """
         prefix: str = "agentbreaker-file://"
+
         return url[len(prefix) :] if url.startswith(prefix) else None
 
     @staticmethod
@@ -2221,6 +2360,7 @@ class RuntimeOrchestrator:
         Returns:
             Filename-qualified diagnostic suitable for the browser.
         """
+
         for file in files:
             if file.status in {
                 ConversationFileStatus.FAILED,
@@ -2230,7 +2370,9 @@ class RuntimeOrchestrator:
                 ConversationFileStatus.EXPIRED,
             }:
                 detail: str = file.error_message or "The file is not available."
+
                 return f"{file.original_filename}: {detail}"
+
         return "One or more files could not be prepared."
 
     @staticmethod
@@ -2243,10 +2385,13 @@ class RuntimeOrchestrator:
         Returns:
             Poll delay in seconds.
         """
+
         if elapsed_seconds < 5:
             return 1.0
+
         if elapsed_seconds < 30:
             return 2.0
+
         return 5.0
 
     @staticmethod
@@ -2281,6 +2426,7 @@ class RuntimeOrchestrator:
 
         if isinstance(normalized_event, ModelTokenDelta):
             return TokenDeltaEvent(content=normalized_event.content)
+
         if isinstance(normalized_event, ModelToolStarted):
             try:
                 parsed_arguments: Any = json.loads(normalized_event.arguments_json)
@@ -2292,30 +2438,37 @@ class RuntimeOrchestrator:
                 if isinstance(parsed_arguments, dict)
                 else {"raw_arguments": normalized_event.arguments_json}
             )
+
             return ToolStartEvent(
                 tool=normalized_event.tool_name,
                 tool_call_id=normalized_event.tool_call_id,
                 tool_args=tool_args,
             )
+
         if isinstance(normalized_event, ModelToolCompleted):
             result: object = normalized_event.result
+
             if isinstance(result, str):
                 with suppress(json.JSONDecodeError):
                     result = json.loads(result)
+
             return ToolResultEvent(
                 tool=normalized_event.tool_name,
                 tool_call_id=normalized_event.tool_call_id,
                 tool_result=result,
                 tool_status=normalized_event.status,
             )
+
         if isinstance(normalized_event, ModelUsage):
             return UsageEvent(
                 prompt_tokens=normalized_event.prompt_tokens,
                 completion_tokens=normalized_event.completion_tokens,
                 total_tokens=normalized_event.total_tokens,
             )
+
         if isinstance(normalized_event, ModelError):
             return ErrorEvent(error_message=normalized_event.message)
+
         raise TypeError(f"Unsupported model stream event: {type(normalized_event).__name__}")
 
     @staticmethod
@@ -2328,6 +2481,7 @@ class RuntimeOrchestrator:
         Returns:
             ``True`` when at least one transient provider part is an image.
         """
+
         return any(isinstance(part, ModelImagePart) for part in message.model_content)
 
     @staticmethod
@@ -2341,8 +2495,10 @@ class RuntimeOrchestrator:
         Returns:
             Original text-only error or the stable image-model availability error.
         """
+
         if not contains_image_input:
             return error
+
         return ErrorEvent(
             error_message=IMAGE_MODEL_UNAVAILABLE_MESSAGE,
             error_code="IMAGE_MODEL_UNAVAILABLE",
@@ -2360,14 +2516,17 @@ class RuntimeOrchestrator:
             convert legacy runtime dictionaries at the adapter boundary for older test doubles.
         """
         event_type: object = event.get("type")
+
         if event_type == "token_delta":
             return ModelTokenDelta(str(event.get("content", "")))
+
         if event_type == "tool_start":
             return ModelToolStarted(
                 tool_name=str(event.get("tool", "")),
                 tool_call_id=str(event.get("tool_call_id", "")),
                 arguments_json=str(event.get("args", "{}")),
             )
+
         if event_type == "tool_result":
             return ModelToolCompleted(
                 tool_name=str(event.get("tool", "")),
@@ -2375,14 +2534,17 @@ class RuntimeOrchestrator:
                 result=event.get("tool_result", event.get("result")),
                 status=str(event.get("tool_status", "COMPLETED")),
             )
+
         if event_type == "usage":
             return ModelUsage(
                 prompt_tokens=RuntimeOrchestrator._get_legacy_int(event, "prompt_tokens"),
                 completion_tokens=RuntimeOrchestrator._get_legacy_int(event, "completion_tokens"),
                 total_tokens=RuntimeOrchestrator._get_legacy_int(event, "total_tokens"),
             )
+
         if event_type == "error":
             return ModelError(str(event.get("error_message", event.get("content", ""))))
+
         raise TypeError(f"Unsupported legacy model event type: {event_type!r}")
 
     @staticmethod
@@ -2397,15 +2559,19 @@ class RuntimeOrchestrator:
             Integer value when the event contains one, otherwise the supplied default.
         """
         value: object = event.get(key, 0)
+
         if isinstance(value, bool):
             raise TypeError(f"Legacy event field {key!r} must be an integer, not bool.")
+
         if isinstance(value, int):
             return value
+
         if isinstance(value, str):
             try:
                 return int(value)
             except ValueError as error:
                 raise TypeError(f"Legacy event field {key!r} must be an integer.") from error
+
         raise TypeError(f"Legacy event field {key!r} must be an integer.")
 
     async def _cleanup(self, cancellation_token: CancellationToken) -> None:
@@ -2435,4 +2601,5 @@ def _get_epoch_millis() -> int:
     Returns:
         Current epoch timestamp in milliseconds.
     """
+
     return time_ns() // 1_000_000

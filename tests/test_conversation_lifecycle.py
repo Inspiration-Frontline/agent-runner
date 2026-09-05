@@ -89,6 +89,7 @@ class FakeConversationClient:
         end_round_number: int,
     ) -> GetConversationReplayResponse:
         assert end_round_number == 1
+
         return GetConversationReplayResponse(
             base=ResponseBase(code=0, success=True),
             data=ConversationReplay(
@@ -103,6 +104,7 @@ class FakeConversationClient:
 
     async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         self.saved_requests.append(request)
+
         return SaveConversationRoundResponse(base=ResponseBase(code=0, success=True))
 
     async def prepare_references(
@@ -118,6 +120,7 @@ class FakeConversationClient:
                 source_end_round_number=4,
             )
         ]
+
         return PrepareConversationReferencesResponse(
             base=ResponseBase(code=0, success=True),
             data=[
@@ -180,6 +183,7 @@ class RetryConversationClient(FakeConversationClient):
         """
         self.history_calls += 1
         rounds: list[ConversationRoundSummary] = []
+
         if self.history_calls == 1:
             rounds.append(
                 ConversationRoundSummary(
@@ -215,6 +219,7 @@ class RetryConversationClient(FakeConversationClient):
             Successful deletion details or a typed business rejection.
         """
         self.deleted_round_numbers.append(round_numbers)
+
         if self.delete_succeeds:
             return DeleteRoundsResponse(
                 base=ResponseBase(code=0, success=True),
@@ -248,6 +253,7 @@ class CapturingContextBuilder:
 
     async def build(self, **kwargs: Any) -> AgentContext:
         self.history = kwargs["conversation_history"]
+
         return AgentContext(
             agent_config=kwargs["agent_config"],
             system_prompt="latest instructions",
@@ -640,4 +646,5 @@ def _orchestrator(
     harness.cancellation_registry = ConversationCancellationRegistry()
     orchestrator._lock_acquired = False
     orchestrator._terminal_round_persisted = False
+
     return orchestrator, client, context_builder

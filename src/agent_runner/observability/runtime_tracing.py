@@ -40,6 +40,7 @@ class RuntimeTracing:
         Returns:
             Active trace ID used for durable request correlation, or an empty string.
         """
+
         return current_trace_id()
 
     @contextmanager
@@ -136,6 +137,7 @@ class RuntimeTracing:
         span.set_attribute("context.rag_chunk_count", len(context.rag_chunks))
         span.set_attribute("context.tool_count", len(context.tool_specs))
         span.set_attribute("context.current_message_chars", len(context.current_message.content))
+
         if agent is not None:
             span.set_attribute("agent.id", agent.agent_id)
             span.set_attribute("agent.name", agent.name)
@@ -157,9 +159,11 @@ class RuntimeTracing:
             turns: Ordered model turns whose usage and Tool counts are summarized.
             terminal_status: Domain terminal status value used by the operation.
         """
+
         if response_text is None:
             span.set_attribute("agent.status", "missing_result")
             span.add_event("agent.result.missing")
+
             return
         span.set_attribute("agent.status", terminal_status or "COMPLETED")
         span.set_attribute("agent.response_chars", len(response_text))
@@ -336,6 +340,7 @@ class RuntimeTracing:
         success: bool = response.base is not None and response.base.success
         span.set_attribute("rpc.success", success)
         span.set_attribute("rpc.code", response.base.code if response.base is not None else -1)
+
         if response.data is not None:
             span.set_attribute("conversation.committed_revision", response.data.committed_revision)
             span.set_attribute("conversation.idempotent_replay", response.data.idempotent_replay)

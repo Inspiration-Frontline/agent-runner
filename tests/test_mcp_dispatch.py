@@ -70,6 +70,7 @@ def pooled_transport(call_tool: Any) -> PooledMcpConnection:
     transport._name = "fixture"
     transport.call_tool = call_tool
     manager = SimpleNamespace(cleanup_all=lambda: asyncio.sleep(0))
+
     return PooledMcpConnection(
         McpConnectionKey("fixture", "endpoint-fingerprint", "fingerprint", 1),
         transport,
@@ -90,6 +91,7 @@ async def test_durable_server_commits_intent_before_remote_call(monkeypatch: pyt
         meta: dict[str, Any] | None = None,
     ) -> object:
         assert recorder.events[0][0] == "before"
+
         return SimpleNamespace(isError=False)
 
     connection = pooled_transport(call_remote)
@@ -127,6 +129,7 @@ async def test_durable_server_records_unknown_without_retry(monkeypatch: pytest.
     ) -> object:
         nonlocal calls
         calls += 1
+
         raise TimeoutError("response path lost")
 
     connection = pooled_transport(call_remote)
@@ -162,6 +165,7 @@ async def test_durable_server_records_cancelled_dispatch_before_propagating_canc
     ) -> object:
         remote_started.set()
         await release_remote.wait()
+
         return SimpleNamespace(isError=False)
 
     server = DurableMcpServer(
@@ -229,6 +233,7 @@ async def test_durable_server_redacts_credential_bearing_http_failure() -> None:
     ) -> object:
         request = httpx.Request("POST", f"https://example.test/mcp?api_key={secret}")
         response = httpx.Response(401, request=request)
+
         raise httpx.HTTPStatusError("rejected", request=request, response=response)
 
     server = DurableMcpServer(
@@ -259,6 +264,7 @@ async def test_schema_cache_refresh_is_single_flight() -> None:
         nonlocal calls
         calls += 1
         await asyncio.sleep(0)
+
         return [McpTool(name="echo", inputSchema={"type": "object"})]
 
     results = await asyncio.gather(*(cache.get("fixture", 60, load) for _ in range(5)))
@@ -285,6 +291,7 @@ async def test_durable_server_reuses_request_schema_when_cross_request_cache_is_
     ) -> list[McpTool]:
         nonlocal calls
         calls += 1
+
         return [McpTool(name="echo", inputSchema={"type": "object"})]
 
     connection = pooled_transport(call_remote)
@@ -351,6 +358,7 @@ class FakeProgressClient:
         self, request: AppendConversationRoundProgressRequest
     ) -> AppendConversationRoundProgressResponse:
         self.requests.append(request)
+
         return AppendConversationRoundProgressResponse(
             base=ResponseBase(code=0, success=True),
             data=ConversationRoundMutationResult(committed_revision=len(self.requests)),

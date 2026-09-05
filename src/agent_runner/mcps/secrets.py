@@ -27,10 +27,12 @@ def validate_secret_template(value: str, require_reference: bool = False) -> str
         ValueError: The template has no required reference or contains malformed Secret syntax.
     """
     references: tuple[re.Match[str], ...] = tuple(SECRET_REFERENCE_PATTERN.finditer(value))
+
     if require_reference and not references:
         raise ValueError("MCP credential templates must contain a ${secret:NAME} reference")
 
     remaining: str = SECRET_REFERENCE_PATTERN.sub("", value)
+
     if "${secret:" in remaining:
         raise ValueError("MCP credential template contains an invalid Secret reference")
 
@@ -46,6 +48,7 @@ def has_secret_reference(value: str) -> bool:
     Returns:
         ``True`` when the validated template contains at least one Secret reference.
     """
+
     return SECRET_REFERENCE_PATTERN.search(value) is not None
 
 
@@ -86,8 +89,10 @@ class McpSecretSnapshot:
         for name, value in values.items():
             if SECRET_NAME_PATTERN.fullmatch(name) is None:
                 raise ValueError(f"MCP Secret name is invalid: {name}")
+
             if not isinstance(value, str):
                 raise ValueError(f"MCP Secret value must be a string: {name}")
+
             normalized[name] = value
 
         return cls(MappingProxyType(normalized), configuration_revision, use_environment_fallback)
@@ -105,13 +110,16 @@ class McpSecretSnapshot:
             ValueError: The reference is malformed or the requested Secret is unavailable.
         """
         match: re.Match[str] | None = SECRET_REFERENCE_PATTERN.fullmatch(reference)
+
         if match is None:
             raise ValueError("MCP credentials must use ${secret:NAME} references")
 
         secret_name: str = match.group(1)
         value: str | None = self.values.get(secret_name)
+
         if not value and self.use_environment_fallback:
             value = os.getenv(secret_name)
+
         if not value:
             raise McpSecretUnavailableError(f"MCP secret is unavailable: {secret_name}")
 
@@ -138,6 +146,7 @@ class EnvironmentSecretProvider:
         Returns:
             return an empty snapshot whose resolver falls back to process environment variables.
         """
+
         return McpSecretSnapshot.create({}, configuration_revision=0)
 
 
@@ -162,6 +171,7 @@ class ConfigurationSecretProvider:
         Returns:
             Latest atomically published configuration snapshot.
         """
+
         return self._snapshot_supplier()
 
 
@@ -181,4 +191,5 @@ class SecretTemplateResolver:
             resolve a validated URL or Header template without retaining intermediate values.
         """
         validate_secret_template(template)
+
         return SECRET_REFERENCE_PATTERN.sub(lambda match: self.snapshot.resolve(match.group(0)), template)

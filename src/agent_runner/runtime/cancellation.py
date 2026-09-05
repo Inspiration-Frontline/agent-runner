@@ -34,9 +34,11 @@ class CancellationToken:
         Returns:
             ``None``.  Call :meth:`is_cancelled` when the caller needs to inspect the state.
         """
+
         if self._cancelled:
             return
         self._cancelled = True
+
         for callback in self._callbacks:
             if asyncio.iscoroutinefunction(callback):
                 asyncio.create_task(callback())
@@ -49,6 +51,7 @@ class CancellationToken:
         Returns:
             ``True`` after :meth:`cancel` has been signalled; otherwise ``False``.
         """
+
         return self._cancelled
 
     def add_callback(self, callback: CancellationCallback) -> None:
@@ -64,12 +67,15 @@ class CancellationToken:
         Returns:
             ``None``.  The callback is retained until cancellation or explicit removal.
         """
+
         if self._cancelled:
             if asyncio.iscoroutinefunction(callback):
                 asyncio.create_task(callback())
             else:
                 callback()
+
             return
+
         self._callbacks.append(callback)
 
     def remove_callback(self, callback: CancellationCallback) -> None:
@@ -84,6 +90,7 @@ class CancellationToken:
         Returns:
             ``None``.
         """
+
         if callback in self._callbacks:
             self._callbacks.remove(callback)
 
@@ -122,6 +129,7 @@ class CancellationManager:
         effective_token_id: str = token_id or str(uuid.uuid4())
         token: CancellationToken = CancellationToken()
         self._tokens[effective_token_id] = token
+
         return token
 
     def get_token(self, token_id: str) -> CancellationToken | None:
@@ -133,6 +141,7 @@ class CancellationManager:
         Returns:
             Token when still active, otherwise ``None``.
         """
+
         return self._tokens.get(token_id)
 
     def cancel_token(self, token_id: str) -> None:
@@ -142,6 +151,7 @@ class CancellationManager:
             token_id: Previously assigned token ID.
         """
         token: CancellationToken | None = self._tokens.get(token_id)
+
         if token:
             token.cancel()
 
@@ -160,6 +170,7 @@ class CancellationManager:
         Args:
             token_id: Previously assigned token ID.
         """
+
         if token_id in self._tokens:
             del self._tokens[token_id]
 
@@ -225,8 +236,10 @@ class ConversationCancellationRegistry:
             is currently registered.
         """
         token: CancellationToken | None = self._tokens.get((user_id, conversation_id))
+
         if token is None:
             return False
+
         token.cancel()
         return True
 
@@ -249,5 +262,6 @@ class ConversationCancellationRegistry:
             ``None``.
         """
         key: tuple[int, str] = (user_id, conversation_id)
+
         if self._tokens.get(key) is token:
             del self._tokens[key]

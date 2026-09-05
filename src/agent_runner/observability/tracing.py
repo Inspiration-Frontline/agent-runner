@@ -44,6 +44,7 @@ def _hex_trace_id(span_context: trace.SpanContext) -> str:
     Returns:
         Formatted a valid OpenTelemetry trace ID as lowercase W3C hexadecimal text.
     """
+
     return format(span_context.trace_id, "032x") if span_context.is_valid else ""
 
 
@@ -56,6 +57,7 @@ def _hex_span_id(span_context: trace.SpanContext) -> str:
     Returns:
         Formatted a valid OpenTelemetry span ID as lowercase hexadecimal text.
     """
+
     return format(span_context.span_id, "016x") if span_context.is_valid else ""
 
 
@@ -70,6 +72,7 @@ def trace_json(value: Any, max_chars: int) -> str:
         Serialized trace content with recursive secret redaction and a hard size limit.
     """
     normalized: Any = _sanitize_trace_value(value, depth=0)
+
     if isinstance(normalized, str):
         serialized: str = normalized
     else:
@@ -80,10 +83,13 @@ def trace_json(value: Any, max_chars: int) -> str:
             sort_keys=True,
             default=str,
         )
+
     if len(serialized) <= max_chars:
         return serialized
+
     suffix: str = f"...[truncated {len(serialized) - max_chars} chars]"
     prefix_length: int = max(0, max_chars - len(suffix))
+
     return f"{serialized[:prefix_length]}{suffix}"
 
 
@@ -97,16 +103,22 @@ def _sanitize_trace_value(value: Any, *, depth: int) -> Any:
     Returns:
         Bounded, recursively redacted value safe for optional span capture.
     """
+
     if depth >= _MAX_DEPTH:
         return "[MAX_DEPTH]"
+
     if value is None or isinstance(value, bool | int | float):
         return value
+
     if isinstance(value, Enum):
         return value.value
+
     if isinstance(value, str):
         return _sanitize_trace_string(value, depth=depth)
+
     if isinstance(value, bytes):
         return f"[BINARY {len(value)} bytes]"
+
     if isinstance(value, Mapping):
         return {
             str(key): _REDACTED if _is_sensitive_key(str(key)) else _sanitize_trace_value(item, depth=depth + 1)
@@ -114,10 +126,13 @@ def _sanitize_trace_value(value: Any, *, depth: int) -> Any:
         }
     if isinstance(value, Sequence):
         return [_sanitize_trace_value(item, depth=depth + 1) for item in value]
+
     if hasattr(value, "model_dump"):
         return _sanitize_trace_value(value.model_dump(mode="json"), depth=depth + 1)
+
     if is_dataclass(value) and not isinstance(value, type):
         return _sanitize_trace_value(asdict(value), depth=depth + 1)
+
     return str(value)
 
 
@@ -132,12 +147,15 @@ def _sanitize_trace_string(value: str, *, depth: int) -> Any:
         Parsed JSON-looking strings so nested sensitive keys receive the same redaction policy.
     """
     stripped: str = value.strip()
+
     if not stripped or stripped[0] not in "[{":
         return value
+
     try:
         parsed: Any = json.loads(stripped)
     except json.JSONDecodeError:
         return value
+
     return _sanitize_trace_value(parsed, depth=depth + 1)
 
 
@@ -182,6 +200,7 @@ class Span:
         Returns:
             Lowercase hexadecimal ID of this span.
         """
+
         return _hex_span_id(self._otel_span.get_span_context())
 
     @property
@@ -191,6 +210,7 @@ class Span:
         Returns:
             Lowercase hexadecimal trace ID shared by this span tree.
         """
+
         return _hex_trace_id(self._otel_span.get_span_context())
 
     def set_attribute(self, key: str, value: Any) -> None:
@@ -200,6 +220,7 @@ class Span:
             key: Low-cardinality OpenTelemetry attribute key.
             value: Candidate value to validate, normalize, or serialize.
         """
+
         if value is not None:
             self._otel_span.set_attribute(key, value)
 
@@ -233,6 +254,7 @@ class Span:
                 yield self
             except BaseException as error:
                 self.record_exception(error)
+
                 raise
 
     def end(self) -> None:
@@ -284,6 +306,7 @@ class Tracer:
             Active span facade that is ended after the context exits.
         """
         wrapped: Span = self.start_span(name, attributes, parent_context=parent_context, kind=kind)
+
         try:
             with wrapped.activate():
                 yield wrapped
@@ -319,6 +342,7 @@ class Tracer:
             kind=kind,
             attributes=attributes,
         )
+
         return Span(otel_span, name, parent_id)
 
 
@@ -350,8 +374,10 @@ class TracingManager:
             resource=Resource.create({"service.name": service_name}),
             sampler=ParentBased(TraceIdRatioBased(sampling_ratio)),
         )
+
         if enabled and endpoint:
             self._configure_exporter(endpoint)
+
         self.tracer = Tracer(service_name, self._provider)
 
     def _configure_exporter(self, endpoint: str) -> None:
@@ -360,6 +386,7 @@ class TracingManager:
         Args:
             endpoint: OTLP endpoint to configure for trace export.
         """
+
         try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
@@ -374,6 +401,7 @@ class TracingManager:
 
     def shutdown(self) -> None:
         """Flush and stop the provider owned by this application instance."""
+
         try:
             self._provider.shutdown()
         except Exception:
@@ -386,6 +414,7 @@ def current_trace_id() -> str:
     Returns:
         Active context trace ID, or an empty string outside a span.
     """
+
     return _hex_trace_id(trace.get_current_span().get_span_context())
 
 
@@ -395,6 +424,7 @@ def current_span_id() -> str:
     Returns:
         Active context span ID, or an empty string outside a span.
     """
+
     return _hex_span_id(trace.get_current_span().get_span_context())
 
 
@@ -407,6 +437,7 @@ def extract_trace_context(headers: Mapping[str, str]) -> Context:
     Returns:
         Extracted W3C traceparent metadata from inbound headers.
     """
+
     return propagate.extract(carrier=headers)
 
 
@@ -428,6 +459,7 @@ def attach_trace_context(trace_context: Context) -> Token[Context]:
     Returns:
         Context token required to detach the attached context.
     """
+
     return context.attach(trace_context)
 
 

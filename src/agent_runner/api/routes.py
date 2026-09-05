@@ -30,8 +30,10 @@ def get_trusted_user_id(x_user_id: str | None) -> int:
     Returns:
         Authenticated numeric user identifier.
     """
+
     if x_user_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is required.")
+
     try:
         user_id: int = int(x_user_id)
     except ValueError as error:
@@ -39,8 +41,10 @@ def get_trusted_user_id(x_user_id: str | None) -> int:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Trusted user identity is invalid.",
         ) from error
+
     if user_id <= 0:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trusted user identity is invalid.")
+
     return user_id
 
 
@@ -62,11 +66,15 @@ async def cancel_conversation(
     user_id: int = get_trusted_user_id(x_user_id)
     services: ApplicationServices = request.app.state.services
     cancelled: bool = False
+
     for _ in range(10):
         cancelled = services.cancellations.cancel(user_id, cancel_request.conversation_id)
+
         if cancelled:
             break
+
         await asyncio.sleep(0.05)
+
     return CancelConversationResponse(cancelled=cancelled)
 
 
@@ -92,6 +100,7 @@ async def generate_conversation_events(
     Side Effects:
         Records every emitted event, finalizes the request span, and closes the orchestrator.
     """
+
     try:
         with trace.activate():
             async for event in orchestrator.run(conversation_request, user_id, http_request):
@@ -133,12 +142,14 @@ async def stream_conversation_events(
     )
     conversation_tracing: ConversationTracing = ConversationTracing(services.tracing.tracer, settings)
     trace: ConversationTrace = conversation_tracing.start_request(dict(request.headers), conversation_request)
+
     try:
         with trace.activate():
             await orchestrator.acquire_conversation(conversation_request.conversation_id)
     except ConversationBusyError as error:
         trace.finish()
         await orchestrator.close()
+
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "CONVERSATION_BUSY", "message": str(error)},
@@ -147,6 +158,7 @@ async def stream_conversation_events(
     except BaseException:
         trace.finish()
         await orchestrator.close()
+
         raise
 
     return StreamingResponse(
@@ -176,4 +188,5 @@ def create_agent_router() -> APIRouter:
         response_model=CancelConversationResponse,
     )
     router.add_api_route("/chat/stream", stream_conversation_events, methods=["POST"])
+
     return router

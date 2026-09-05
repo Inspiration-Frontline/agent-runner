@@ -44,6 +44,7 @@ class _WebSearchClient:
             Bounded search results with readable page excerpts and source URLs.
         """
         normalized: str = query.strip()
+
         if not normalized:
             raise ValueError("Search query cannot be blank.")
         settings: Settings = get_settings()
@@ -61,6 +62,7 @@ class _WebSearchClient:
             parser.feed(search_response.text)
             parser.close()
             raw_results: list[_SearchResult] = parser.results
+
             if not raw_results:
                 raise ValueError(f"DuckDuckGo returned no results for: {normalized}")
             pages: list[dict[str, object]] = await asyncio.gather(
@@ -68,8 +70,10 @@ class _WebSearchClient:
             )
 
         usable_pages: list[dict[str, object]] = [page for page in pages if page.get("content")]
+
         if not usable_pages:
             raise ValueError("Search succeeded, but no result page produced readable content.")
+
         return {"query": normalized, "results": pages}
 
     async def _fetch_result(
@@ -101,10 +105,12 @@ class _WebSearchClient:
             content: str = parser.get_text()
             item["url"] = fetched_page.final_url
             item["content"] = content or ""
+
             if not item["content"]:
                 item["error"] = "No readable page content was extracted."
         except Exception as error:
             item["error"] = str(error)
+
         return item
 
     async def _safe_get(self, client: httpx.AsyncClient, url: str) -> _FetchedPage:
@@ -119,28 +125,37 @@ class _WebSearchClient:
         """
         settings: Settings = get_settings()
         current_url: str = url
+
         for _ in range(settings.web_fetch_max_redirects + 1):
             await self._require_public_http_url(current_url)
             async with client.stream("GET", current_url) as response:
                 if response.is_redirect:
                     location: str | None = response.headers.get("location")
+
                     if not location:
                         raise ValueError("Page redirect did not include a location.")
+
                     current_url = urljoin(current_url, location)
                     continue
+
                 response.raise_for_status()
                 content_type: str = response.headers.get("content-type", "").lower()
+
                 if "text/html" not in content_type and "text/plain" not in content_type:
                     raise ValueError(f"Unsupported page content type: {content_type or 'unknown'}")
+
                 body: bytearray = bytearray()
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
+
                     if len(body) > settings.web_fetch_max_bytes:
                         raise ValueError("Page exceeded the network safety byte limit.")
+
                 return _FetchedPage(
                     body=body.decode(response.encoding or "utf-8", errors="replace"),
                     final_url=str(response.url),
                 )
+
         raise ValueError("Page exceeded the redirect limit.")
 
     @staticmethod
@@ -151,8 +166,10 @@ class _WebSearchClient:
             url: Absolute HTTP or HTTPS URL to validate or request.
         """
         parsed: ParseResult = urlparse(url)
+
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("Search result URL must use public HTTP or HTTPS.")
+
         port: int = parsed.port or (443 if parsed.scheme == "https" else 80)
         addresses: list[
             tuple[socket.AddressFamily, socket.SocketKind, int, str, tuple[str, int] | tuple[str, int, int, int]]
@@ -161,10 +178,13 @@ class _WebSearchClient:
             port,
             type=socket.SOCK_STREAM,
         )
+
         if not addresses:
             raise ValueError("Search result hostname did not resolve.")
+
         for address in addresses:
             ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(address[4][0])
+
             if not ip.is_global:
                 raise ValueError("Search result resolved to a non-public address.")
 
@@ -179,6 +199,7 @@ async def search_web(query: str) -> dict[str, object]:
     Returns:
         Bounded public-web results with fetched page content and source URLs.
     """
+
     return await _WebSearchClient().search(query)
 
 
@@ -213,6 +234,7 @@ class _DuckDuckGoResultParser(HTMLParser):
         """
         attributes: dict[str, str | None] = dict(attrs)
         classes: set[str] = set((attributes.get("class") or "").split())
+
         if tag == "a" and "result__a" in classes and len(self.results) < self.limit:
             href: str = attributes.get("href") or ""
             parsed: ParseResult = urlparse(href)
@@ -228,6 +250,7 @@ class _DuckDuckGoResultParser(HTMLParser):
         Args:
             tag: HTML element name supplied by the parser callback.
         """
+
         if tag == "a" and self._current is not None and self._capture == "title":
             self._capture = None
         elif tag in {"a", "div"} and self._current is not None and self._capture == "snippet":
@@ -241,6 +264,7 @@ class _DuckDuckGoResultParser(HTMLParser):
         Args:
             data: External configuration payload to validate and normalize.
         """
+
         if self._current is not None and self._capture == "title":
             self._current.title += data
         elif self._current is not None and self._capture == "snippet":
@@ -249,6 +273,7 @@ class _DuckDuckGoResultParser(HTMLParser):
     def close(self) -> None:
         """Flush a partially closed result before releasing parser state."""
         super().close()
+
         if self._current is not None and len(self.results) < self.limit:
             self.results.append(self._current)
             self._current = None
@@ -275,6 +300,7 @@ class _VisibleTextParser(HTMLParser):
             tag: HTML element name supplied by the parser callback.
             attrs: HTML attribute names and values supplied by the parser callback.
         """
+
         if tag in {"script", "style", "noscript", "svg"}:
             self._ignored_depth += 1
 
@@ -284,6 +310,7 @@ class _VisibleTextParser(HTMLParser):
         Args:
             tag: HTML element name supplied by the parser callback.
         """
+
         if tag in {"script", "style", "noscript", "svg"} and self._ignored_depth:
             self._ignored_depth -= 1
 
@@ -293,8 +320,10 @@ class _VisibleTextParser(HTMLParser):
         Args:
             data: External configuration payload to validate and normalize.
         """
+
         if not self._ignored_depth:
             normalized: str = " ".join(data.split())
+
             if normalized:
                 self._parts.append(normalized)
 

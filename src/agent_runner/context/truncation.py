@@ -40,6 +40,7 @@ class TokenBudget:
         Returns:
             int: Number of tokens still available for use.
         """
+
         return max(0, self.max_tokens - self.used_tokens)
 
     def can_fit(self, tokens: int) -> bool:
@@ -52,6 +53,7 @@ class TokenBudget:
         Returns:
             bool: True if tokens can fit, False otherwise.
         """
+
         return self.used_tokens + tokens <= self.max_tokens
 
     def use(self, tokens: int) -> None:
@@ -92,6 +94,7 @@ class TokenBudgetManager:
         Returns:
             TokenBudget: A new token budget instance.
         """
+
         return TokenBudget(max_tokens=self.max_tokens)
 
     @staticmethod
@@ -107,6 +110,7 @@ class TokenBudgetManager:
         Returns:
             int: Estimated number of tokens.
         """
+
         return len(text) // 4
 
     def truncate_messages(
@@ -126,6 +130,7 @@ class TokenBudgetManager:
         Returns:
             Messages that fit within the budget, preserving their concrete type.
         """
+
         if truncation_strategy == "sliding_window":
             return self._sliding_window_truncation(messages, budget)
         elif truncation_strategy == "importance":
@@ -152,6 +157,7 @@ class TokenBudgetManager:
 
         for message in reversed(messages):
             message_tokens: int = self.estimate_tokens(message.content)
+
             if total_tokens + message_tokens <= budget.remaining_tokens:
                 truncated.insert(0, message)
                 total_tokens += message_tokens
@@ -174,4 +180,5 @@ class TokenBudgetManager:
         Returns:
             Messages retained by the importance strategy.
         """
+
         return self._sliding_window_truncation(messages, budget)

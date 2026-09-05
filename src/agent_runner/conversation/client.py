@@ -68,6 +68,7 @@ class ConversationManagerClient:
         """
         headers: dict[str, str] = {}
         inject_trace_context(headers)
+
         return list(headers.items())
 
     async def get_round_history(self, user_id: int, conversation_id: str) -> GetConversationRoundHistoryResponse:
@@ -84,11 +85,10 @@ class ConversationManagerClient:
             GetConversationRoundHistoryRequest(user_id=user_id, conversation_id=conversation_id),
             metadata=self._get_trace_metadata(),
         )
+
         return cast(GetConversationRoundHistoryResponse, response)
 
-    async def delete_rounds(
-        self, user_id: int, conversation_id: str, round_numbers: list[int]
-    ) -> DeleteRoundsResponse:
+    async def delete_rounds(self, user_id: int, conversation_id: str, round_numbers: list[int]) -> DeleteRoundsResponse:
         """Tombstone one retryable active Round suffix through the internal mutation boundary.
 
         Args:
@@ -99,6 +99,7 @@ class ConversationManagerClient:
         Returns:
             Typed deletion response containing deleted numbers or a business rejection.
         """
+
         response: Any = await self._service.delete_rounds(
             DeleteRoundsRequest(
                 user_id=user_id,
@@ -108,6 +109,7 @@ class ConversationManagerClient:
             timeout=10.0,
             metadata=self._get_trace_metadata(),
         )
+
         return cast(DeleteRoundsResponse, response)
 
     async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
@@ -119,9 +121,11 @@ class ConversationManagerClient:
         Returns:
             Domain response envelope; validation conflicts are data, while transport failures raise.
         """
+
         response: Any = await self._service.save_conversation_round(
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
+
         return cast(SaveConversationRoundResponse, response)
 
     async def create_round_checkpoint(
@@ -135,14 +139,14 @@ class ConversationManagerClient:
         Returns:
             Typed checkpoint response containing the committed revision or a business error.
         """
+
         response: Any = await self._service.create_conversation_round_checkpoint(
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
+
         return cast(CreateConversationRoundCheckpointResponse, response)
 
-    async def append_round_progress(
-        self, request: AppendConversationRoundProgressRequest
-    ) -> AppendConversationRoundProgressResponse:
+    async def append_round_progress(self, request: AppendConversationRoundProgressRequest) -> AppendConversationRoundProgressResponse:
         """Append one immutable Turn/progress mutation to an existing checkpoint.
 
         Args:
@@ -151,9 +155,11 @@ class ConversationManagerClient:
         Returns:
             Typed progress response containing the committed revision or a business error.
         """
+
         response: Any = await self._service.append_conversation_round_progress(
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
+
         return cast(AppendConversationRoundProgressResponse, response)
 
     async def finalize_round(self, request: FinalizeConversationRoundRequest) -> FinalizeConversationRoundResponse:
@@ -165,9 +171,11 @@ class ConversationManagerClient:
         Returns:
             Typed finalization response containing the committed revision or a business error.
         """
+
         response: Any = await self._service.finalize_conversation_round(
             request, timeout=10.0, metadata=self._get_trace_metadata()
         )
+
         return cast(FinalizeConversationRoundResponse, response)
 
     async def prepare_files(
@@ -201,6 +209,7 @@ class ConversationManagerClient:
             timeout=10.0,
             metadata=self._get_trace_metadata(),
         )
+
         return cast(PrepareConversationFilesResponse, response)
 
     async def get_model_context(
@@ -225,6 +234,7 @@ class ConversationManagerClient:
             ),
             metadata=self._get_trace_metadata(),
         )
+
         return cast(GetConversationReplayResponse, response)
 
     async def prepare_references(
@@ -252,6 +262,7 @@ class ConversationManagerClient:
             timeout=10.0,
             metadata=self._get_trace_metadata(),
         )
+
         return cast(PrepareConversationReferencesResponse, response)
 
     async def close(self) -> None:

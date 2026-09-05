@@ -39,8 +39,11 @@ class FullAccessServerPolicy:
         Returns:
             An allow decision or a bounded reason suitable for diagnostics.
         """
+
         if not server.profile.enabled:
             return McpPolicyDecision(False, "MCP server is disabled")
+
         if tool_name in server.profile.disabled_tools:
             return McpPolicyDecision(False, "MCP tool is disabled")
+
         return McpPolicyDecision(True)

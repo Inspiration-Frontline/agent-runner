@@ -44,4 +44,5 @@ class ApplicationServices:
         Returns:
             Latest Nacos-over-file settings snapshot for a new request.
         """
+
         return self.configuration.get_settings()

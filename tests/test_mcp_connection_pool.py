@@ -39,6 +39,7 @@ async def test_pool_reuses_a_returned_exclusive_connection() -> None:
     async def create() -> PooledMcpConnection:
         connection = PooledMcpConnection(key, SimpleNamespace(), FakeManager(), 0)  # type: ignore[arg-type]
         created.append(connection)
+
         return connection
 
     first = await pool.borrow(key, pool_settings(), create)
@@ -79,6 +80,7 @@ async def test_pool_evicts_idle_connections_before_creating_a_replacement() -> N
     async def create() -> PooledMcpConnection:
         manager = FakeManager()
         managers.append(manager)
+
         return PooledMcpConnection(key, SimpleNamespace(), manager, 0)  # type: ignore[arg-type]
 
     first = await pool.borrow(key, pool_settings(idle_timeout=0.001), create)
@@ -100,6 +102,7 @@ async def test_pool_evicts_a_transport_failed_connection_on_return() -> None:
     async def create() -> PooledMcpConnection:
         manager = FakeManager()
         managers.append(manager)
+
         return PooledMcpConnection(key, SimpleNamespace(), manager, 0)  # type: ignore[arg-type]
 
     first = await pool.borrow(key, pool_settings(), create)
@@ -164,10 +167,12 @@ async def test_transport_cleanup_survives_repeated_request_cancellation() -> Non
     async def cleanup() -> None:
         nonlocal cleanup_cancelled
         cleanup_started.set()
+
         try:
             await allow_cleanup.wait()
         except asyncio.CancelledError:
             cleanup_cancelled = True
+
             raise
 
     finalizer = asyncio.create_task(_await_cancellation_safe_cleanup(cleanup()))
@@ -205,6 +210,7 @@ async def test_transport_owner_cleans_up_in_its_connect_task_after_background_ca
     manager = TaskAffineMcpConnectionManager(cast(MCPServerStreamableHttp, fake_server), 1.0)
     await manager.__aenter__()
     owner_task = manager._owner_task
+
     if owner_task is None:
         raise AssertionError("MCP owner task was not created")
 
@@ -225,6 +231,7 @@ async def test_transport_owner_finishes_cleanup_after_connection_failure() -> No
 
         async def connect(self) -> None:
             self.owner_task = asyncio.current_task()
+
             raise ConnectionError("fixture unavailable")
 
         async def cleanup(self) -> None:

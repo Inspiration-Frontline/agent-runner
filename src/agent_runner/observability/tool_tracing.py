@@ -36,6 +36,7 @@ class ToolCallTrace:
         """
         self._span.set_attribute("tool.status", status)
         self._span.set_attribute("error.type", error_type)
+
         if self._settings.otel_capture_content:
             self._span.set_attribute(
                 "gen_ai.tool.call.result",

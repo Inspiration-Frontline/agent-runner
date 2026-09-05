@@ -105,6 +105,7 @@ class MetricsCollector:
         Returns:
             Rendered only this application instance's Prometheus registry.
         """
+
         return generate_latest(self._registry)
 
     async def collect_http_metrics(
@@ -124,6 +125,7 @@ class MetricsCollector:
         start_time: float = time.monotonic()
         endpoint: str = request.url.path
         self._active_requests.labels(endpoint=endpoint).inc()
+
         try:
             response: Response = await call_next(request)
             self.record_request(
@@ -132,6 +134,7 @@ class MetricsCollector:
                 status=response.status_code,
                 latency=time.monotonic() - start_time,
             )
+
             return response
         finally:
             self._active_requests.labels(endpoint=endpoint).dec()

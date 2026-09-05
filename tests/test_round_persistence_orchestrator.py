@@ -64,6 +64,7 @@ class FakeConversationClient:
 
     async def save_round(self, request: SaveConversationRoundRequest) -> SaveConversationRoundResponse:
         self.saved_request = request
+
         return SaveConversationRoundResponse(
             base=ResponseBase(
                 code=0 if self.save_success else 500,
@@ -88,6 +89,7 @@ class CheckpointConversationClient(FakeConversationClient):
 
     async def finalize_round(self, request: FinalizeConversationRoundRequest) -> FinalizeConversationRoundResponse:
         self.finalize_request = request
+
         return FinalizeConversationRoundResponse(
             base=ResponseBase(code=0, success=True),
             data=ConversationRoundMutationResult(committed_revision=1),
@@ -108,6 +110,7 @@ class ConcurrentRevisionConversationClient(CheckpointConversationClient):
         assert request.expected_revision == 0
         self.dispatch_started.set()
         await self.release_dispatch.wait()
+
         return AppendConversationRoundProgressResponse(
             base=ResponseBase(code=0, success=True),
             data=ConversationRoundMutationResult(committed_revision=1),
@@ -116,6 +119,7 @@ class ConcurrentRevisionConversationClient(CheckpointConversationClient):
     async def finalize_round(self, request: FinalizeConversationRoundRequest) -> FinalizeConversationRoundResponse:
         self.finalize_request = request
         success = request.expected_revision == 1
+
         return FinalizeConversationRoundResponse(
             base=ResponseBase(code=0 if success else 409, success=success, message="" if success else "stale revision"),
             data=ConversationRoundMutationResult(committed_revision=2) if success else None,
@@ -329,6 +333,7 @@ def test_public_request_forbids_user_and_agent_identity() -> None:
         ConversationRequest.model_validate(fields)
     except ValueError:
         return
+
     raise AssertionError("Identity fields must not be accepted from the public request body.")
 
 
@@ -337,6 +342,7 @@ def test_public_request_rejects_blank_messages() -> None:
         ConversationRequest(conversation_id="conv_persistence", message="   ")
     except ValueError:
         return
+
     raise AssertionError("Blank messages must be rejected before model execution.")
 
 
@@ -357,4 +363,5 @@ def _orchestrator(save_success: bool) -> tuple[RuntimeOrchestrator, FakeConversa
     harness.cancellation_registry = ConversationCancellationRegistry()
     harness._lock_acquired = False
     harness._terminal_round_persisted = False
+
     return orchestrator, client, lock

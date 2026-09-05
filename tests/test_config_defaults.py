@@ -203,6 +203,7 @@ async def test_nacos_sdk_logging_is_disabled_at_the_application_boundary(monkeyp
 
     async def create_config_service(client_config: ClientConfig) -> FakeNacosClient:
         captured_configs.append(client_config)
+
         return FakeNacosClient()
 
     monkeypatch.setattr("agent_runner.nacos_config.NacosConfigService.create_config_service", create_config_service)

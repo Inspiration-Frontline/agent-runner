@@ -61,6 +61,7 @@ class LifecycleManager:
         Args:
             request_id: ID of the request to unregister.
         """
+
         if request_id in self._active_requests:
             del self._active_requests[request_id]
             logger.info(f"Request unregistered: {request_id}")
@@ -72,6 +73,7 @@ class LifecycleManager:
         Returns:
             list[RequestLifecycle]: List of all active requests.
         """
+
         return list(self._active_requests.values())
 
     def get_request(self, request_id: str) -> RequestLifecycle | None:
@@ -84,6 +86,7 @@ class LifecycleManager:
         Returns:
             RequestLifecycle | None: The lifecycle if found, None otherwise.
         """
+
         return self._active_requests.get(request_id)
 
     @asynccontextmanager
@@ -101,13 +104,16 @@ class LifecycleManager:
             RequestLifecycle: The lifecycle for use within the scope.
         """
         self.register(lifecycle)
+
         try:
             yield lifecycle
         except asyncio.CancelledError:
             logger.info(f"Request cancelled: {lifecycle.request_id}")
+
             raise
         except Exception as e:
             logger.exception(f"Request failed: {lifecycle.request_id}, error: {e}")
+
             raise
         finally:
             self.unregister(lifecycle.request_id)

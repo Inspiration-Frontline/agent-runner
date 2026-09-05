@@ -39,6 +39,7 @@ class McpTracedOperations:
         """
         with self._tracer.span("mcp.discovery") as span:
             span.set_attribute("mcp.server.id", server_id)
+
             return await operation()
 
     async def dispatch(
@@ -66,6 +67,7 @@ class McpTracedOperations:
             span.set_attribute("mcp.server.id", server_id)
             span.set_attribute("mcp.tool.name", tool_name)
             span.set_attribute("mcp.dispatch.attempt_id", attempt_id)
+
             return await operation()
 
     async def record_result(
@@ -98,6 +100,8 @@ class McpTracedOperations:
             span.set_attribute("mcp.tool.name", tool_name)
             span.set_attribute("mcp.dispatch.attempt_id", attempt_id)
             span.set_attribute("mcp.result.state", state)
+
             if error_type:
                 span.set_attribute("error.type", error_type)
+
             return await operation()

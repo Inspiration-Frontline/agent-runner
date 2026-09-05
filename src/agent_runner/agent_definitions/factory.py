@@ -66,6 +66,7 @@ class AgentFactory:
         unknown_servers: list[str] = [
             binding.server_id for binding in agent.mcp_servers if not self._mcp_catalog.contains(binding.server_id)
         ]
+
         if unknown_servers:
             raise ValueError(f"Agent references unknown MCP servers: {', '.join(unknown_servers)}")
 
@@ -97,8 +98,10 @@ class AgentFactory:
 
         if model:
             agent.model = model
+
         if temperature is not None:
             agent.temperature = temperature
+
         if max_output_tokens is not None:
             agent.max_output_tokens = max_output_tokens
 
@@ -114,6 +117,7 @@ class AgentFactory:
         Returns:
             AgentDefinition | None: The agent instance if found, None otherwise.
         """
+
         return self._agent_registry.get(agent_id)
 
     def remove_agent(self, agent_id: int) -> None:
@@ -123,5 +127,6 @@ class AgentFactory:
         Args:
             agent_id: The unique identifier of the agent to remove.
         """
+
         if agent_id in self._agent_registry:
             del self._agent_registry[agent_id]

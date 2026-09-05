@@ -59,10 +59,13 @@ class McpServerProfile(BaseModel):
             Validated non-HTTP transports and literal URL credentials before the server is used.
         """
         parsed: SplitResult = urlsplit(value)
+
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("MCP Streamable HTTP URL must use http or https")
+
         if parsed.username or parsed.password:
             raise ValueError("MCP URL must not contain literal credentials")
+
         return validate_secret_template(value)
 
     @field_validator("headers")
@@ -79,11 +82,15 @@ class McpServerProfile(BaseModel):
         normalized: dict[str, str] = {}
         for name, header_value in value.items():
             clean_name: str = name.strip()
+
             if not clean_name or any(char in clean_name for char in "\r\n:"):
                 raise ValueError("MCP header name is invalid")
+
             if any(char in header_value for char in "\r\n"):
                 raise ValueError("MCP header value is invalid")
+
             normalized[clean_name] = validate_secret_template(header_value, require_reference=True)
+
         return normalized
 
     @model_validator(mode="after")
@@ -93,10 +100,13 @@ class McpServerProfile(BaseModel):
         Returns:
             Validated unsupported Policy and implicit URL credentials before connection setup.
         """
+
         if self.policy != "FULL_ACCESS":
             raise ValueError("Currently only FULL_ACCESS is supported.")
+
         if has_secret_reference(self.url) and not self.allow_url_secret:
             raise ValueError("MCP URL Secret references require allow_url_secret=true")
+
         return self
 
 
@@ -120,10 +130,12 @@ class McpServerCatalogDocument(BaseModel):
         Returns:
             Validated process-launch profiles because this runner supports remote Streamable HTTP only.
         """
+
         if isinstance(value, dict):
             for server_id, profile in value.items():
                 if isinstance(profile, dict) and "command" in profile:
                     raise ValueError(f"MCP server {server_id} uses process transport; Streamable HTTP is required")
+
         return value
 
 
@@ -173,6 +185,7 @@ class McpServerCatalog:
         Returns:
             Catalog loaded from the file, with Secret references unresolved.
         """
+
         payload: Any = json.loads(path.read_text(encoding="utf-8-sig"))
         return cls(McpServerCatalogDocument.model_validate(payload), secrets)
 
@@ -187,6 +200,7 @@ class McpServerCatalog:
         Returns:
             Catalog loaded from the JSON payload, with Secret references unresolved.
         """
+
         return cls(McpServerCatalogDocument.model_validate_json(payload), secrets)
 
     @classmethod
@@ -196,6 +210,7 @@ class McpServerCatalog:
         Returns:
             Empty catalog with no external MCP server declarations.
         """
+
         return cls(McpServerCatalogDocument.model_validate({"mcpServers": {}}))
 
     def contains(self, server_id: str) -> bool:
@@ -207,6 +222,7 @@ class McpServerCatalog:
         Returns:
             ``True`` when the catalog declares the requested server ID.
         """
+
         return server_id in self._profiles
 
     def resolve(self, server_id: str) -> ResolvedMcpServer:
@@ -219,8 +235,10 @@ class McpServerCatalog:
             resolve one enabled server's secret templates immediately before SDK connection setup.
         """
         profile: McpServerProfile | None = self._profiles.get(server_id)
+
         if profile is None:
             raise ValueError(f"Unknown MCP server: {server_id}")
+
         snapshot: McpSecretSnapshot = self._secrets.get_snapshot()
         template_resolver: SecretTemplateResolver = SecretTemplateResolver(snapshot)
         url: str = template_resolver.resolve(profile.url)

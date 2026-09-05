@@ -17,6 +17,7 @@ async def get_current_weather(location: str) -> dict[str, object]:
         Requested current weather for a city or place using Open-Meteo.
     """
     normalized: str = location.strip()
+
     if not normalized:
         raise ValueError("Location cannot be blank.")
 
@@ -28,6 +29,7 @@ async def get_current_weather(location: str) -> dict[str, object]:
         )
         geocoding.raise_for_status()
         matches: list[Any] = geocoding.json().get("results") or []
+
         if not matches:
             raise ValueError(f"No weather location matched: {normalized}")
         place: dict[str, Any] = matches[0]
@@ -43,6 +45,7 @@ async def get_current_weather(location: str) -> dict[str, object]:
         )
         forecast.raise_for_status()
         weather: dict[str, Any] = forecast.json()
+
     return {
         "location": {
             "name": place.get("name"),

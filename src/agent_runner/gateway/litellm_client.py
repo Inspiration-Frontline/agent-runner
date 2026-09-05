@@ -103,18 +103,18 @@ class LiteLLMModelFactory:
             ConnectionError: If a connection cannot be established within the configured timeout.
         """
         parsed_url: SplitResult = urlsplit(self.base_url)
+
         if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname is None:
             raise ValueError("LiteLLM base URL must contain an HTTP(S) scheme and host.")
 
         port: int = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
         writer: asyncio.StreamWriter
+
         try:
             async with asyncio.timeout(self.connect_timeout_seconds):
                 _, writer = await asyncio.open_connection(parsed_url.hostname, port)
         except (OSError, TimeoutError) as error:
-            raise ConnectionError(
-                f"LiteLLM gateway is unavailable at {parsed_url.hostname}:{port}."
-            ) from error
+            raise ConnectionError(f"LiteLLM gateway is unavailable at {parsed_url.hostname}:{port}.") from error
 
         writer.close()
         with suppress(OSError):
@@ -138,6 +138,7 @@ class LiteLLMModelFactory:
             base_url=self.base_url,
             api_key=self.api_key,
         )
+
         return TracedModel(delegate, normalized_model, self._settings, self._tracer)
 
     def _normalize_model(self, model: str) -> str:
@@ -150,10 +151,12 @@ class LiteLLMModelFactory:
             Model identifier with an explicit provider prefix when one was not supplied.
         """
         provider_prefix: str = model.split("/", 1)[0].lower()
+
         if provider_prefix in self.KNOWN_PROVIDER_PREFIXES:
             return model
 
         logger.debug("Treating bare model %s as OpenAI-compatible LiteLLM proxy model.", model)
+
         return f"{self.DEFAULT_PROVIDER_PREFIX}{model}"
 
     async def close(self) -> None:

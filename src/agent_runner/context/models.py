@@ -29,6 +29,7 @@ class UserProfile:
         Returns:
             A typed profile with empty and null values omitted.
         """
+
         return cls(
             tuple(
                 ProfileAttribute(name=str(name), value=str(value))

@@ -37,6 +37,7 @@ async def get_debug_config(request: Request) -> DebugConfigResponse:
     """
     services: ApplicationServices = request.app.state.services
     settings: Settings = services.get_settings()
+
     return DebugConfigResponse(
         lite_llm_base_url=settings.lite_llm_base_url,
         agent_config_center_url=settings.agent_config_center_url,
@@ -64,4 +65,5 @@ def create_debug_router() -> APIRouter:
         methods=["GET"],
         response_model=DebugConfigResponse,
     )
+
     return router

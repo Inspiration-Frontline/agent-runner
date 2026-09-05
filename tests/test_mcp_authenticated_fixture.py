@@ -11,10 +11,12 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 def load_fixture_module() -> ModuleType:
     path = Path(__file__).parent / "integration" / "mcp_streamable_http_fixture.py"
     spec = importlib.util.spec_from_file_location("mcp_streamable_http_fixture", path)
+
     if spec is None or spec.loader is None:
         raise RuntimeError("Could not load MCP fixture module")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+
     return module
 
 
@@ -24,8 +26,10 @@ async def invoke(app: ASGIApp, headers: dict[str, str], query_string: str = "") 
 
     async def receive() -> Message:
         nonlocal received
+
         if not received:
             received = True
+
             return {"type": "http.request", "body": b"", "more_body": False}
         return {"type": "http.disconnect"}
 
@@ -50,6 +54,7 @@ async def invoke(app: ASGIApp, headers: dict[str, str], query_string: str = "") 
     await app(scope, receive, send)
     status = next(cast(int, item["status"]) for item in sent if item["type"] == "http.response.start")
     body = b"".join(cast(bytes, item.get("body", b"")) for item in sent if item["type"] == "http.response.body")
+
     return status, body
 
 
@@ -62,6 +67,7 @@ def build_middleware(**requirement_values: Any) -> ASGIApp:
         await send({"type": "http.response.body", "body": b""})
 
     middleware_factory = cast(Callable[[ASGIApp, Any], ASGIApp], module.StaticCredentialMiddleware)
+
     return middleware_factory(accepted, requirement)
 
 

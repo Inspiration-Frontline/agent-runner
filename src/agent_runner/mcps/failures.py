@@ -98,6 +98,7 @@ def mcp_failure(code: McpFailureCode) -> McpFailure:
     Returns:
         Immutable failure metadata for the supplied stable code.
     """
+
     return _FAILURES[code]
 
 
@@ -111,18 +112,25 @@ def classify_mcp_failure(error: BaseException) -> McpFailure:
         Classified nested SDK/HTTP failures without inspecting credential-bearing messages.
     """
     errors: tuple[BaseException, ...] = tuple(_walk_exceptions(error))
+
     if any(isinstance(item, McpSecretUnavailableError) for item in errors):
         return mcp_failure(McpFailureCode.SECRET_MISSING)
+
     if any(_has_http_status(item, 401) for item in errors):
         return mcp_failure(McpFailureCode.AUTHENTICATION_REJECTED)
+
     if any(_has_http_status(item, 403) for item in errors):
         return mcp_failure(McpFailureCode.AUTHORIZATION_DENIED)
+
     if any(isinstance(item, (httpx.TimeoutException, TimeoutError)) for item in errors):
         return mcp_failure(McpFailureCode.TIMEOUT)
+
     if any(isinstance(item, (httpx.TransportError, ConnectionError)) for item in errors):
         return mcp_failure(McpFailureCode.CONNECTION_FAILED)
+
     if any(isinstance(item, (McpError, UserError)) for item in errors):
         return mcp_failure(McpFailureCode.PROTOCOL_FAILED)
+
     return mcp_failure(McpFailureCode.UNKNOWN)
 
 
@@ -138,18 +146,24 @@ def _walk_exceptions(error: BaseException) -> list[BaseException]:
     pending: list[BaseException] = [error]
     visited: set[int] = set()
     flattened: list[BaseException] = []
+
     while pending:
         current: BaseException = pending.pop()
+
         if id(current) in visited:
             continue
         visited.add(id(current))
         flattened.append(current)
+
         if isinstance(current, BaseExceptionGroup):
             pending.extend(current.exceptions)
+
         if current.__cause__ is not None:
             pending.append(current.__cause__)
+
         if current.__context__ is not None:
             pending.append(current.__context__)
+
     return flattened
 
 
@@ -163,4 +177,5 @@ def _has_http_status(error: BaseException, expected_status: int) -> bool:
     Returns:
         ``True`` when the exception is an HTTP error with the expected status code.
     """
+
     return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == expected_status

@@ -20,6 +20,7 @@ def get_epoch_millis() -> int:
     Returns:
         Current wall-clock epoch timestamp in milliseconds.
     """
+
     return time_ns() // 1_000_000
 
 
@@ -162,23 +163,28 @@ class ToolExecutionCollector:
         """
         with self._tracing.trace_call(definition, tool_call_id, arguments_json) as trace:
             start_time: int = get_epoch_millis()
+
             try:
                 if cancellation_token is not None and cancellation_token.is_cancelled():
                     raise asyncio.CancelledError("Tool execution cancelled")
+
                 if definition.function_tool is None:
                     raise ValueError(f"Tool has no SDK FunctionTool: {definition.tool_key}")
+
                 result: Any = await definition.function_tool.on_invoke_tool(tool_context, arguments_json)
                 result_content: str = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
                 self._record_execution(
                     tool_call_id, definition, arguments_json, "COMPLETED", result_content, "", start_time
                 )
                 trace.record_result("COMPLETED", result_content)
+
                 return result_content
             except asyncio.CancelledError:
                 self._record_execution(
                     tool_call_id, definition, arguments_json, "CANCELLED", "", "Generation cancelled.", start_time
                 )
                 trace.record_result("CANCELLED", "Generation cancelled.")
+
                 raise
             except Exception as error:
                 # A Tool failure becomes a model-visible result so sibling calls can continue.
@@ -193,6 +199,7 @@ class ToolExecutionCollector:
                     tool_call_id, definition, arguments_json, "FAILED", result_content, error_message, start_time
                 )
                 trace.record_result("FAILED", result_content, type(error).__name__)
+
                 return result_content
 
     def _record_execution(
@@ -272,6 +279,7 @@ class ToolExecutionCollector:
         Returns:
             Captured execution or ``None`` while a handler has not produced an outcome.
         """
+
         return self._executions.get(tool_call_id)
 
     def list_executions(self) -> list[CapturedToolExecution]:
@@ -280,6 +288,7 @@ class ToolExecutionCollector:
         Returns:
             Snapshot list of terminal Tool executions.
         """
+
         return list(self._executions.values())
 
     def list_calls(self) -> list[CapturedToolCall]:
@@ -288,4 +297,5 @@ class ToolExecutionCollector:
         Returns:
             Snapshot list used to synthesize missing cancelled/failed outcomes.
         """
+
         return list(self._calls.values())

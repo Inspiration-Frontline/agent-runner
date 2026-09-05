@@ -42,18 +42,24 @@ class ProfileAdapter:
         Returns:
             UserProfile: Normalized profile data, or an empty profile if retrieval fails.
         """
+
         try:
             response: httpx.Response = await self.client.get(f"{self.base_url}/api/v1/profile/{user_id}")
+
             if response.status_code == 200:
                 payload: Any = response.json()
+
                 if isinstance(payload, Mapping):
                     return UserProfile.from_mapping(payload)
                 logger.warning("Profile service returned a non-object payload for user %s", user_id)
+
                 return UserProfile()
             logger.warning(f"Failed to retrieve profile for user {user_id}: {response.status_code}")
+
             return UserProfile()
         except Exception:
             logger.exception(f"Error retrieving profile for user {user_id}")
+
             return UserProfile()
 
     async def update(self, user_id: int, profile_data: UserProfile) -> bool:
@@ -67,11 +73,13 @@ class ProfileAdapter:
         Returns:
             bool: True if update succeeded, False otherwise.
         """
+
         try:
             response: httpx.Response = await self.client.patch(
                 f"{self.base_url}/api/v1/profile/{user_id}",
                 json={attribute.name: attribute.value for attribute in profile_data.attributes},
             )
+
             return response.status_code == 200
         except Exception:
             logger.exception(f"Error updating profile for user {user_id}")

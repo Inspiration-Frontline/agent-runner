@@ -26,6 +26,7 @@ def is_image_detail(value: str) -> TypeIs[ImageDetail]:
     Returns:
         ``True`` when the value is a supported provider image detail.
     """
+
     return value in _IMAGE_DETAILS
 
 
@@ -136,6 +137,7 @@ def message_to_capture(message: Message) -> CapturedMessage:
     Returns:
         convert runtime input into a typed durable capture value.
     """
+
     return CapturedMessage(
         role=message.role,
         content=message.content,
@@ -155,8 +157,10 @@ def captured_message_to_dict(message: CapturedMessage) -> dict[str, object]:
         Serialized a typed capture only at the raw JSON persistence boundary.
     """
     content: str | list[dict[str, object]] = message.content
+
     if message.capture_content:
         content = []
+
         for part in message.capture_content:
             if isinstance(part, CaptureTextPart):
                 content.append({"type": "text", "text": part.text})
@@ -184,8 +188,10 @@ def captured_message_to_dict(message: CapturedMessage) -> dict[str, object]:
             }
             for tool_call in message.tool_calls
         ]
+
     if message.tool_call_id:
         captured["tool_call_id"] = message.tool_call_id
+
     return captured
 
 
@@ -198,6 +204,7 @@ def message_to_capture_dict(message: Message) -> dict[str, object]:
     Returns:
         JSON-compatible mapping for callers that explicitly cross a serialization boundary.
     """
+
     return captured_message_to_dict(message_to_capture(message))
 
 
@@ -305,10 +312,12 @@ class ContextBuilder:
         )
 
         user_profile: UserProfile = UserProfile()
+
         if agent_config.memory_policy.profile:
             user_profile = await self.profile_adapter.retrieve(user_id)
 
         rag_chunks: list[RagChunk] = []
+
         if agent_config.memory_policy.rag:
             rag_chunks = await self.rag_adapter.retrieve(
                 query=current_message.content,
@@ -321,6 +330,7 @@ class ContextBuilder:
             user_profile=user_profile,
             rag_chunks=rag_chunks,
         )
+
         if additional_system_instruction:
             system_prompt += "\n\n" + additional_system_instruction
 
@@ -352,6 +362,7 @@ class ContextBuilder:
         Returns:
             list[Message]: Messages in chronological order, or an empty list for a new Conversation.
         """
+
         if not conversation_id:
             return []
 

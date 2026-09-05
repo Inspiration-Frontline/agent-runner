@@ -41,12 +41,16 @@ def _delay_definition(
         Args:
             value: Value returned by the test Tool.
         """
+
         if timeline is not None:
             timeline.append((tool_key, "start", asyncio.get_running_loop().time()))
+
         try:
             await asyncio.sleep(delay)
+
             if fails:
                 raise ValueError(f"failed:{value}")
+
             return {"value": value}
         finally:
             if timeline is not None:
@@ -56,6 +60,7 @@ def _delay_definition(
         name_override=tool_key.replace(".", "_"),
         failure_error_function=None,
     )(execute)
+
     return ToolDefinition.from_function_tool(tool_key, sdk_tool)
 
 
@@ -77,6 +82,7 @@ async def _execute_builtin(tool_key: str, arguments: dict[str, object]) -> dict[
         _tool_context(definition.tool_name, "test-call", arguments_json),
         arguments_json,
     )
+
     return cast(dict[str, Any], result)
 
 
@@ -218,6 +224,7 @@ async def test_web_search_parses_duckduckgo_and_keeps_partial_page_failures(
     async def fetch_result(_self: object, _client: object, result: _SearchResult) -> dict[str, object]:
         content = "Readable A" if result.title.strip() == "A title" else ""
         error = "" if content else "page failed"
+
         return {
             "title": result.title,
             "url": result.url,
@@ -423,4 +430,5 @@ class _GetOnlyClient:
 
     async def get(self, url: str, params: dict[str, object] | None = None) -> object:
         self.calls.append((url, params))
+
         return self.responses.pop(0)

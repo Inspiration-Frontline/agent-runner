@@ -34,11 +34,13 @@ from agent_runner.observability.logging import ExternalMcpCredentialFilter
 def status_error(status_code: int, secret: str) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", f"https://example.test/mcp?api_key={secret}")
     response = httpx.Response(status_code, request=request)
+
     return httpx.HTTPStatusError("credential-bearing request failed", request=request, response=response)
 
 
 def test_classifies_nested_authentication_failures_without_rendering_request() -> None:
     secret = "never-observable-auth-secret"
+
     try:
         raise status_error(401, secret)
     except httpx.HTTPStatusError as cause:
@@ -192,6 +194,7 @@ class ConcurrentBorrowProbe:
         """
         del recorder, tracker
         self.started_ids.append(binding.server_id)
+
         if len(self.started_ids) == self.expected_count:
             self.release.set()
 
@@ -203,6 +206,7 @@ class ConcurrentBorrowProbe:
             McpFailureCode.CONNECTION_FAILED,
             "MCP server is unavailable.",
         )
+
         return McpServerBorrowResult(diagnostic, None)
 
 
@@ -210,6 +214,7 @@ def rejecting_runtime(secret: str, status_code: int) -> SdkMcpRuntime:
     catalog = McpServerCatalog.from_json('{"mcpServers":{"fixture":{"url":"https://example.test/mcp"}}}')
     wrapped = UserError("SDK failed")
     wrapped.__cause__ = ExceptionGroup("connect", [status_error(status_code, secret)])
+
     return SdkMcpRuntime(
         catalog,
         connection_pool=RejectingPool(wrapped),  # type: ignore[arg-type]
@@ -285,6 +290,7 @@ async def test_manager_enter_failure_is_not_cleaned_up_twice(monkeypatch: pytest
 
         async def __aenter__(self) -> "FailingManager":
             self.cleanup_count += 1
+
             raise ConnectionError("fixture unavailable")
 
         async def cleanup_all(self) -> None:

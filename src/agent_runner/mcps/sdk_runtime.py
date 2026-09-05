@@ -56,14 +56,17 @@ async def _await_cancellation_safe_cleanup(cleanup: Awaitable[object]) -> None:
     """
     cleanup_task: asyncio.Task[object] = asyncio.ensure_future(cleanup)
     cancelled: bool = False
+
     while not cleanup_task.done():
         try:
             await asyncio.shield(cleanup_task)
         except asyncio.CancelledError:
             cancelled = True
     cleanup_error: BaseException | None = cleanup_task.exception()
+
     if cleanup_error is not None:
         raise cleanup_error
+
     if cancelled:
         raise asyncio.CancelledError
 
@@ -142,16 +145,21 @@ class McpSchemaCache:
         Returns:
             Fresh or cached schema snapshot whose expiry has been enforced.
         """
+
         if ttl_seconds <= 0:
             return await loader()
+
         lock: asyncio.Lock = self._locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
             cached: _SchemaCacheEntry | None = self._entries.get(cache_key)
             now: float = monotonic()
+
             if cached is not None and cached.expires_at > now:
                 return list(cached.tools)
+
             tools: list[McpTool] = await loader()
             self._entries[cache_key] = _SchemaCacheEntry(now + ttl_seconds, tuple(tools))
+
             return tools
 
     def invalidate(self, cache_key: str) -> None:
@@ -192,8 +200,10 @@ class DispatchTurnTracker:
         Returns:
             Produced MCP `_meta` fields for a model-selected tool call, when SDK context is present.
         """
+
         if not isinstance(context.run_context, ToolContext):
             return None
+
         return {
             _CALL_ID_META_KEY: context.run_context.tool_call_id,
             _TURN_NUMBER_META_KEY: max(1, self.turn_number),
@@ -294,11 +304,14 @@ class McpDispatchHooks(AgentHooksBase[Any, Agent[Any]]):
             tool: SDK Tool participating in the operation.
             result: Operation result to normalize, trace, or persist.
         """
+
         if not isinstance(context, ToolContext) or self._collector is None:
             return
+
         definition: ToolDefinition | None = self._definitions.get(context.tool_name)
         if definition is None or definition.source_type != ToolSourceType.MCP:
             return
+
         state, reason = self._tracker.outcomes.get(context.tool_call_id, ("FAILED", "Missing MCP dispatch outcome."))
         self._collector.record_external_execution(
             context.tool_call_id,
@@ -393,6 +406,7 @@ class DurableMcpServer(MCPServer):
         Returns:
             Stable Catalog server ID used by the SDK Tool-name prefix.
         """
+
         return self._connection.server.name
 
     @property
@@ -402,6 +416,7 @@ class DurableMcpServer(MCPServer):
         Returns:
             ``True`` when the borrowed transport must be evicted instead of returned to the pool.
         """
+
         return self._transport_failed
 
     async def connect(self) -> None:
@@ -427,6 +442,7 @@ class DurableMcpServer(MCPServer):
         async with self._request_schema_lock:
             if self._request_tools is None:
                 self._request_tools = tuple(await self._discover_tools(run_context, agent))
+
             return list(self._request_tools)
 
     async def _discover_tools(
@@ -443,6 +459,7 @@ class DurableMcpServer(MCPServer):
         Returns:
             Discovered Tool schemas from the cache or a remote ``tools/list`` call.
         """
+
         try:
             return await self._schema_cache.get(
                 self._connection.key.cache_key,
@@ -453,6 +470,7 @@ class DurableMcpServer(MCPServer):
             if classify_mcp_failure(error).transport_failed:
                 self._transport_failed = True
                 self._schema_cache.invalidate(self._connection.key.cache_key)
+
             raise
 
     async def _load_discovered_tools(
@@ -469,6 +487,7 @@ class DurableMcpServer(MCPServer):
         Returns:
             load one remote Tool schema response through the MCP discovery tracing boundary.
         """
+
         return await self._traced_operations.discover(
             self.name,
             partial(self._connection.server.list_tools, run_context, agent),
@@ -493,9 +512,12 @@ class DurableMcpServer(MCPServer):
         outbound_meta: dict[str, Any] = dict(meta or {})
         tool_call_id: str = str(outbound_meta.pop(_CALL_ID_META_KEY, ""))
         turn_number: int = int(outbound_meta.pop(_TURN_NUMBER_META_KEY, 1))
+
         if not tool_call_id:
             raise RuntimeError("SDK MCP invocation is missing its model Tool call ID.")
+
         attempt_id: str = str(uuid4())
+
         if self._recorder is not None:
             await self._recorder.before_dispatch(
                 attempt_id,
@@ -506,6 +528,7 @@ class DurableMcpServer(MCPServer):
                 arguments or {},
             )
         state: str = ""
+
         try:
             result: CallToolResult = await self._traced_operations.dispatch(
                 self.name,
@@ -526,6 +549,7 @@ class DurableMcpServer(MCPServer):
                     None,
                     "Generation cancelled.",
                 )
+
             raise
         except BaseException as error:
             failure: McpFailure = classify_mcp_failure(error)
@@ -533,11 +557,14 @@ class DurableMcpServer(MCPServer):
             self._transport_failed = failure.transport_failed
             await self._record_result(tool_call_id, tool_name, attempt_id, state, failure.public_message, failure.code)
             self._record_execution(tool_call_id, tool_name, arguments or {}, state, None, failure.public_message)
+
             raise
+
         state = "FAILED" if bool(getattr(result, "isError", False)) else "COMPLETED"
         reason: str = "MCP Tool returned an error result." if state == "FAILED" else ""
         await self._record_result(tool_call_id, tool_name, attempt_id, state, reason)
         self._record_execution(tool_call_id, tool_name, arguments or {}, state, result, reason)
+
         return result
 
     async def _record_cancelled_result(self, tool_call_id: str, tool_name: str, attempt_id: str) -> None:
@@ -551,13 +578,16 @@ class DurableMcpServer(MCPServer):
         record_task: asyncio.Task[None] = asyncio.create_task(
             self._record_result(tool_call_id, tool_name, attempt_id, "CANCELLED", "Generation cancelled.")
         )
+
         while not record_task.done():
             try:
                 await asyncio.shield(record_task)
             except asyncio.CancelledError:
                 continue
+
         if record_task.cancelled():
             return
+
         error: BaseException | None = record_task.exception()
         if error is not None:
             raise error
@@ -582,6 +612,7 @@ class DurableMcpServer(MCPServer):
             error_type: Domain error type value used by the operation.
         """
         recorder: DispatchEvidenceRecorder | None = self._recorder
+
         if recorder is not None:
             await self._traced_operations.record_result(
                 self.name,
@@ -592,6 +623,7 @@ class DurableMcpServer(MCPServer):
                 lambda: recorder.after_dispatch(attempt_id, state, reason),
                 error_type,
             )
+
         self._tracker.record_outcome(tool_call_id, state, reason)
 
     def _record_execution(
@@ -615,8 +647,10 @@ class DurableMcpServer(MCPServer):
         """
         collector: ExternalExecutionCollector | None = self._execution_collector
         definition: ToolDefinition | None = self._definitions_by_remote_name.get(tool_name)
+
         if collector is None or definition is None:
             return
+
         collector.record_external_execution(
             tool_call_id,
             definition,
@@ -632,6 +666,7 @@ class DurableMcpServer(MCPServer):
         Returns:
             Prompt descriptors returned by the borrowed transport.
         """
+
         return await self._connection.server.list_prompts()
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
@@ -644,6 +679,7 @@ class DurableMcpServer(MCPServer):
         Returns:
             Prompt content returned by the borrowed transport.
         """
+
         return await self._connection.server.get_prompt(name, arguments)
 
 
@@ -793,25 +829,32 @@ class SdkMcpRuntime:
         tracker: DispatchTurnTracker = DispatchTurnTracker()
         leases: list[DurableMcpServer] = []
         diagnostics: list[McpConnectionDiagnostic] = []
+
         try:
             borrow_results: list[McpServerBorrowResult] = await self._borrow_servers(bindings, recorder, tracker)
+
             for borrow_result in borrow_results:
                 diagnostics.append(borrow_result.diagnostic)
+
                 if borrow_result.server is not None:
                     leases.append(borrow_result.server)
 
             failed_required: list[McpConnectionDiagnostic] = [
                 item for item in diagnostics if item.required and not item.connected
             ]
+
             if failed_required:
                 self._trace_diagnostics(diagnostics)
                 raise RequiredMcpServerUnavailableError(failed_required)
+
             discovery_result: McpServerDiscoveryResult = await self._discover_servers(leases)
             diagnostics = self._merge_discovery_errors(diagnostics, discovery_result.errors)
             failed_required = [item for item in diagnostics if item.required and not item.connected]
             self._trace_diagnostics(diagnostics)
+
             if failed_required:
                 raise RequiredMcpServerUnavailableError(failed_required)
+
             active_servers: tuple[DurableMcpServer, ...] = tuple(item.server for item in discovery_result.servers)
             definitions: tuple[ToolDefinition, ...] = tuple(self._build_definitions(discovery_result.servers))
             yield ActiveMcpSession(active_servers, tuple(diagnostics), definitions, McpDispatchHooks(tracker))
@@ -839,11 +882,8 @@ class SdkMcpRuntime:
         Returns:
             Per-binding borrow results in the same order as ``bindings``.
         """
-        return list(
-            await asyncio.gather(
-                *(self._borrow_server(binding, recorder, tracker) for binding in bindings)
-            )
-        )
+
+        return list(await asyncio.gather(*(self._borrow_server(binding, recorder, tracker) for binding in bindings)))
 
     async def _borrow_server(
         self,
@@ -861,8 +901,10 @@ class SdkMcpRuntime:
         Returns:
             Named preflight result with an optional borrowed server.
         """
+
         try:
             resolved: ResolvedMcpServer = self._catalog.resolve(binding.server_id)
+
             if not resolved.profile.enabled:
                 failure: McpFailure = mcp_failure(McpFailureCode.SERVER_DISABLED)
                 diagnostic: McpConnectionDiagnostic = McpConnectionDiagnostic(
@@ -872,7 +914,9 @@ class SdkMcpRuntime:
                     failure.code,
                     failure.public_message,
                 )
+
                 return McpServerBorrowResult(diagnostic, None)
+
             key: McpConnectionKey = McpConnectionKey.from_resolved(resolved)
             connection: PooledMcpConnection = await self._connection_pool.borrow(
                 key,
@@ -887,6 +931,7 @@ class SdkMcpRuntime:
                 tracker,
                 self._traced_operations,
             )
+
             return McpServerBorrowResult(
                 McpConnectionDiagnostic(binding.server_id, binding.required, True),
                 server,
@@ -908,6 +953,7 @@ class SdkMcpRuntime:
                 failure.code,
                 failure.public_message,
             )
+
             return McpServerBorrowResult(diagnostic, None)
 
     def _pool_settings(self) -> McpConnectionPoolSettings:
@@ -916,6 +962,7 @@ class SdkMcpRuntime:
         Returns:
             Translated the current Nacos-over-file settings snapshot into pool limits.
         """
+
         return McpConnectionPoolSettings(
             max_connections_per_server=self._settings.mcp_pool_max_connections_per_server,
             idle_timeout_seconds=self._settings.mcp_pool_idle_timeout_seconds,
@@ -954,9 +1001,11 @@ class SdkMcpRuntime:
         # propagating an enter failure. Calling cleanup_all() again here can move AnyIO transport
         # teardown onto the request task after the manager's task-affine worker has exited.
         await manager.__aenter__()
+
         if not manager.active_servers:
             await manager.cleanup_all()
             raise RuntimeError(f"MCP server {item.server_id} did not produce an active connection.")
+
         return PooledMcpConnection(key, server, manager, monotonic())
 
     @staticmethod
@@ -1005,6 +1054,7 @@ class SdkMcpRuntime:
         )
         discovered: list[DiscoveredMcpServer] = []
         errors: list[McpServerDiscoveryError] = []
+
         for server, result in zip(servers, results, strict=True):
             if isinstance(result, BaseException):
                 failure: McpFailure = classify_mcp_failure(result)
@@ -1018,6 +1068,7 @@ class SdkMcpRuntime:
                 )
             else:
                 discovered.append(DiscoveredMcpServer(server, tuple(result)))
+
         return McpServerDiscoveryResult(tuple(discovered), tuple(errors))
 
     @staticmethod
@@ -1039,6 +1090,7 @@ class SdkMcpRuntime:
             batches, reserved_names=set()
         )
         definitions: list[ToolDefinition] = []
+
         for server_index, server, tools in batches:
             for tool_index, tool in enumerate(tools):
                 function_tool: FunctionTool = MCPUtil.to_function_tool(
@@ -1054,6 +1106,7 @@ class SdkMcpRuntime:
                         ToolSourceType.MCP,
                     )
                 )
+
         return definitions
 
     @staticmethod
@@ -1064,6 +1117,7 @@ class SdkMcpRuntime:
             diagnostics: Credential-safe MCP connection diagnostics.
         """
         current_span: OtelSpan = trace.get_current_span()
+
         for diagnostic in diagnostics:
             current_span.add_event(
                 "mcp.server.preflight",

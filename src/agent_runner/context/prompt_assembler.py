@@ -45,11 +45,13 @@ class PromptAssembler:
 
         if user_profile:
             profile_section: str = self._format_profile(user_profile)
+
             if profile_section:
                 assembled_prompt += self.profile_section_header + profile_section
 
         if rag_chunks:
             rag_section: str = self._format_rag_chunks(rag_chunks)
+
             if rag_section:
                 assembled_prompt += self.rag_section_header + rag_section
 
@@ -66,10 +68,12 @@ class PromptAssembler:
         Returns:
             str: Formatted profile string, or empty string if no data.
         """
+
         if not profile:
             return ""
 
         lines: list[str] = []
+
         for attribute in profile.attributes:
             lines.append(f"- {attribute.name}: {attribute.value}")
 
@@ -86,10 +90,12 @@ class PromptAssembler:
         Returns:
             str: Formatted RAG chunks string, or empty string if no chunks.
         """
+
         if not chunks:
             return ""
 
         formatted_chunks: list[str] = []
+
         for i, chunk in enumerate(chunks, 1):
             formatted_chunks.append(f"[{i}] (Source: {chunk.source})\n{chunk.content}")
 

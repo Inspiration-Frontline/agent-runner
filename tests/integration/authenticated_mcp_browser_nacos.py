@@ -12,6 +12,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = PROJECT_ROOT / "src"
+
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
@@ -31,16 +32,20 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--optional-secret", default="")
     parser.add_argument("--fixture-port", type=int, default=8766)
     parser.add_argument("--model-port", type=int, default=8767)
+
     return parser.parse_args()
 
 
 def write_backup(path: Path, content: str) -> None:
     """Persist the authoritative snapshot without rendering it to stdout or stderr."""
+
     if not content.strip():
         raise RuntimeError("Nacos agent-runner configuration is empty")
     parsed = yaml.safe_load(content)
+
     if not isinstance(parsed, dict):
         raise RuntimeError("Nacos agent-runner configuration must be a YAML object")
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
@@ -51,6 +56,7 @@ def merge_profile(base: dict[str, Any], profile: dict[str, Any]) -> dict[str, An
     merged["lite_llm"] = profile["lite_llm"]
     merged["mcp"] = profile["mcp"]
     merged["local_agent_config"] = profile["local_agent_config"]
+
     return merged
 
 
@@ -75,6 +81,7 @@ def build_fixture_profile(
             },
         }
     }
+
     return {
         "lite_llm": {
             "base_url": f"http://127.0.0.1:{model_port}/v1",
@@ -104,22 +111,28 @@ async def run() -> None:
     args = parse_arguments()
     loader = NacosConfigLoader.from_settings(Settings())
     await loader.initialize()
+
     try:
         client = loader.config_client
+
         if client is None:
             raise RuntimeError("Nacos configuration client is unavailable")
         parameter = ConfigParam(data_id=loader.data_id, group=loader.group, type="yaml")
+
         if args.operation == "backup":
             content = await client.get_config(parameter)
             write_backup(args.backup, content)
             print(json.dumps({"operation": "backup", "sha256": hashlib.sha256(content.encode()).hexdigest()}))
+
             return
+
         if args.operation == "restore":
             content = args.backup.read_text(encoding="utf-8")
         elif args.operation == "publish-fixture":
             if not args.required_secret and not args.optional_secret:
                 raise RuntimeError("publish-fixture requires at least one explicit Secret value")
             base = yaml.safe_load(args.backup.read_text(encoding="utf-8"))
+
             if not isinstance(base, dict):
                 raise RuntimeError("Nacos backup must be a YAML object")
             content = yaml.safe_dump(
@@ -140,9 +153,11 @@ async def run() -> None:
                 raise RuntimeError("publish requires --profile")
             base = yaml.safe_load(args.backup.read_text(encoding="utf-8"))
             profile = json.loads(args.profile.read_text(encoding="utf-8"))
+
             if not isinstance(base, dict) or not isinstance(profile, dict):
                 raise RuntimeError("Nacos backup and profile must be objects")
             content = yaml.safe_dump(merge_profile(base, profile), allow_unicode=True, sort_keys=False)
+
         if not await client.publish_config(
             ConfigParam(data_id=loader.data_id, group=loader.group, content=content, type="yaml")
         ):

@@ -11,6 +11,7 @@ from authenticated_mcp_acceptance import MutableSecrets, start_fixture
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = PROJECT_ROOT / "src"
+
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
@@ -45,9 +46,11 @@ async def main() -> None:
         )
         runtime = SdkMcpRuntime(catalog, connection_pool=pool, settings=Settings())
         connection = None
+
         try:
             async with runtime.session([MCPServerBinding("fixture", required=True)]) as session:
                 server = session.servers[0]
+
                 if not isinstance(server, DurableMcpServer):
                     raise TypeError("Fixture did not produce a durable MCP server")
                 connection = server._connection
@@ -62,10 +65,13 @@ async def main() -> None:
         finally:
             fixture.stop()
             fixture.assert_logs_redacted((secret,))
+
         if connection is None:
             raise AssertionError("Fixture connection was not created")
+
         if connection.server.exit_stack._exit_callbacks:
             raise AssertionError("MCP server retained async exit callbacks after cleanup")
+
         if loop_errors:
             raise AssertionError(f"Event loop received {len(loop_errors)} cleanup error(s)")
 

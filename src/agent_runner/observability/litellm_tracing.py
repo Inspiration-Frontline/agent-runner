@@ -78,6 +78,7 @@ class TracedModel(Model):
                 response,
                 self._get_argument(traced_arguments.args, traced_arguments.kwargs, "model_settings", 2),
             )
+
             return response
 
     def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
@@ -90,6 +91,7 @@ class TracedModel(Model):
         Returns:
             Stream whose complete network lifetime is covered by ``llm.call``.
         """
+
         return self._stream_response(args, kwargs)
 
     async def _stream_response(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> AsyncIterator[Any]:
@@ -125,6 +127,7 @@ class TracedModel(Model):
         Returns:
             Retry guidance returned by the wrapped SDK model, when available.
         """
+
         return self._delegate.get_retry_advice(request)
 
     async def close(self) -> None:
@@ -137,6 +140,7 @@ class TracedModel(Model):
         Returns:
             build stable low-cardinality attributes shared by streaming and non-streaming calls.
         """
+
         return {
             "gen_ai.operation.name": "chat",
             "gen_ai.request.model": self.model,
@@ -155,9 +159,11 @@ class TracedModel(Model):
         model_input: Any = self._get_argument(args, kwargs, "input", 1)
         system_instructions: Any = self._get_argument(args, kwargs, "system_instructions", 0)
         tools: Any = self._get_argument(args, kwargs, "tools", 3)
+
         if model_settings is not None:
             span.set_attribute("gen_ai.request.max_tokens", getattr(model_settings, "max_tokens", None))
             span.set_attribute("gen_ai.request.temperature", getattr(model_settings, "temperature", None))
+
         if isinstance(tools, Sequence):
             span.set_attribute("gen_ai.request.tool_count", len(tools))
 
@@ -177,12 +183,14 @@ class TracedModel(Model):
             response: Provider, RPC, or HTTP response to inspect.
             model_settings: Effective provider settings for the model request.
         """
+
         if response is None:
             return
         span.set_attribute("gen_ai.response.id", getattr(response, "response_id", None))
         span.set_attribute("gen_ai.response.model", getattr(response, "model", None))
         span.set_attribute("gen_ai.response.status", getattr(response, "status", None))
         usage: Any | None = getattr(response, "usage", None)
+
         if usage is not None:
             span.set_attribute("gen_ai.usage.input_tokens", getattr(usage, "input_tokens", None))
             span.set_attribute("gen_ai.usage.output_tokens", getattr(usage, "output_tokens", None))
@@ -209,13 +217,16 @@ class TracedModel(Model):
         usage: Any | None = getattr(response, "usage", None)
         output_tokens: Any | int = getattr(usage, "output_tokens", 0) if usage is not None else 0
         max_tokens: Any | None = getattr(model_settings, "max_tokens", None)
+
         if max_tokens is not None and output_tokens >= max_tokens:
             return "length"
         output: Any | tuple[()] = getattr(response, "output", ()) or ()
+
         if any(getattr(item, "type", "") in {"function_call", "tool_call"} for item in output):
             return "tool_calls"
         incomplete_details: Any | None = getattr(response, "incomplete_details", None)
         incomplete_reason: Any | None = getattr(incomplete_details, "reason", None)
+
         return str(incomplete_reason or "stop")
 
     @staticmethod
@@ -231,8 +242,10 @@ class TracedModel(Model):
         Returns:
             resolve one provider argument from keyword form first and positional form second.
         """
+
         if name in kwargs:
             return kwargs[name]
+
         return args[index] if len(args) > index else None
 
     @staticmethod
@@ -250,13 +263,18 @@ class TracedModel(Model):
         inject_trace_context(headers)
         traced_kwargs: dict[str, Any] = dict(kwargs)
         model_settings: Any | None = traced_kwargs.get("model_settings")
+
         if model_settings is not None:
             traced_kwargs["model_settings"] = TracedModel._merge_headers(model_settings, headers)
+
             return _TracedModelArguments(args, traced_kwargs)
+
         if len(args) <= 2:
             return _TracedModelArguments(args, traced_kwargs)
+
         traced_args: list[Any] = list(args)
         traced_args[2] = TracedModel._merge_headers(traced_args[2], headers)
+
         return _TracedModelArguments(tuple(traced_args), traced_kwargs)
 
     @staticmethod
@@ -272,4 +290,5 @@ class TracedModel(Model):
         """
         existing_headers: dict[Any, Any] = dict(model_settings.extra_headers or {})
         existing_headers.update(trace_headers)
+
         return replace(model_settings, extra_headers=existing_headers)

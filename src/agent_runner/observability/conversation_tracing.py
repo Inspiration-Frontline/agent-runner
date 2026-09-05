@@ -49,6 +49,7 @@ class ConversationStreamTraceStats:
             event: Typed runtime or SDK event to process.
         """
         self.event_count += 1
+
         if isinstance(event, TokenDeltaEvent):
             self.token_event_count += 1
             self.response_chars += len(event.content or "")
@@ -129,6 +130,7 @@ class ConversationTrace:
         Returns:
             Lowercase W3C trace identifier for the complete Round request.
         """
+
         return self._span.trace_id
 
     def record_event(self, event: object) -> None:
@@ -151,9 +153,11 @@ class ConversationTrace:
 
     def finish(self) -> None:
         """Finalize aggregate stream evidence."""
+
         if self._finished:
             return
         self._finished = True
+
         try:
             self._stats.finish(self._span)
         finally:
@@ -214,4 +218,5 @@ class ConversationTracing:
         )
         conversation_trace: ConversationTrace = ConversationTrace(span)
         span.add_event("conversation.accepted")
+
         return conversation_trace

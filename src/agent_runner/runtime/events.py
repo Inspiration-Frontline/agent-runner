@@ -69,6 +69,7 @@ class RuntimeEvent:
         Returns:
             RuntimeEvent: The newly created event.
         """
+
         return cls(
             event_id=str(uuid4()),
             event_type=event_type,
@@ -119,6 +120,7 @@ class RuntimeEventBus:
             event_type: Type of events to unsubscribe from.
             handler: Handler function to remove.
         """
+
         if handler in self._handlers[event_type]:
             self._handlers[event_type].remove(handler)
 
@@ -130,9 +132,11 @@ class RuntimeEventBus:
             event: The event to publish.
         """
         handlers: list[RuntimeEventHandler] = self._handlers.get(event.event_type, [])
+
         for handler in handlers:
             try:
                 result: None | Awaitable[None] = handler(event)
+
                 if inspect.isawaitable(result):
                     await result
             except Exception:

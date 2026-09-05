@@ -82,8 +82,10 @@ class NacosConfigLoader:
         Initialize the Nacos configuration client.
 
         Creates the NacosConfigService client and sets up configuration listener
+
         for dynamic refresh. This method should be called during application startup.
         """
+
         if not self.enabled:
             logger.info("Nacos configuration is disabled, using local configuration only")
             return
@@ -125,6 +127,7 @@ class NacosConfigLoader:
         Returns:
             dict[str, Any]: The loaded configuration dictionary.
         """
+
         if not self.config_client:
             return {}
 
@@ -135,6 +138,7 @@ class NacosConfigLoader:
             if content:
                 parsed_config: dict[str, Any] = self._parse_and_replace_config(content)
                 logger.debug(f"Loaded configuration from Nacos: {self.data_id}")
+
                 return parsed_config
 
         except Exception as error:
@@ -152,6 +156,7 @@ class NacosConfigLoader:
         This method runs as a background task and updates the cached configuration
         whenever changes are detected in Nacos.
         """
+
         if not self.config_client:
             return
 
@@ -175,6 +180,7 @@ class NacosConfigLoader:
             content: Replacement YAML document, possibly empty when the Data ID is removed.
         """
         logger.info(f"Configuration changed in Nacos: data_id={data_id}, group={group}")
+
         try:
             # An empty callback means the Data ID was cleared or removed. Publishing an empty
             # snapshot revokes cached Secrets instead of retaining credentials that no longer
@@ -192,11 +198,13 @@ class NacosConfigLoader:
         Get the current configuration from cache.
 
         Returns the cached configuration that was loaded from Nacos.
+
         If Nacos is disabled or unavailable, returns an empty dictionary.
 
         Returns:
             dict[str, Any]: The current configuration dictionary.
         """
+
         if not self.enabled:
             return {}
 
@@ -209,6 +217,7 @@ class NacosConfigLoader:
         Returns:
             The latest parsed Nacos document used for synchronous settings reads.
         """
+
         return self._cached_config
 
     @property
@@ -218,6 +227,7 @@ class NacosConfigLoader:
         Returns:
             The monotonic revision assigned to the latest valid Nacos snapshot.
         """
+
         return self._configuration_revision
 
     @staticmethod
@@ -233,6 +243,7 @@ class NacosConfigLoader:
         parsed_config: Any | dict[Any, Any] = yaml.safe_load(content) or {}
         if not isinstance(parsed_config, dict):
             raise ValueError("Nacos configuration root must be a YAML object")
+
         return parsed_config
 
     def _replace_cached_config(self, parsed_config: dict[str, Any]) -> None:
@@ -255,6 +266,7 @@ class NacosConfigLoader:
         """
         parsed_config: dict[str, Any] = self._parse_config(content)
         self._replace_cached_config(parsed_config)
+
         return parsed_config
 
     async def close(self) -> None:
@@ -264,6 +276,7 @@ class NacosConfigLoader:
         This method should be called during application shutdown to properly
         release connections and stop the listener task.
         """
+
         if self._listener_task:
             self._listener_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -291,6 +304,7 @@ class NacosConfigLoader:
         Returns:
             NacosConfigLoader: A new loader configured from application settings.
         """
+
         return NacosConfigLoader(
             enabled=settings.nacos_enabled,
             server_address=settings.nacos_server_address,
@@ -307,6 +321,7 @@ class NacosConfigLoader:
         Create a NacosConfigLoader from environment variables.
 
         Reads Nacos configuration from environment variables with sensible defaults
+
         for local development.
 
         Environment variables:
@@ -321,6 +336,7 @@ class NacosConfigLoader:
         Returns:
             NacosConfigLoader: A new NacosConfigLoader instance configured from environment.
         """
+
         return NacosConfigLoader(
             enabled=os.getenv("NACOS_ENABLED", "false").lower() == "true",
             server_address=os.getenv("NACOS_SERVER_ADDRESS", "127.0.0.1:8848"),

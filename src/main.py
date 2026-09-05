@@ -11,6 +11,7 @@ if __name__ == "__main__":
 
     settings = Settings()
     app = create_app()
+
     if settings.open_browser_on_startup and settings.environment in {"local", "dev"}:
         threading.Thread(
             target=open_docs_when_ready,
@@ -24,6 +25,7 @@ if __name__ == "__main__":
         host=settings.server_host,
         port=settings.server_port,
     )
+
     server = uvicorn.Server(server_config)
     with suppress(KeyboardInterrupt):
         server.run()

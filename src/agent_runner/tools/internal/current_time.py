@@ -14,6 +14,7 @@ async def get_current_time(timezone: str | None) -> dict[str, str | int]:
     Returns:
         Current local time, UTC offset, and Unix timestamp for the requested IANA timezone.
     """
+
     try:
         if timezone:
             now: datetime = datetime.now(ZoneInfo(timezone))
@@ -29,6 +30,7 @@ async def get_current_time(timezone: str | None) -> dict[str, str | int]:
     sign: str = "+" if offset_seconds >= 0 else "-"
     absolute_offset: int = abs(offset_seconds)
     offset_text: str = f"{sign}{absolute_offset // 3600:02d}:{absolute_offset % 3600 // 60:02d}"
+
     return {
         "timezone": timezone_name,
         "local_datetime": now.isoformat(timespec="seconds"),

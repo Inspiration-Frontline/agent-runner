@@ -57,6 +57,7 @@ class McpConnectionKey:
         canonical_headers: str = json.dumps(sorted(server.headers.items()), separators=(",", ":"))
         resolved_credentials: str = f"{server.url}|{canonical_headers}"
         credential_fingerprint: str = hashlib.sha256(resolved_credentials.encode("utf-8")).hexdigest()
+
         return cls(
             server.server_id,
             endpoint_fingerprint,
@@ -71,6 +72,7 @@ class McpConnectionKey:
         Returns:
             Stable cache identifier that never exposes credentials in logs or memory keys.
         """
+
         return f"{self.server_id}:{self.endpoint_fingerprint}:{self.credential_fingerprint}"
 
 
@@ -115,6 +117,7 @@ class TaskAffineMcpConnectionManager:
         Returns:
             Connected server when active; otherwise an empty list.
         """
+
         return [self._server] if self._active else []
 
     async def __aenter__(self) -> "TaskAffineMcpConnectionManager":
@@ -123,10 +126,12 @@ class TaskAffineMcpConnectionManager:
         Returns:
             The initialized MCP server owned by this asyncio task.
         """
+
         if self._owner_task is not None:
             raise RuntimeError("MCP connection manager cannot be entered more than once.")
         self._ready = asyncio.get_running_loop().create_future()
         self._owner_task = asyncio.create_task(self._run(), name=f"mcp-owner-{self._server.name}")
+
         try:
             async with asyncio.timeout(self._connect_timeout_seconds):
                 await asyncio.shield(self._ready)
@@ -134,9 +139,12 @@ class TaskAffineMcpConnectionManager:
             if not self._ready.done():
                 self._owner_task.cancel()
             await self._wait_for_owner()
+
             if self._ready.done() and not self._ready.cancelled():
                 self._ready.exception()
+
             raise
+
         return self
 
     async def cleanup_all(self) -> None:
@@ -144,20 +152,25 @@ class TaskAffineMcpConnectionManager:
         async with self._cleanup_lock:
             self._close_requested.set()
             await self._wait_for_owner()
+
             if self._cleanup_error is not None:
                 raise self._cleanup_error
 
     async def _run(self) -> None:
         """Connect, remain the transport host, and always clean up in this same task."""
         ready: asyncio.Future[None] | None = self._ready
+
         if ready is None:
             raise RuntimeError("MCP connection owner started without a readiness future.")
+
         try:
             connect: Callable[[], Awaitable[None]] = cast(Callable[[], Awaitable[None]], self._server.connect)
             await connect()
             self._active = True
+
             if not ready.done():
                 ready.set_result(None)
+
             await self._close_requested.wait()
         except BaseException as error:
             if not ready.done():
@@ -168,13 +181,16 @@ class TaskAffineMcpConnectionManager:
                 await cleanup()
             except BaseException as error:
                 self._cleanup_error = error
+
             self._active = False
 
     async def _wait_for_owner(self) -> None:
         """Wait through repeated caller cancellation, then preserve cancellation for the caller."""
         owner_task: asyncio.Task[None] | None = self._owner_task
+
         if owner_task is None:
             return
+
         cancelled: bool = False
         while not owner_task.done():
             try:
@@ -182,6 +198,7 @@ class TaskAffineMcpConnectionManager:
             except asyncio.CancelledError:
                 cancelled = True
         owner_task.exception()
+
         if cancelled:
             raise asyncio.CancelledError
 
@@ -269,10 +286,12 @@ class McpConnectionPool:
             RuntimeError: The application pool is closed before the lease can be returned.
         """
         active: bool = await self._activate_key(key)
+
         if not active:
             connection: PooledMcpConnection = await creator()
             connection.borrowed = True
             connection.invalid = True
+
             return connection
 
         # One absolute deadline covers every wake-up, preventing spurious notifications from
@@ -292,17 +311,22 @@ class McpConnectionPool:
                 reusable: PooledMcpConnection | None = next(
                     (item for item in bucket.connections if not item.borrowed and not item.invalid), None
                 )
+
                 if reusable is not None:
                     reusable.borrowed = True
+
                     return reusable
+
                 if len(bucket.connections) + bucket.creating < settings.max_connections_per_server:
                     # Reserve the slot before leaving the lock. Other borrowers include this count
                     # in their capacity check while the actual Streamable HTTP handshake is running.
                     bucket.creating += 1
                     break
                 remaining: float = deadline - monotonic()
+
                 if remaining <= 0:
                     raise TimeoutError(f"Timed out waiting for an MCP connection to {key.server_id}.")
+
                 try:
                     await asyncio.wait_for(bucket.condition.wait(), timeout=remaining)
                 except TimeoutError as error:
@@ -317,6 +341,7 @@ class McpConnectionPool:
             async with bucket.condition:
                 bucket.creating -= 1
                 bucket.condition.notify_all()
+
             raise
 
         # Publish the completed connection atomically. If shutdown won the race, close this late
@@ -324,6 +349,7 @@ class McpConnectionPool:
         async with bucket.condition:
             bucket.creating -= 1
             active_key: McpConnectionKey | None = self._active_keys.get(key.server_id)
+
             if self._closed:
                 connection.invalid = True
             elif active_key != key:
@@ -333,14 +359,19 @@ class McpConnectionPool:
                 connection.borrowed = True
                 connection.invalid = True
                 bucket.condition.notify_all()
+
                 return connection
             else:
                 connection.borrowed = True
                 bucket.connections.append(connection)
                 bucket.condition.notify_all()
+
                 return connection
+
             bucket.condition.notify_all()
+
         await connection.close()
+
         raise RuntimeError("MCP connection pool closed while creating a connection.")
 
     async def release(self, connection: PooledMcpConnection, invalidate: bool = False) -> None:
@@ -355,19 +386,25 @@ class McpConnectionPool:
             invalidate: Whether a transport failure requires immediate pool eviction.
         """
         bucket: _ConnectionBucket | None = self._buckets.get(connection.key)
+
         if bucket is None:
             await connection.close()
             return
+
         should_close: bool = False
         async with bucket.condition:
             connection.borrowed = False
             connection.last_returned_at = monotonic()
             connection.invalid = connection.invalid or invalidate or self._closed
+
             if connection.invalid:
                 if connection in bucket.connections:
                     bucket.connections.remove(connection)
+
                 should_close = True
+
             bucket.condition.notify_all()
+
         if should_close:
             await connection.close()
 
@@ -380,11 +417,13 @@ class McpConnectionPool:
         self._closed = True
         self._active_keys.clear()
         connections: list[PooledMcpConnection] = []
+
         for bucket in self._buckets.values():
             async with bucket.condition:
                 connections.extend(bucket.connections)
                 bucket.connections.clear()
                 bucket.condition.notify_all()
+
         await self._close_all(connections)
 
     async def _activate_key(self, key: McpConnectionKey) -> bool:
@@ -405,32 +444,40 @@ class McpConnectionPool:
         connections_to_close: list[PooledMcpConnection] = []
         async with self._activation_lock:
             active_key: McpConnectionKey | None = self._active_keys.get(key.server_id)
+
             if active_key is not None and key.configuration_revision < active_key.configuration_revision:
                 return False
 
             if active_key == key:
                 if key.configuration_revision > active_key.configuration_revision:
                     self._active_keys[key.server_id] = key
+
                 return True
 
             self._active_keys[key.server_id] = key
             stale_keys: list[McpConnectionKey] = [
                 candidate for candidate in self._buckets if candidate.server_id == key.server_id
             ]
+
             for stale_key in stale_keys:
                 stale_bucket: _ConnectionBucket = self._buckets[stale_key]
                 async with stale_bucket.condition:
                     idle_connections: list[PooledMcpConnection] = []
+
                     for connection in stale_bucket.connections:
                         connection.invalid = True
+
                         if not connection.borrowed:
                             idle_connections.append(connection)
                             connections_to_close.append(connection)
+
                     for connection in idle_connections:
                         stale_bucket.connections.remove(connection)
+
                     stale_bucket.condition.notify_all()
 
         await self._close_all(connections_to_close)
+
         return True
 
     async def _take_expired(self, bucket: _ConnectionBucket, idle_timeout_seconds: float) -> list[PooledMcpConnection]:
@@ -450,8 +497,10 @@ class McpConnectionPool:
                 for item in bucket.connections
                 if not item.borrowed and now - item.last_returned_at >= idle_timeout_seconds
             ]
+
             for item in expired:
                 bucket.connections.remove(item)
+
             return expired
 
     @staticmethod
@@ -464,6 +513,7 @@ class McpConnectionPool:
         results: list[None | BaseException] = await asyncio.gather(
             *(connection.close() for connection in connections), return_exceptions=True
         )
+
         for result in results:
             if isinstance(result, BaseException):
                 continue

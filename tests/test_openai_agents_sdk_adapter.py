@@ -25,6 +25,7 @@ class DummyModelFactory:
 
     def create_model(self, model: str) -> str:
         self.created_models.append(model)
+
         return f"model:{model}"
 
     async def close(self) -> None:
@@ -238,6 +239,7 @@ async def test_run_registers_configured_tools_on_sdk_agent(monkeypatch: pytest.M
     @function_tool
     def echo_value(value: str) -> str:
         """Return the supplied value."""
+
         return value
 
     registry = ToolRegistry()
@@ -257,6 +259,7 @@ async def test_run_registers_configured_tools_on_sdk_agent(monkeypatch: pytest.M
 
     async def fake_run(**kwargs: Any) -> SimpleNamespace:
         captured.update(kwargs)
+
         return SimpleNamespace(final_output="done")
 
     monkeypatch.setattr(Runner, "run", fake_run)

@@ -18,6 +18,7 @@ import httpx
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = PROJECT_ROOT / "src"
+
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
@@ -82,14 +83,17 @@ class FixtureProcess:
 
     def stop(self) -> None:
         """Terminate only this fixture's process tree, then wait for every child to exit."""
+
         if self.pid_path.exists():
             server_pid = int(self.pid_path.read_text(encoding="ascii"))
             with contextlib.suppress(OSError):
                 os.kill(server_pid, signal.SIGTERM)
+
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.process.terminate()
+
             try:
                 self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
@@ -99,6 +103,7 @@ class FixtureProcess:
     def assert_logs_redacted(self, secrets: tuple[str, ...]) -> None:
         """Reject any synthetic credential found in fixture stdout or stderr."""
         logs = self.stdout_path.read_text(encoding="utf-8") + self.stderr_path.read_text(encoding="utf-8")
+
         for secret in secrets:
             if secret in logs:
                 raise AssertionError("Fixture logs exposed a synthetic credential")
@@ -108,6 +113,7 @@ def reserve_port() -> int:
     """Reserve an ephemeral loopback port long enough to select a fixture endpoint."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
+
         return int(listener.getsockname()[1])
 
 
@@ -137,6 +143,7 @@ def start_fixture(
         "--pid-file",
         str(pid_path),
     ]
+
     if header_name:
         args.extend(["--auth-header-name", header_name])
     else:
@@ -151,6 +158,7 @@ def start_fixture(
         )
     fixture = FixtureProcess(process, port, credential_file, stdout_path, stderr_path, pid_path)
     wait_for_fixture(fixture, expected_credential, header_name, query_name)
+
     return fixture
 
 
@@ -162,6 +170,7 @@ def wait_for_fixture(
 ) -> None:
     """Wait until authenticated traffic reaches the FastMCP application boundary."""
     deadline = time.monotonic() + 20
+
     while time.monotonic() < deadline:
         if fixture.process.poll() is not None:
             raise RuntimeError("Authenticated MCP fixture exited during startup")
@@ -174,11 +183,13 @@ def wait_for_fixture(
                 params=params,
                 timeout=0.5,
             )
+
             if response.status_code not in {401, 403}:
                 return
         except httpx.HTTPError:
             pass
         time.sleep(0.1)
+
     raise TimeoutError("Authenticated MCP fixture startup timed out")
 
 
@@ -194,6 +205,7 @@ def catalog_json(port: int, form: str) -> str:
         profile["allow_url_secret"] = True
     else:
         raise ValueError("Unsupported fixture authentication form")
+
     return json.dumps({"mcpServers": {"fixture": profile}}, separators=(",", ":"))
 
 
@@ -207,8 +219,10 @@ async def call_tool(
     """Call one fixture Tool through the production request-scoped SDK adapter."""
     async with runtime.session([MCPServerBinding("fixture", required=True)], recorder) as session:
         server = session.servers[0]
+
         if not isinstance(server, DurableMcpServer):
             raise TypeError("Acceptance session did not produce the durable MCP adapter")
+
         return await server.call_tool(
             tool_name,
             arguments,
@@ -234,9 +248,11 @@ async def verify_static_form(
         connection_pool=pool,
         settings=Settings(),
     )
+
     try:
         recorder = EvidenceRecorder()
         result = await call_tool(runtime, recorder, "echo", {"value": form}, f"{form}-success")
+
         if bool(getattr(result, "isError", False)) or recorder.states != ["DISPATCHING", "COMPLETED"]:
             raise AssertionError(f"{form} authenticated Tool call did not complete")
 
@@ -244,6 +260,7 @@ async def verify_static_form(
         expected_code = (
             McpFailureCode.AUTHENTICATION_REJECTED if rejection_status == 401 else McpFailureCode.AUTHORIZATION_DENIED
         )
+
         try:
             async with runtime.session([MCPServerBinding("fixture", required=True)]):
                 raise AssertionError("Wrong required credential yielded an active session")
@@ -256,6 +273,7 @@ async def verify_static_form(
                 raise AssertionError("Optional wrong credential did not degrade with a typed diagnostic")
 
         secrets.replace({}, 3)
+
         try:
             async with runtime.session([MCPServerBinding("fixture", required=True)]):
                 raise AssertionError("Missing required credential yielded an active session")
@@ -267,6 +285,7 @@ async def verify_static_form(
         concurrent_recorder = EvidenceRecorder()
         async with runtime.session([MCPServerBinding("fixture", required=True)], concurrent_recorder) as session:
             server = session.servers[0]
+
             if not isinstance(server, DurableMcpServer):
                 raise TypeError("Concurrent acceptance session did not produce a durable adapter")
             results = await asyncio.gather(
@@ -281,8 +300,10 @@ async def verify_static_form(
                     {"agentbreaker/tool_call_id": f"{form}-parallel-2", "agentbreaker/turn_number": 1},
                 ),
             )
+
         if any(bool(getattr(item, "isError", False)) for item in results):
             raise AssertionError("Concurrent authenticated Tool calls failed")
+
         return {"form": form, "success": True, "rejection_status": rejection_status}
     finally:
         await pool.close()
@@ -304,9 +325,11 @@ async def verify_in_flight_rotation(directory: Path) -> dict[str, Any]:
     )
     old_recorder = EvidenceRecorder()
     new_recorder = EvidenceRecorder()
+
     try:
         async with runtime.session([MCPServerBinding("fixture", required=True)], old_recorder) as old_session:
             old_server = old_session.servers[0]
+
             if not isinstance(old_server, DurableMcpServer):
                 raise TypeError("Rotation session did not produce a durable adapter")
             old_call = asyncio.create_task(
@@ -321,12 +344,16 @@ async def verify_in_flight_rotation(directory: Path) -> dict[str, Any]:
             secrets.replace({"FIXTURE_KEY": new_secret}, 2)
             new_result = await call_tool(runtime, new_recorder, "echo", {"value": "rotated"}, "rotation-new")
             old_result = await old_call
+
         if bool(getattr(old_result, "isError", False)) or bool(getattr(new_result, "isError", False)):
             raise AssertionError("Credential rotation interrupted a Tool call")
+
         if old_recorder.states != ["DISPATCHING", "COMPLETED"]:
             raise AssertionError("Old in-flight call did not preserve terminal evidence")
+
         if new_recorder.states != ["DISPATCHING", "COMPLETED"]:
             raise AssertionError("Rotated request did not use the new credential")
+
         return {"rotation": True, "old_in_flight_completed": True, "new_request_completed": True}
     finally:
         await pool.close()

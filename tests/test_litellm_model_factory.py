@@ -91,6 +91,7 @@ class HeaderCapturingModel:
 
     async def get_response(self, *args: Any, **kwargs: Any) -> object:
         self.model_settings = kwargs.get("model_settings") or args[2]
+
         return object()
 
 

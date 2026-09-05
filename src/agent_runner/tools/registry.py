@@ -81,6 +81,7 @@ class ToolDefinition:
         Returns:
             Added AgentBreaker identity/provenance to an SDK-generated FunctionTool definition.
         """
+
         return cls(
             tool_key=tool_key,
             tool_name=function_tool.name,
@@ -125,10 +126,12 @@ class ToolRegistry:
             tool: The tool definition to register.
         """
         existing: ToolDefinition | None = self._tools.get(tool.tool_key)
+
         if existing and existing.source_type in self._tools_by_source:
             self._tools_by_source[existing.source_type].remove(tool.tool_key)
 
         self._tools[tool.tool_key] = tool
+
         if tool.source_type in self._tools_by_source:
             self._tools_by_source[tool.source_type].append(tool.tool_key)
         logger.info("Registered Tool: %s (source: %s)", tool.tool_key, tool.source_type)
@@ -140,8 +143,10 @@ class ToolRegistry:
         Args:
             tool_key: Globally unique key of the Tool to unregister.
         """
+
         if tool_key in self._tools:
             tool: ToolDefinition = self._tools[tool_key]
+
             if tool.source_type in self._tools_by_source:
                 self._tools_by_source[tool.source_type].remove(tool_key)
             del self._tools[tool_key]
@@ -157,6 +162,7 @@ class ToolRegistry:
         Returns:
             ToolDefinition | None: The tool if found, None otherwise.
         """
+
         return self._tools.get(tool_key)
 
     def get_all(self) -> list[ToolDefinition]:
@@ -166,6 +172,7 @@ class ToolRegistry:
         Returns:
             list[ToolDefinition]: List of all tool definitions.
         """
+
         return list(self._tools.values())
 
     def get_by_source(self, source_type: ToolSourceType) -> list[ToolDefinition]:
@@ -179,6 +186,7 @@ class ToolRegistry:
             list[ToolDefinition]: List of tools of the specified type.
         """
         tool_keys: list[str] = self._tools_by_source.get(source_type, [])
+
         return [self._tools[key] for key in tool_keys if key in self._tools]
 
     def get_tool_specs(self, tool_keys: list[str]) -> list[dict[str, Any]]:
@@ -192,8 +200,10 @@ class ToolRegistry:
             list[dict[str, Any]]: List of tool specifications in OpenAI format.
         """
         specs: list[dict[str, Any]] = []
+
         for tool_key in tool_keys:
             tool: ToolDefinition | None = self.get(tool_key)
+
             if tool:
                 specs.append(
                     {
@@ -206,4 +216,5 @@ class ToolRegistry:
                         },
                     }
                 )
+
         return specs

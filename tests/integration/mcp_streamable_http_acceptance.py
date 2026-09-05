@@ -19,15 +19,18 @@ CASE_MESSAGES = {
 
 def wait_for_health(base_url: str, process: subprocess.Popen[str]) -> None:
     deadline = time.monotonic() + 30
+
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"Runner exited with code {process.returncode}")
+
         try:
             if httpx.get(f"{base_url}/health", timeout=1).status_code == 200:
                 return
         except httpx.HTTPError:
             pass
         time.sleep(0.25)
+
     raise TimeoutError("Runner health check timed out")
 
 
@@ -59,6 +62,7 @@ def run_case(
             stderr=stderr,
             text=True,
         )
+
         try:
             wait_for_health(runner_url, process)
             with httpx.Client(base_url=gateway_url, timeout=180) as client:
@@ -85,6 +89,7 @@ def run_case(
             sse_path.write_text(sse, encoding="utf-8")
             events = [json.loads(line.removeprefix("data: ")) for line in sse.splitlines() if line.startswith("data: ")]
             time.sleep(4)
+
             return {
                 "agent_id": agent_id,
                 "conversation_id": conversation_id,
@@ -103,6 +108,7 @@ def run_case(
             }
         finally:
             process.terminate()
+
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:

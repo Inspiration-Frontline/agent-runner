@@ -184,18 +184,23 @@ class ConversationDispatchRecorder(DispatchEvidenceRecorder):
                 self._client.append_round_progress(request)
             )
             cancellation_received: bool = False
+
             while not append_task.done():
                 try:
                     await asyncio.shield(append_task)
                 except asyncio.CancelledError:
                     if append_task.cancelled():
                         raise
+
                     cancellation_received = True
+
             response: AppendConversationRoundProgressResponse = await append_task
             if response.base is None or not response.base.success or response.data is None:
                 message: str = response.base.message if response.base is not None else "Dispatch checkpoint failed."
                 raise RuntimeError(message)
+
             self._state.checkpoint_revision = response.data.committed_revision
+
         if cancellation_received:
             raise asyncio.CancelledError
 
@@ -209,12 +214,14 @@ class ConversationDispatchRecorder(DispatchEvidenceRecorder):
         Returns:
             Redacted value with authentication-bearing keys replaced recursively.
         """
+
         if isinstance(value, dict):
             return {
                 key: "[REDACTED]" if cls._is_secret_key(str(key)) else cls._redact(item) for key, item in value.items()
             }
         if isinstance(value, list):
             return [cls._redact(item) for item in value]
+
         return value
 
     @staticmethod

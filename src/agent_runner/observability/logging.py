@@ -20,10 +20,13 @@ def _add_trace_context(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str,
 
     trace_id: str = current_trace_id()
     span_id: str = current_span_id()
+
     if trace_id:
         event_dict["trace_id"] = trace_id
+
     if span_id:
         event_dict["span_id"] = span_id
+
     return event_dict
 
 
@@ -40,6 +43,7 @@ def setup_logging(level: int = logging.INFO, json_format: bool = False) -> None:
         stream=sys.stdout,
         level=level,
     )
+
     for handler in logging.getLogger().handlers:
         handler.addFilter(RequestContextFilter())
         handler.addFilter(ExternalMcpCredentialFilter())
@@ -79,6 +83,7 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     Returns:
         structlog.stdlib.BoundLogger: A bound logger instance.
     """
+
     return cast(structlog.stdlib.BoundLogger, structlog.get_logger(name))
 
 
@@ -101,6 +106,7 @@ class RequestContextFilter(logging.Filter):
 
         record.trace_id = current_trace_id() or "-"
         record.span_id = current_span_id() or "-"
+
         return True
 
 
@@ -129,4 +135,5 @@ class ExternalMcpCredentialFilter(logging.Filter):
         Returns:
             ``True`` when the record may be emitted after filtering.
         """
+
         return not record.name.startswith(self._UNSAFE_LOGGER_PREFIXES)

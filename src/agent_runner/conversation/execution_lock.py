@@ -26,15 +26,19 @@ class ConversationExecutionLock:
     _LEASE_MS = 180_000
     _RENEW_INTERVAL_SECONDS = 30
     _RELEASE_SCRIPT = """
+
 if redis.call('get', KEYS[1]) == ARGV[1] then
   return redis.call('del', KEYS[1])
 end
+
 return 0
 """
     _RENEW_SCRIPT = """
+
 if redis.call('get', KEYS[1]) == ARGV[1] then
   return redis.call('pexpire', KEYS[1], ARGV[2])
 end
+
 return 0
 """
 
@@ -74,6 +78,7 @@ return 0
         key: str = f"agent-runner:execution:{conversation_id}"
         token: str = str(uuid4())
         acquired: bool | str | bytes | None = await self._redis.set(key, token, nx=True, px=self._LEASE_MS)
+
         if not acquired:
             raise ConversationBusyError("Another request is already running for this conversation.")
         self._key = key
@@ -86,23 +91,30 @@ return 0
         Losing the token intentionally stops renewal; a stale worker must not extend a lease after
         Redis has awarded it to another request.
         """
+
         while True:
             await asyncio.sleep(self._RENEW_INTERVAL_SECONDS)
+
             if self._key is None or self._token is None:
                 return
             renewed: object = await self._redis.eval(self._RENEW_SCRIPT, 1, self._key, self._token, self._LEASE_MS)
+
             if renewed != 1:
                 return
 
     async def release(self) -> None:
         """Cancel renewal and release only this instance's token-owned lease."""
+
         if self._renewal_task is not None:
             self._renewal_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._renewal_task
+
             self._renewal_task = None
+
         if self._key is not None and self._token is not None:
             await self._redis.eval(self._RELEASE_SCRIPT, 1, self._key, self._token)
+
         self._key = None
         self._token = None
 
